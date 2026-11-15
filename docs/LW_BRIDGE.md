@@ -13,14 +13,15 @@ when to look.
   stock MiSTer Main) drives an LW-enabled bitstream exactly as before. The window is a second carrier, not a
   replacement.
 - **Opt-in.** Without `MISTER_LW` the framework is not built: `HPS_BUS` stays 46 bits, `CONF_STR` is the stock
-  string byte for byte, and `sys/` elaborates to the stock netlist.
+  string byte for byte, and `sys/` elaborates to the stock netlist. This repository's `Template.qsf` carries the
+  define commented out, so the Template builds stock until it is uncommented.
 
 Status: proof of concept. The register map is stable for this revision; later revisions may add blocks (new
 directory kinds) and use entry word 15. See "Revision and validation" at the end.
 
 ## Adopting it in a core
 
-1. **The define.** In the core's `.qsf`:
+1. **The define.** In the core's `.qsf` (in `Template.qsf` the line is already there, commented out):
 
    ```
    set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
@@ -335,6 +336,11 @@ Re-run it after any `sys/` merge.
 | upstream `e901a9f`, stock | 7,273 | 11,226 | 384,501 | 59 | md5 `0b49f57e…` |
 | this branch, `MISTER_LW` off (upstream core files, this `sys/`) | 7,273 | 11,226 | 384,501 | 59 | md5 `0b49f57e…`, bit-identical |
 | this branch, `MISTER_LW=1`, no SECTOR | 7,768 (+495) | 12,150 (+924) | 450,357 (+65,856) | 68 (+9) | |
+
+The `MISTER_LW=1` row includes the `Template.sv` example. The stock Template leaves `status_in`, `status_set` and
+`joystick_0` unconnected, so Quartus prunes that logic; the example connects them. Of the +924 registers, `hps_io`
+accounts for +261 and `emu` for +132, most of it the example's status and pad logic. A core that already uses those
+ports pays up to about 400 fewer registers than the table shows.
 
 Timing, worst setup slack in ns (hold is positive in every build):
 
