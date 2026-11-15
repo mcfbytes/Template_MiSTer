@@ -36,5 +36,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) h
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_sys_window.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_sector.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_sys_status.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_lane.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_blk_mux.sv ]
 set_global_assignment -name SOURCE_FILE        [file join $::quartus(qip_path) emu_ports.vh ]

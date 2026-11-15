@@ -85,6 +85,9 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=2"
 
+# LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block"); needs MISTER_LW
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"
+
 source sys/sys.tcl
 source sys/sys_analog.tcl
 source files.qip

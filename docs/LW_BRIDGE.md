@@ -4,7 +4,7 @@ An optional extension of `sys/` that gives the HPS a second, memory-mapped path 
 GPO/GPI ("SPI") link that `hps_io` decodes. It lives on the Cyclone V **HPS-to-FPGA lightweight bridge**
 (`lwhps2fpga`, physical `0xFF200000`, 2 MB). The HPS stores pads, OSD pixels and disk blocks as plain 32-bit
 writes, and reads the core's status back-channel and block requests as registers. Two interrupt lines tell it
-when to look.
+when to look. An optional frame lane carries whole link transactions, and their replies, over the same bridge.
 
 - **The core sees nothing new.** Pads land in the same `hps_io` registers (`joystick_0`, ...), blocks arrive as the
   same `sd_ack`/`sd_buff_wr`/`sd_buff_dout` strobes, and the status back-channel is the stock
@@ -46,6 +46,8 @@ directory kinds) and use entry word 15. See "Revision and validation" at the end
 4. **Optional: the SECTOR block**, for a core that reads blocks through an `hps_io` slot ("Hooking the SECTOR block",
    below).
 
+5. **Optional: the frame lane** (`MISTER_LW_LANE`). It needs nothing in the core either: it lives in `sys_top`.
+
 A core that instantiates its own modules on `HPS_BUS` must widen those ports to `[313:0]` under `MISTER_LW`; bits
 45:0 keep their stock meaning.
 
@@ -61,6 +63,7 @@ A core that instantiates its own modules on `HPS_BUS` must widen those ports to 
 | `MISTER_LW_CARD0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0: `hps_io` slot (0-3), DDR image base, image bytes |
 | `MISTER_LW_CARD1_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 1, likewise |
 | `MISTER_LW_CARD_FRAME` | 256 | 32-bit words per save-slot frame (256 = one 1 KB block) |
+| `MISTER_LW_LANE` | absent | with `MISTER_LW`: builds the frame lane (LANE block) and its link front, `lw_link` |
 
 A save slot is declared only when its `_WSRC` macro is set, and needs `MISTER_LW_SECTOR_SLOT` too.
 
@@ -87,10 +90,11 @@ Offsets are from the window start; absolute LW offset = `0x40000` + offset.
 
 | window offset | absolute LW | size | block |
 |---|---|---|---|
-| `0x00000` | `0x40000` | `0x110` | directory: header + 4 entries (to `0x1000`: reads `0xDEADBEEF`) |
+| `0x00000` | `0x40000` | `0x110` | directory: header + 4 entries, or `0x150` and 5 with the lane (to `0x1000`: reads `0xDEADBEEF`) |
 | `0x01000` | `0x41000` | `0x2000` | SECTOR (reads 0 when not built) |
 | `0x03000` | `0x43000` | `0x1000` | SYS |
 | `0x04000` | `0x44000` | `0x2000` | OSDBUF |
+| `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`; otherwise reads `0xDEADBEEF`) |
 | `0x40000` | `0x80000` | `0x40000` | PAD |
 
 ### Directory
@@ -99,7 +103,7 @@ Offsets are from the window start; absolute LW offset = `0x40000` + offset.
 |---|---|---|
 | `0x00` | MAGIC | `0x31535953` ("SYS1") |
 | `0x04` | VERSION | `0x00010000`: major 1 `[31:16]`, minor 0 `[15:0]` |
-| `0x08` | COUNT | 4 |
+| `0x08` | COUNT | 4, or 5 with the lane |
 | `0x0C` | SCRATCH | read/write with `LW_DIAG=1`; 0 otherwise |
 | `0x10 + 0x40*i` | entry *i* | 16 words: 0 kind, 1 version, 2 offset (window-relative), 3 size, 4-14 per kind, 15 reserved (0) |
 
@@ -109,6 +113,7 @@ Offsets are from the window start; absolute LW offset = `0x40000` + offset.
 | 1 | 2 SECTOR | `0x00010001` | `0x1000` / `0x2000` | see SECTOR. All 16 words are 0 when the block is not built |
 | 2 | 3 OSDBUF | `0x00010000` | `0x4000` / `0x2000` | 4: geometry `{height, width}` = `0x00800100` (256 x 128, 1 bpp) |
 | 3 | 4 SYS | `0x00010000` | `0x3000` / `0x1000` | 4: line = pool ordinal 2; 5: CAUSE absolute = `0x43000`; 6: class tag `0x00100000`; 7: causes = `0x1` (STATUS) |
+| 4 | 5 LANE | `0x00010001` | `0x6000` / `0x1000` | see LANE. Present only with `MISTER_LW_LANE` |
 
 A host matches entries by kind, refuses a major it does not know, and checks that every block lies inside the window.
 
@@ -233,6 +238,69 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], slot[3:0], wr, rd}`.
 - A card WRITE is answered by WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`.
 - ABORT, or a core reset mid-frame, zero-fills the rest of the open frame, so the core is never left waiting.
 
+### LANE block (kind 5, "LAN1")
+
+The frame lane carries link transactions over the bridge. The HPS stores a frame (BEGIN, its data words, END),
+and a player on `clk_sys` replays it onto `sys_top`'s link nets, so `hps_io`, `hps_ext`, both `osd` instances and
+`sys_top`'s own command arms each decode one ordinary link transaction. The lane adds no decoder. A frame opened
+with the capture bit also records the link's reply word after each of its strobes, which makes the lane a
+request/reply mailbox for any opcode.
+
+| offset | access | register |
+|---|---|---|
+| `0x00` | W | BEGIN `{capture[18], sel[17:16], op[15:0]}`: opens a frame. sel 0 = UIO, 1 = FPGA (FIO), 2 = OSD on HDMI, 3 = OSD on VGA |
+| `0x04` | W | WORD `[15:0]`: the next data word of the open frame |
+| `0x08` | W | END: commits the frame |
+| `0x0C` | W | RPOP: removes the oldest reply word (ignored when there is none) |
+| `0x10` | R | PLAYED: frames played, free-running 16-bit; compare modulo 2^16 |
+| `0x14` | R | DROPS: frames discarded whole at END because they did not fit, free-running 16-bit |
+| `0x18` | R | ID `0x314E414C` ("LAN1") |
+| `0x1C` | R | RSTAT `{reply_drops[31:16], replies[15:0]}`: reply words dropped on a full reply FIFO (free-running), and waiting |
+| `0x20` | R | RHEAD `[15:0]`: the oldest reply word, 0 when none is waiting. Reading it has no side effect |
+
+Stores must be full words (all four byte enables). Every other offset reads 0.
+
+**Directory entry 4:**
+
+| word | value |
+|---|---|
+| 4-11 | the UIO (sel 0) opcodes verified for write-only replay, PAD's bitmap shape: `0x01`, `0x1C`, `0x1D`, `0x1E`, `0x22`, `0x24`, `0x31`, `0x32`, `0x33`, `0x3B` |
+| 12 | first-word replies the lane stands in for, one byte per opcode: `[7:0]` = 3, the reply of `sys_top`'s `0x20` arm |
+| 13 | `{fifo_depth[31:16] = 1024, strobe_gap[15:0] = 4}` |
+| 14 | `{reply_depth[31:16] = 256, 0}` (minor 1) |
+| 15 | 0: the lane raises no line |
+
+**Frames:**
+- A frame of *n* words needs *n* + 2 FIFO entries, so the longest frame is 1,022 words into an empty FIFO. A stock
+  gamma table (`0x33`, 768 words) fits.
+- A frame is never played before its END is stored. A BEGIN abandons an open frame without counting it; a WORD or
+  END with no frame open is ignored.
+- A frame that would not leave room for its END is discarded whole at END and counted in DROPS. No store waits.
+- **One select per frame.** The link raises both OSD selects for one OSD transaction; on the lane that is two
+  frames, sel 2 then sel 3.
+
+**Playing:**
+- The player starts a frame only after the link's own selects have been low for two `clk_sys` cycles, so it never
+  splits a link transaction.
+- After each strobe it waits `strobe_gap` cycles with `io_wait` and `vs_wait` low, the same terms that hold the
+  link's ack, so `ioctl_wait` and `0x30`'s vsync wait pace the lane as they pace the link.
+- At END it drops the select for two cycles, so every falling-select arm fires (`hps_io`'s RTC and timestamp toggles,
+  the `img_mounted` clear, the OSD enable). On the lane `img_mounted` is high for `strobe_gap + 1` `clk_sys` cycles.
+- **While a frame plays, the link waits.** `lw_link` freezes the link's strobe and ack for the frame plus one
+  cycle. A link word stored meanwhile is held, not lost, and strobes once the frame ends: its ack can take up to
+  `(1 + n) x (strobe_gap + 2) + 4` `clk_sys` cycles for an *n*-word frame. A host that also drives the link must
+  allow for that, or keep long frames for times it is not using the link.
+
+**Replies (the capture bit):**
+- Each strobe of a capture frame records one reply word, the link's `io_dout` (`hps_io`'s, `hps_ext`'s and
+  `sys_top`'s, ORed as the HPS reads them), sampled after the strobe's pacing wait. An *n*-word frame records
+  *n* + 1 replies, the first being the reply to the opcode word. This is the word the HPS would read from the
+  link after each acknowledged word.
+- Replies queue in order across frames in a 256-word FIFO. Read RSTAT, then RHEAD and a store to RPOP per word.
+- Once PLAYED has passed a capture frame, all of that frame's replies are in the FIFO.
+- A reply that finds the FIFO full is dropped and counted in RSTAT; the frame still plays whole.
+- There is no reply line or cause word in this revision: the host polls PLAYED and RSTAT.
+
 ## Hooking the SECTOR block
 
 The block replaces the HPS side of one `hps_io` slot. The core keeps its own reader. `sys/lw_blk_mux.sv` sits
@@ -274,6 +342,10 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
   `clk_sys` below about 50 MHz, the conservative bound; the analysed edge is near 70-100 MHz. A faster core must hold
   `F_REJECT` for `ceil(2 x f_sys / 100 MHz)` cycles, or widen the crossing.
 - **SECTOR FIFO:** dual-clock with Gray pointers. No ratio bound.
+- **LANE:** frames and replies cross in dual-clock FIFOs with Gray pointers that step one entry per update. No
+  ratio bound. PLAYED and the reply-drop count cross as toggles, at most one per `strobe_gap + 5` and per
+  `strobe_gap + 2` `clk_sys` cycles; each toggle must outlast two `clk_100m` periods, which holds below about
+  250 MHz of `clk_sys`.
 - **OSDBUF CTRL:** quasi-static bits through two-flop synchronisers in each `osd`.
   - In this Template, `clk_100m` and the video clocks are in exclusive clock groups (`sys_top.sdc`), so no extra
     constraint is needed.
@@ -295,13 +367,17 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 
 ## Verification
 
-`tb/run.sh` runs the testbench in five arms:
+`tb/run.sh` runs the testbench in six arms:
 - `LW_DIAG=1`;
 - `LW_DIAG=0`;
 - `MENU_CORE`, which checks the header rows;
 - no SECTOR block, the Template's own configuration;
 - the SECTOR block at the default geometry (128-word primary, 256-word save slots): a save-slot frame longer
-  than the primary's completes, and the primary is served after it.
+  than the primary's completes, and the primary is served after it;
+- the frame lane: the whole reference run with every decoder behind `lw_link`, then lane frames against the same
+  frames sent as link words (status, RTC, timestamp, mount, gamma, FIO, both OSDs), the `vs_wait` and
+  `ioctl_wait` holds, a link word raised mid-frame, full-FIFO drops, unended frames, the longest frame, and reply
+  capture (`0x29` word for word against the link, ordering across frames, overflow).
 
 It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image that has it.
 
@@ -360,3 +436,8 @@ Timing, worst setup slack in ns (hold is positive in every build):
 
 A SECTOR build with two save slots elaborates from the macros (synthesis checked the decoded parameters). Its cost is
 not measured here, because the Template has no block reader to keep the feeder's outputs alive.
+
+The frame lane has not been fitted in this Template. Without reply capture, on a larger core, the lane measured
+165-177 ALMs plus 6-7 for `lw_link`, and 2 M10K. Reply capture adds a 256 x 16 FIFO (one M10K) and its pointers;
+that cost is an estimate, not a measurement. With `MISTER_LW_LANE` absent, `sys_top`'s link front is the stock
+one and the window builds no lane.

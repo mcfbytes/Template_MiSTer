@@ -22,6 +22,8 @@
 // Template's own configuration) and checks that the directory, the block and the doorbell are silent.
 // LW_TB_DEFGEOM runs the SECTOR block at the documented default geometry instead (a 128-word primary frame,
 // 256-word save-slot frames): a save-slot frame longer than the primary's must complete.
+// MISTER_LW_LANE adds the frame lane: every decoder then reads the link nets through lw_link, as sys_top wires
+// them, and the lane cases replay frames over LW against the same frames sent as link words.
 // Run: tb/run.sh (Icarus Verilog >= 12).
 
 `timescale 1ns/1ps
@@ -149,11 +151,17 @@ localparam TB_FRAME = 128;
 `else
 localparam TB_FRAME = 588;
 `endif
+`ifdef MISTER_LW_LANE
+localparam TB_LANE = 1;
+`else
+localparam TB_LANE = 0;
+`endif
 
 lw_sys_window #(
 	.SEC_EN(TB_SEC), .SEC_SLOT(8'd1), .SEC_FRAME(TB_FRAME), .BLKSZ(3'd3),
 	.MC_SLOT0(4'd2), .MC_WSRC0(32'h30100000), .MC_EXT0(32'h00020000),
-	.MC_SLOT1(4'd3), .MC_WSRC1(32'h30200000), .MC_EXT1(32'h00020000), .MC_FRAME(10'd256)
+	.MC_SLOT1(4'd3), .MC_WSRC1(32'h30200000), .MC_EXT1(32'h00020000), .MC_FRAME(10'd256),
+	.LANE_EN(TB_LANE)
 ) win
 (
 	.clk(clk),
@@ -162,8 +170,38 @@ lw_sys_window #(
 	.doorbell(doorbell), .sys_irq(sys_irq),
 	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn), .card_up(card_up), .card_dn(card_dn),
 	.st_up(st_up),
-	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl)
+	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl),
+`ifdef MISTER_LW_LANE
+	.lane_busy(io_enable | io_fpga | io_osd), .lane_wait(hps_bus[37] | vs_wait), .lane_dout(hps_bus[15:0]),
+	.lane_own(lane_own), .lane_hold(lane_hold), .lane_sel(lane_sel), .lane_strobe(lane_strobe), .lane_din(lane_din)
+`else
+	.lane_busy(1'b0), .lane_wait(1'b0), .lane_dout(16'd0),
+	.lane_own(), .lane_hold(), .lane_sel(), .lane_strobe(), .lane_din()
+`endif
 );
+
+// The link nets every decoder reads: the tb's own (io_*), or with the lane sys_top's link front, lw_link.
+`ifdef MISTER_LW_LANE
+reg         io_fpga = 0;
+reg         ioctl_wait = 0, vs_wait = 0;
+wire        lane_own, lane_hold, lane_strobe;
+wire  [3:0] lane_sel;
+wire [15:0] lane_din;
+wire  [3:0] m_sel;
+wire        m_strobe, m_ack;
+wire [15:0] m_din;
+lw_link link
+(
+	.clk_sys(clk_sys), .l_sel({io_osd, io_osd, io_fpga, io_enable}), .l_clk(io_strobe), .l_din(io_din),
+	.l_wait(hps_bus[37] | vs_wait),
+	.p_own(lane_own), .p_hold(lane_hold), .p_sel(lane_sel), .p_strobe(lane_strobe), .p_din(lane_din),
+	.io_sel(m_sel), .io_strobe(m_strobe), .io_din(m_din), .io_ack(m_ack)
+);
+`else
+wire  [3:0] m_sel = {io_osd, io_osd, 1'b0, io_enable};
+wire        m_strobe = io_strobe;
+wire [15:0] m_din = io_din;
+`endif
 
 // Both osd instances as sys_top wires them: one SPI select (the HPS drives ss0 and ss2 together), one LW store bus.
 reg clk_vid = 0;
@@ -182,7 +220,7 @@ wire        ho_de, ho_vs, ho_hs, vo_de, vo_vs, vo_hs, osd_status;
 
 osd hdmi_osd
 (
-	.clk_sys(clk_sys), .io_osd(io_osd), .io_strobe(io_strobe), .io_din(io_din),
+	.clk_sys(clk_sys), .io_osd(m_sel[2]), .io_strobe(m_strobe), .io_din(m_din),
 	.clk_video(clk_vid), .din(24'd0), .de_in(v_de), .vs_in(v_vs), .hs_in(v_hs),
 	.dout(ho_d), .de_out(ho_de), .vs_out(ho_vs), .hs_out(ho_hs),
 	.clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
@@ -190,7 +228,7 @@ osd hdmi_osd
 
 osd vga_osd
 (
-	.clk_sys(clk_sys), .io_osd(io_osd), .io_strobe(io_strobe), .io_din(io_din), .osd_status(osd_status),
+	.clk_sys(clk_sys), .io_osd(m_sel[3]), .io_strobe(m_strobe), .io_din(m_din), .osd_status(osd_status),
 	.clk_video(clk_vid), .din(24'd0), .de_in(v_de), .vs_in(v_vs), .hs_in(v_hs),
 	.dout(vo_d), .de_out(vo_de), .vs_out(vo_vs), .hs_out(vo_hs),
 	.clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
@@ -218,8 +256,8 @@ assign blk_up = hps_bus[148:114];
 assign hps_bus[113:95] = blk_dn;
 assign hps_bus[94:46] = lw_pad;
 assign hps_bus[45:38] = 0;
-assign hps_bus[35:33] = {1'b0, io_enable, io_strobe};
-assign hps_bus[31:16] = io_din;
+assign hps_bus[35:33] = {m_sel[1], m_sel[0], m_strobe};
+assign hps_bus[31:16] = m_din;
 
 localparam CONF_STR = {"CORE;", `SYS_LW_CAPS "SS3E000000:400000;", "V,v1;"};
 
@@ -252,10 +290,33 @@ assign sd_buff_din[3] = mc2.dout;
 reg [127:0] st_in = 0;
 reg         st_set = 0;
 
+`ifdef MISTER_LW_LANE
+// The hps_io registers the lane cases compare (gamma_bus[21]: the core has gamma).
+wire [127:0] hst;
+wire  [64:0] rtc;
+wire  [32:0] tstamp;
+wire   [3:0] img_m;
+wire         img_ro;
+wire  [63:0] img_sz;
+wire  [21:0] gbus;
+wire  [15:0] sdsz;
+wire   [7:0] umode;
+wire  [31:0] uspeed;
+assign gbus[21] = 1'b1;
+// no hps_ext: EXT_BUS[32] low, so HPS_BUS[15:0] (the reply word the lane captures) is hps_io's own io_dout
+wire  [35:0] ebus;
+assign ebus[32] = 1'b0;
+assign ebus[15:0] = 16'd0;
+`endif
+
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(hps_bus),
+`ifdef MISTER_LW_LANE
+	.ioctl_wait(ioctl_wait), .status(hst), .RTC(rtc), .TIMESTAMP(tstamp), .img_mounted(img_m), .img_readonly(img_ro),
+	.img_size(img_sz), .gamma_bus(gbus), .sdram_sz(sdsz), .uart_mode(umode), .uart_speed(uspeed), .EXT_BUS(ebus),
+`endif
 	.status_in(st_in), .status_set(st_set),
 	.joystick_0(joy0), .joystick_1(joy1), .joystick_2(joy2), .joystick_3(joy3),
 	.joystick_l_analog_0(ana0), .joystick_l_analog_3(ana3),
@@ -663,6 +724,219 @@ always @(posedge clk_vid) begin : hdr_watch
 	if (c && l && !h && hdmi_osd.pix.pbyte !== o) shd_n = shd_n + 1;
 end
 
+`ifdef MISTER_LW_LANE
+// LANE: frames stored over LW against the same frames sent as link words (the HPS's handshake on io_clk/io_ack).
+localparam [20:0] LANE = 21'h46000;
+reg         tb_vsync = 0, cfg_has = 0;
+// sys_top's 0x30 arm, the one config decode the link's ack reads: vs_wait from the command word to a vsync
+always @(posedge clk_sys) begin
+	if (~m_sel[0]) cfg_has <= 0;
+	else if (m_strobe && !cfg_has) begin
+		cfg_has <= 1;
+		if (m_din[7:0] == 8'h30) vs_wait <= 1;
+	end
+	if (tb_vsync) vs_wait <= 0;
+end
+initial begin hps_io.RTC = 0; hps_io.TIMESTAMP = 0; end
+
+// What every decoder saw: the strobed {sel, word} stream, gamma writes, toggles and img_mounted pulses.
+integer     bus_n = 0, gam_n = 0, rtc_t = 0, ts_t = 0, mnt_n = 0, mnt_w = 0;
+reg  [31:0] bus_h = 0, gam_h = 0;
+reg   [3:0] mnt_v = 0;
+reg         rtc_d = 0, ts_d = 0, mnt_d = 0;
+integer     lo_run = 0, lo_min = 1000;       // the shortest all-selects-low run between two transactions
+always @(posedge clk_sys) begin
+	if (m_sel == 0) lo_run <= lo_run + 1;
+	else begin
+		if (lo_run > 0 && lo_run < lo_min) lo_min <= lo_run;
+		lo_run <= 0;
+	end
+	if (m_strobe) begin
+		bus_n <= bus_n + 1;
+		bus_h <= {bus_h[26:0], bus_h[31:27]} ^ {12'd0, m_sel, m_din};
+	end
+	if (hps_io.gamma_wr) begin
+		gam_n <= gam_n + 1;
+		gam_h <= {gam_h[26:0], gam_h[31:27]} ^ {14'd0, hps_io.gamma_wr_addr, hps_io.gamma_value};
+	end
+	rtc_d <= rtc[64];
+	ts_d  <= tstamp[32];
+	if (rtc[64] !== rtc_d) rtc_t <= rtc_t + 1;
+	if (tstamp[32] !== ts_d) ts_t <= ts_t + 1;
+	mnt_d <= |img_m === 1'b1;
+	if (|img_m === 1'b1) begin
+		mnt_w <= mnt_w + 1;
+		mnt_v <= img_m;
+		if (!mnt_d) mnt_n <= mnt_n + 1;
+	end
+end
+
+function [431:0] snap;
+	snap = {hst, rtc[63:0], tstamp[31:0], img_sz, img_ro, hps_io.cfg, sdsz, umode, uspeed, hps_io.gamma_en, 6'd0,
+	        hps_io.ioctl_index, hps_io.ioctl_file_ext};
+endfunction
+
+reg [431:0] s_ref;
+integer     t_ref [0:8];
+reg  [15:0] fw [0:1023];
+reg  [15:0] fop = 0;
+reg   [1:0] fsel = 0;
+integer     fn = 0, spin = 0, spin_max = 0, lane_end_t = 0, link_first_t = 0;
+
+task trk_clear;
+	begin
+		@(negedge clk_sys);
+		bus_n = 0; bus_h = 0; gam_n = 0; gam_h = 0; rtc_t = 0; ts_t = 0; mnt_n = 0; mnt_w = 0; mnt_v = 0;
+	end
+endtask
+task trk_save;
+	begin
+		s_ref = snap();
+		t_ref[0] = bus_n; t_ref[1] = bus_h; t_ref[2] = gam_n; t_ref[3] = gam_h;
+		t_ref[4] = rtc_t; t_ref[5] = ts_t; t_ref[6] = mnt_n; t_ref[7] = mnt_v; t_ref[8] = mnt_w;
+	end
+endtask
+task trk_cmp(input string what);
+	begin
+		check({what, ": registers byte-equal"}, snap() === s_ref, 1);
+		check({what, ": strobes"}, bus_n, t_ref[0]);
+		check({what, ": {sel, word} stream"}, bus_h, t_ref[1]);
+		check({what, ": gamma writes"}, gam_n, t_ref[2]);
+		check({what, ": gamma stream"}, gam_h, t_ref[3]);
+		check({what, ": RTC toggles"}, rtc_t, t_ref[4]);
+		check({what, ": TIMESTAMP toggles"}, ts_t, t_ref[5]);
+		check({what, ": img_mounted pulses"}, mnt_n, t_ref[6]);
+		check({what, ": img_mounted value"}, mnt_v, t_ref[7]);
+	end
+endtask
+
+task f_set(input [1:0] s, input [15:0] op, input integer n); begin fsel = s; fop = op; fn = n; end endtask
+
+// The HPS's link word: data, strobe up, spin on ack, strobe down, spin on ack low. `spin` = clk_sys cycles to ack.
+task hps_word(input [15:0] w);
+	begin
+		@(negedge clk_sys); io_din = w; io_strobe = 1;
+		spin = 0;
+		while (m_ack !== 1'b1) begin @(negedge clk_sys); spin = spin + 1; end
+		if (spin > spin_max) spin_max = spin;
+		io_strobe = 0;
+		while (m_ack !== 1'b0) @(negedge clk_sys);
+	end
+endtask
+task link_send;
+	integer m;
+	begin
+		@(negedge clk_sys);
+		if (fsel == 0) io_enable = 1; else if (fsel == 1) io_fpga = 1; else io_osd = 1;
+		repeat (2) @(negedge clk_sys);
+		hps_word(fop);
+		for (m = 0; m < fn; m = m + 1) hps_word(fw[m]);
+		@(negedge clk_sys); io_enable = 0; io_fpga = 0; io_osd = 0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+// BEGIN {capture[18], sel[17:16], op[15:0]}, the WORDs, then END
+task lane_send_c(input do_end, input cap);
+	integer m;
+	begin
+		axi_write(LANE, {13'd0, cap, fsel, fop}, 4'hF);
+		for (m = 0; m < fn; m = m + 1) axi_write(LANE + 21'h4, {16'd0, fw[m]}, 4'hF);
+		if (do_end) axi_write(LANE + 21'h8, 32'd0, 4'hF);
+	end
+endtask
+task lane_send(input do_end); lane_send_c(do_end, 1'b0); endtask
+task lane_count(output [31:0] p, output [31:0] dr);
+	begin axi_read(LANE + 21'h10, 0, p, dl, beats); axi_read(LANE + 21'h14, 0, dr, dl, beats); end
+endtask
+// PLAYED reaches `exp`; with `now`, return at once (no settling) so the next read races the frame's end
+task lane_wait_n(input [31:0] exp, input now);
+	integer n;
+	reg [31:0] p;
+	begin
+		n = 0;
+		axi_read(LANE + 21'h10, 0, p, dl, beats);
+		while (p != exp && n < 4000) begin
+			if (!now) repeat (40) @(negedge clk);
+			axi_read(LANE + 21'h10, 0, p, dl, beats);
+			n = n + 1;
+		end
+		check("PLAYED reaches the frames committed", p, exp);
+		if (!now) repeat (8) @(negedge clk_sys);
+	end
+endtask
+task lane_wait(input [31:0] exp); lane_wait_n(exp, 1'b0); endtask
+
+// One frame both ways: the link (reference), the link again with every word inverted, then the lane.
+task lane_vs_link(input string what);
+	integer m;
+	reg [15:0] keep [0:1023];
+	reg [31:0] p, dr;
+	begin
+		trk_clear; link_send; trk_save;
+		for (m = 0; m < fn; m = m + 1) begin keep[m] = fw[m]; fw[m] = ~fw[m]; end
+		link_send;
+		for (m = 0; m < fn; m = m + 1) fw[m] = keep[m];
+		lane_count(p, dr);
+		trk_clear; lane_send(1); lane_wait(p + 1);
+		trk_cmp(what);
+	end
+endtask
+
+// One osd instance's command state and the first 8 bytes of row 3, as its decoder left them.
+function [191:0] osd_st_h;
+	integer b;
+	begin
+		osd_st_h = {hdmi_osd.osd_enable, hdmi_osd.osd_status, hdmi_osd.info, hdmi_osd.infoh, hdmi_osd.infow,
+		            hdmi_osd.infox, hdmi_osd.infoy, hdmi_osd.rot, hdmi_osd.osd_h, hdmi_osd.osd_w, 64'd0};
+		for (b = 0; b < 8; b = b + 1) osd_st_h[8*b +: 8] = hdmi_osd.osd_buffer[768 + b];
+	end
+endfunction
+function [191:0] osd_st_v;
+	integer b;
+	begin
+		osd_st_v = {vga_osd.osd_enable, vga_osd.osd_status, vga_osd.info, vga_osd.infoh, vga_osd.infow,
+		            vga_osd.infox, vga_osd.infoy, vga_osd.rot, vga_osd.osd_h, vga_osd.osd_w, 64'd0};
+		for (b = 0; b < 8; b = b + 1) osd_st_v[8*b +: 8] = vga_osd.osd_buffer[768 + b];
+	end
+endfunction
+
+// An OSD frame: the link raises both osd selects at once; the lane plays it as sel 2 (HDMI), then sel 3 (VGA).
+// Each lane frame must move only its own osd, to the state the link frame left. perturb_op (no data,
+// 'hFFFF = none) runs on the link after the inverted pass, so the lane must restore what the frame sets.
+task osd_vs_link(input string what, input [15:0] perturb_op);
+	integer m;
+	reg [191:0] rh, rv, ph, pv;
+	reg [15:0] keep [0:7];
+	reg [31:0] p, dr;
+	reg [15:0] op;
+	begin
+		link_send; rh = osd_st_h(); rv = osd_st_v();
+		check({what, ": the link moves both osds alike"}, rh === rv, 1);
+		op = fop;
+		for (m = 0; m < fn; m = m + 1) begin keep[m] = fw[m]; fw[m] = ~fw[m]; end
+		link_send;
+		if (perturb_op != 16'hFFFF) begin fop = perturb_op; m = fn; fn = 0; link_send; fn = m; fop = op; end
+		for (m = 0; m < fn; m = m + 1) fw[m] = keep[m];
+		ph = osd_st_h(); pv = osd_st_v();
+		check({what, ": perturbed away from the reference"}, ph !== rh, 1);
+		lane_count(p, dr);
+		fsel = 2; lane_send(1); lane_wait(p + 1);
+		check({what, ": sel 2 sets the HDMI osd"}, osd_st_h() === rh, 1);
+		check({what, ": sel 2 leaves the VGA osd"}, osd_st_v() === pv, 1);
+		fsel = 3; lane_send(1); lane_wait(p + 2);
+		check({what, ": sel 3 sets the VGA osd"}, osd_st_v() === rv, 1);
+		check({what, ": sel 3 leaves the HDMI osd"}, osd_st_h() === rh, 1);
+	end
+endtask
+
+// The reply FIFO: RSTAT {drops[31:16], count[15:0]}; RHEAD the oldest word; a store to RPOP removes it.
+task lane_rstat(output [31:0] rs); axi_read(LANE + 21'h1C, 0, rs, dl, beats); endtask
+task lane_pop(output [15:0] w);
+	reg [31:0] h;
+	begin axi_read(LANE + 21'h20, 0, h, dl, beats); w = h[15:0]; axi_write(LANE + 21'h0C, 32'd0, 4'hF); end
+endtask
+`endif
+
 `ifdef MENU_CORE
 integer f;
 initial begin
@@ -751,7 +1025,7 @@ initial begin
 	$display("-- directory");
 	rd("magic",        21'h40000, 32'h31535953);
 	rd("dir version",  21'h40004, 32'h00010000);
-	rd("count",        21'h40008, 32'd4);
+	rd("count",        21'h40008, TB_LANE ? 32'd5 : 32'd4);
 	rd("scratch reset",21'h4000C, 32'd0);
 	rd("e0 kind",      21'h40010, 32'd1);
 	rd("e0 version",   21'h40014, 32'h00010000);
@@ -794,6 +1068,19 @@ initial begin
 	rd("e3 class tag SYS", 21'h400E8, 32'h00100000);
 	rd("e3 causes: STATUS", 21'h400EC, 32'h00000001);
 	for (i = 8; i < 16; i = i + 1) rd("e3 reserved", 21'h400D0 + 4*i, 32'd0);
+`ifdef MISTER_LW_LANE
+	rd("e4 kind LANE",   21'h40110, 32'd5);
+	rd("e4 version 1.1", 21'h40114, 32'h00010001);
+	rd("e4 offset",      21'h40118, 32'h00006000);
+	rd("e4 size",        21'h4011C, 32'h00001000);
+	rd("e4 UIO bitmap w0: 01 1C 1D 1E", 21'h40120, 32'h70000002);
+	rd("e4 UIO bitmap w1: 22 24 31 32 33 3B", 21'h40124, 32'h080E0014);
+	for (i = 6; i < 12; i = i + 1) rd("e4 bitmap wN", 21'h40110 + 4*i, 32'd0);
+	rd("e4 w12 0x20 reply 'b11", 21'h40140, 32'h00000003);
+	rd("e4 w13 depth/gap", 21'h40144, 32'h04000004);
+	rd("e4 w14 reply depth", 21'h40148, 32'h01000000);
+	rd("e4 w15 no line", 21'h4014C, 32'd0);
+`endif
 
 	$display("-- scratch");
 	axi_write(21'h4000C, 32'hA5A55A5A, 4'hF);
@@ -840,11 +1127,12 @@ initial begin
 	$display("-- default responder");
 	rd("LW 0x000000", 21'h000000, 32'hDEADBEEF);
 	rd("below window", 21'h03FFFC, 32'hDEADBEEF);
-	rd("directory hole", 21'h040110, 32'hDEADBEEF);
+	rd("directory hole", TB_LANE ? 21'h040150 : 21'h040110, 32'hDEADBEEF);
 	rd("below SECTOR", 21'h040FFC, 32'hDEADBEEF);
 	rd("above SECTOR: SYS CAUSE idle", 21'h043000, 32'd0);
 	rd("SYS block end", 21'h043FFC, 32'd0);
-	rd("above OSDBUF", 21'h046000, 32'hDEADBEEF);
+	if (TB_LANE) rd("above LANE", 21'h047000, 32'hDEADBEEF);
+	else rd("above OSDBUF", 21'h046000, 32'hDEADBEEF);
 	rd("above window", 21'h0C0000, 32'hDEADBEEF);
 	rd("LW 0x1FFFFC", 21'h1FFFFC, 32'hDEADBEEF);
 	axi_write(21'h000100, 32'h0, 4'hF);
@@ -1502,6 +1790,380 @@ initial begin
 	osd_check("LWSEL&HR survives DISABLE/ENABLE", 1, 128, 6);
 	axi_write(OSD + 21'h1000, 32'h0, 4'hF);
 	osd_check("SPI highres stays cleared by DISABLE", 0, 64, 3);
+
+`ifdef MISTER_LW_LANE
+	$display("-- LANE: registers");
+	rd("LANE ID LAN1", LANE + 21'h18, 32'h314E414C);
+	rd("LANE PLAYED reset", LANE + 21'h10, 32'd0);
+	rd("LANE DROPS reset", LANE + 21'h14, 32'd0);
+	rd("LANE RSTAT reset", LANE + 21'h1C, 32'd0);
+	rd("LANE RHEAD reads 0 while empty", LANE + 21'h20, 32'd0);
+	rd("LANE BEGIN reads 0", LANE, 32'd0);
+	rd("LANE register hole", LANE + 21'h24, 32'd0);
+	rd("LANE block end", LANE + 21'hFFC, 32'd0);
+	check("player idle", {lane_own, lane_hold}, 0);
+
+	lo_min = 1000;
+
+	$display("-- LANE 1: a status burst");
+	f_set(0, 16'h001E, 8);
+	for (i = 0; i < 8; i = i + 1) fw[i] = 16'h1100 + 16'h0101 * i;
+	lane_vs_link("lane 1 status");
+	check("lane 1: status from the lane", hst[31:0], 32'h12011100);
+	check("lane 1: nine strobes", bus_n, 9);
+
+	$display("-- LANE 2: 0x22 then 0x24, one toggle each");
+	f_set(0, 16'h0022, 4);
+	for (i = 0; i < 4; i = i + 1) fw[i] = 16'h2200 + i;
+	lane_vs_link("lane 2 RTC");
+	check("lane 2: RTC toggled once", rtc_t, 1);
+	check("lane 2: RTC words", rtc[63:32], 32'h22032202);
+	check("lane 2: RTC words low", rtc[31:0], 32'h22012200);
+	f_set(0, 16'h0024, 2);
+	fw[0] = 16'h2400; fw[1] = 16'h2401;
+	lane_vs_link("lane 2 TIMESTAMP");
+	check("lane 2: TIMESTAMP toggled once", ts_t, 1);
+	check("lane 2: TIMESTAMP words", tstamp[31:0], 32'h24012400);
+
+	$display("-- LANE 3: a mount (0x1C) and its size (0x1D)");
+	f_set(0, 16'h001C, 1);
+	fw[0] = 16'h0082;                          // slot 1, read-only
+	lane_vs_link("lane 3 mount");
+	check("lane 3: one img_mounted pulse", mnt_n, 1);
+	check("lane 3: img_mounted = slot 1", mnt_v, 4'b0010);
+	check("lane 3: read-only", img_ro, 1);
+	$display("     img_mounted width: link %0d, lane %0d clk_sys", t_ref[8], mnt_w);
+	check("lane 3: lane pulse = the word's ack wait plus the END fetch (GAP + 1)", mnt_w, win.LANE_GAP + 1);
+	check("lane 3: no shorter than the fastest link handshake", mnt_w >= t_ref[8], 1);
+	f_set(0, 16'h001D, 4);
+	for (i = 0; i < 4; i = i + 1) fw[i] = 16'h1D00 + i;
+	lane_vs_link("lane 3 size");
+	check("lane 3: img_size high", img_sz[63:32], 32'h1D031D02);
+	check("lane 3: img_size low", img_sz[31:0], 32'h1D011D00);
+
+	$display("-- LANE 4: gamma enable and a table (3 words per entry)");
+	f_set(0, 16'h0032, 1);
+	fw[0] = 16'h0001;
+	lane_vs_link("lane 4 gamma_en");
+	f_set(0, 16'h0033, 48);
+	for (i = 0; i < 48; i = i + 1) fw[i] = {i[7:0], 8'h40 ^ i[7:0]};
+	lane_vs_link("lane 4 table");
+	check("lane 4: 48 gamma writes", gam_n, 48);
+
+	$display("-- LANE 5: 0x30 holds its frame at vs_wait; the frame behind it waits");
+	begin : l5
+		reg [31:0] p, dr;
+		trk_clear;
+		spin_max = 0;
+		f_set(0, 16'h0030, 0);
+		fork
+			link_send;
+			begin repeat (300) @(negedge clk_sys); tb_vsync = 1; @(negedge clk_sys); tb_vsync = 0; end
+		join
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h5500 + i;
+		link_send;
+		trk_save;
+		check("lane 5 link: ack held to the vsync", spin_max >= 290, 1);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
+		link_send;
+		lane_count(p, dr);
+		trk_clear;
+		f_set(0, 16'h0030, 0);
+		lane_send(1);
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h5500 + i;
+		lane_send(1);
+		repeat (300) @(negedge clk_sys);
+		check("lane 5: vs_wait set by the lane's 0x30", vs_wait, 1);
+		check("lane 5: the player holds its frame", lane_own, 1);
+		check("lane 5: only the 0x30 word strobed", bus_n, 1);
+		check("lane 5: status not yet written", hst[15:0], 16'h0000);
+		lane_count(dr, d);
+		check("lane 5: PLAYED unchanged while held", dr, p);
+		@(negedge clk_sys); tb_vsync = 1; @(negedge clk_sys); tb_vsync = 0;
+		lane_wait(p + 2);
+		trk_cmp("lane 5");
+	end
+
+	$display("-- LANE 6: ioctl_wait held high, the player holds after the strobe");
+	begin : l6
+		reg [31:0] p, dr;
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h6600 + i;
+		trk_clear;
+		ioctl_wait = 1;
+		fork
+			link_send;
+			begin repeat (200) @(negedge clk_sys); check("lane 6 link: one strobe while waiting", bus_n, 1); ioctl_wait = 0; end
+		join
+		trk_save;
+		for (i = 0; i < 8; i = i + 1) fw[i] = ~(16'h6600 + i);
+		link_send;
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h6600 + i;
+		lane_count(p, dr);
+		trk_clear;
+		ioctl_wait = 1;
+		lane_send(1);
+		repeat (200) @(negedge clk_sys);
+		check("lane 6: one strobe while waiting", bus_n, 1);
+		check("lane 6: the player holds", lane_own, 1);
+		lane_count(dr, d);
+		check("lane 6: PLAYED unchanged while held", dr, p);
+		@(negedge clk_sys); ioctl_wait = 0;
+		lane_wait(p + 1);
+		trk_cmp("lane 6");
+	end
+
+	$display("-- LANE 7: a link transaction raised mid-frame lands intact after it");
+	begin : l7
+		reg [31:0] p, dr;
+		// reference: the gamma frame, then the status burst, both as link words
+		trk_clear;
+		f_set(0, 16'h0033, 48);
+		for (i = 0; i < 48; i = i + 1) fw[i] = {i[7:0] + 8'h80, 8'h77 ^ i[7:0]};
+		link_send;
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h7700 + i;
+		link_send;
+		trk_save;
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
+		link_send;
+		lane_count(p, dr);
+		trk_clear;
+		f_set(0, 16'h0033, 48);
+		for (i = 0; i < 48; i = i + 1) fw[i] = {i[7:0] + 8'h80, 8'h77 ^ i[7:0]};
+		lane_send(1);
+		wait (lane_own);
+		repeat (40) @(negedge clk_sys);
+		check("lane 7: the lane is mid-frame", lane_own && bus_n > 1 && bus_n < 49, 1);
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h7700 + i;
+		spin_max = 0;
+		fork
+			link_send;
+			begin
+				wait (!lane_own); lane_end_t = bus_n;
+				@(negedge clk_sys);
+				while (!(m_strobe && m_sel[0])) @(negedge clk_sys);
+				link_first_t = bus_n;
+			end
+		join
+		lane_wait(p + 1);
+		trk_cmp("lane 7");
+		check("lane 7: the lane frame ended before the link word", lane_end_t, 49);
+		check("lane 7: the link word strobed first after it", link_first_t, 49);
+		$display("     held link word: ack after %0d clk_sys (bound (1 + 48) x (GAP + 2) + 4 = %0d)",
+		         spin_max, 49 * (win.LANE_GAP + 2) + 4);
+		check("lane 7: the held word's spin within one frame", spin_max <= 49 * (win.LANE_GAP + 2) + 4, 1);
+	end
+
+	$display("-- LANE 8: a full FIFO drops whole frames and counts them; BVALID is never withheld");
+	begin : l8
+		reg [31:0] p, dr, p1, dr1;
+		integer k, nfit;
+		nfit = ((1 << win.LANE_AW) - 1) / 10;     // frames of 10 entries that fit DEPTH - 1
+		lane_count(p, dr);
+		@(negedge clk_sys); io_enable = 1;          // the link holds its select: the player cannot start
+		f_set(0, 16'h001E, 8);
+		for (k = 0; k < nfit + 2; k = k + 1) begin
+			for (i = 0; i < 8; i = i + 1) fw[i] = k * 16 + i;
+			lane_send(1);
+		end
+		lane_count(p1, dr1);
+		check("lane 8: (DEPTH - 1) / 10 frames of 10 entries fit, two dropped", dr1 - dr, 2);
+		check("lane 8: nothing played while the link is selected", p1, p);
+		@(negedge clk_sys); io_enable = 0;
+		lane_wait(p + nfit);
+		check("lane 8: the last committed frame's status", hst[31:0], {16'((nfit - 1) * 16 + 1), 16'((nfit - 1) * 16)});
+		check("lane 8: status word 7", hst[127:112], 16'((nfit - 1) * 16 + 7));
+		lane_count(p1, dr1);
+		check("lane 8: DROPS unchanged by the drain", dr1 - dr, 2);
+	end
+
+	check("lanes 1-8: the selects drop at least two cycles between transactions", lo_min >= 2, 1);
+
+	$display("-- LANE 9: a frame with no END never plays");
+	begin : l9
+		reg [31:0] p, dr, p1, dr1, h0;
+		lane_count(p, dr);
+		h0 = hst[31:0];
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h9900 + i;
+		lane_send(0);
+		repeat (400) @(negedge clk_sys);
+		lane_count(p1, dr1);
+		check("lane 9: PLAYED unchanged", p1, p);
+		check("lane 9: status untouched", hst[31:0], h0);
+		check("lane 9: the player stays idle", lane_own, 0);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h9A00 + i;
+		lane_send(1);                              // BEGIN abandons the open frame
+		lane_wait(p + 1);
+		check("lane 9: only the ended frame played", hst[31:0], 32'h9A019A00);
+		check("lane 9: its last word", hst[127:112], 16'h9A07);
+		axi_write(LANE + 21'h4, 32'h0000BEEF, 4'hF);   // WORD and END with no frame open
+		axi_write(LANE + 21'h8, 32'd0, 4'hF);
+		repeat (400) @(negedge clk_sys);
+		lane_count(p1, dr1);
+		check("lane 9: a stray WORD/END plays nothing", p1, p + 1);
+		check("lane 9: and drops nothing", dr1, dr);
+	end
+
+	$display("-- LANE 10: a full gamma table (256 entries, 768 words) and the longest frame the FIFO holds");
+	f_set(0, 16'h0033, 768);
+	for (i = 0; i < 768; i = i + 1) fw[i] = {8'(i / 3), 8'(i * 7 + 3)};
+	lane_vs_link("lane 10 gamma 256");
+	check("lane 10: 768 gamma writes", gam_n, 768);
+	begin : l10
+		reg [31:0] p, dr, p1, dr1;
+		integer nmax;
+		nmax = (1 << win.LANE_AW) - 2;             // BEGIN + DEPTH - 2 WORDs + END fill an empty FIFO
+		f_set(0, 16'h0033, nmax);
+		for (i = 0; i < nmax; i = i + 1) fw[i] = {8'(i / 3), 8'(i * 5 + 1)};
+		lane_vs_link("lane 10 longest frame");
+		lane_count(p, dr);
+		f_set(0, 16'h0033, nmax + 1);
+		for (i = 0; i <= nmax; i = i + 1) fw[i] = {8'(i / 3), 8'(i * 3)};
+		trk_clear; lane_send(1);
+		repeat (400) @(negedge clk_sys);
+		lane_count(p1, dr1);
+		check("lane 10: one word longer is dropped whole", dr1 - dr, 1);
+		check("lane 10: and plays nothing", p1, p);
+		check("lane 10: no gamma write from the dropped frame", gam_n, 0);
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'hA000 + i;
+		lane_vs_link("lane 10 a frame after the drop");
+	end
+
+	$display("-- LANE 11: FIO frames (sel 1) against the link's FPGA select");
+	f_set(1, 16'h0055, 1);
+	fw[0] = 16'h00C3;
+	lane_vs_link("lane 11 FIO file index");
+	check("lane 11: ioctl_index", hps_io.ioctl_index, 16'h00C3);
+	f_set(1, 16'h0056, 2);
+	fw[0] = 16'h4249; fw[1] = 16'h4E00;
+	lane_vs_link("lane 11 FIO file info");
+	check("lane 11: ioctl_file_ext", hps_io.ioctl_file_ext, 32'h42494E00);
+
+	$display("-- LANE 12: OSD frames (sels 2, 3) against the link's OSD select");
+	f_set(2, 16'h0045, 5);                         // enable with info: x, y, w, h, rot
+	fw[0] = 16'h0123; fw[1] = 16'h0045; fw[2] = 16'h0010; fw[3] = 16'h0008; fw[4] = 16'h0001;
+	osd_vs_link("lane 12 OSD info", 16'h0040);
+	f_set(2, 16'h0023, 8);                         // a write to row 3
+	for (i = 0; i < 8; i = i + 1) fw[i] = 16'h00A5 ^ (i * 16'h0011);
+	osd_vs_link("lane 12 OSD row write", 16'hFFFF);
+	f_set(2, 16'h0040, 0);                         // disable
+	osd_vs_link("lane 12 OSD disable", 16'h0045);   // re-enable, info kept: the disable must undo it
+
+	$display("-- LANE 13: a capture frame returns the link's reply words (0x29 against the link)");
+	begin : l13
+		reg [15:0] wl [0:8];
+		reg [15:0] ws [0:8];
+		reg [31:0] p, dr, rs;
+		reg [15:0] w;
+		integer m;
+		st_req(st_pat(300)); settle;
+		axi_read(SYSB, 0, d, dl, beats);           // drain the SYS cause the request raised
+		// the link: the reply to each word is io_dout once its ack is seen (the HPS reads gp_in then)
+		@(negedge clk_sys); io_enable = 1; repeat (2) @(negedge clk_sys);
+		for (m = 0; m < 9; m = m + 1) begin hps_word((m == 0) ? 16'h0029 : 16'h0000); ws[m] = hps_bus[15:0]; end
+		@(negedge clk_sys); io_enable = 0; repeat (3) @(negedge clk_sys);
+		check("lane 13 link: the head {A, flag}", {ws[0][15:4], ws[0][3:0] == hps_io.stflg}, {12'h00A, 1'b1});
+		lane_count(p, dr);
+		f_set(0, 16'h0029, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
+		lane_send_c(1, 1'b1);
+		lane_wait_n(p + 1, 1'b1);
+		lane_rstat(rs);                            // at once: PLAYED is never ahead of the frame's replies
+		check("lane 13: nine replies when PLAYED moves", rs, 32'd9);
+		bad = 0;
+		for (m = 0; m < 9; m = m + 1) begin lane_pop(wl[m]); if (wl[m] !== ws[m] || ^ws[m] === 1'bx) bad = bad + 1; end
+		check("lane 13: the replies equal the link's, word for word", bad, 0);
+		check("lane 13: the status words", {wl[2], wl[1]}, st_pat(300) >> 0);
+		lane_rstat(rs);
+		check("lane 13: the reply FIFO is empty after nine pops", rs, 32'd0);
+		rd("lane 13: RHEAD reads 0 when empty", LANE + 21'h20, 32'd0);
+		axi_write(LANE + 21'h0C, 32'd0, 4'hF);       // a pop on empty
+		lane_rstat(rs);
+		check("lane 13: a pop on empty is ignored", rs, 32'd0);
+	end
+
+	$display("-- LANE 14: a frame without the capture bit records nothing; a write frame with it, one per strobe");
+	begin : l14
+		reg [31:0] p, dr, rs;
+		reg [15:0] w;
+		integer m;
+		lane_count(p, dr);
+		f_set(0, 16'h001E, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'hE100 + i;
+		lane_send(1);
+		lane_wait(p + 1);
+		lane_rstat(rs);
+		check("lane 14: no capture, no replies", rs, 32'd0);
+		check("lane 14: the frame still played", hst[31:0], 32'hE101E100);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'hE200 + i;
+		lane_send_c(1, 1'b1);
+		lane_wait(p + 2);
+		lane_rstat(rs);
+		check("lane 14: a captured 8-word frame leaves 9 replies", rs, 32'd9);
+		check("lane 14: and played", hst[31:0], 32'hE201E200);
+		for (m = 0; m < 9; m = m + 1) lane_pop(w);
+		lane_rstat(rs);
+		check("lane 14: drained", rs, 32'd0);
+	end
+
+	$display("-- LANE 15: replies past the reply FIFO's depth are dropped and counted; the frame still plays");
+	begin : l15
+		reg [31:0] p, dr, rs;
+		reg [15:0] w;
+		integer m, nr;
+		nr = 1 << win.LANE_RAW;
+		lane_count(p, dr);
+		f_set(0, 16'h0033, nr + 44);                // nr + 45 replies: 45 past the depth
+		for (i = 0; i < nr + 44; i = i + 1) fw[i] = {8'(i / 3), 8'(i * 11)};
+		trk_clear;
+		lane_send_c(1, 1'b1);
+		lane_wait(p + 1);
+		check("lane 15: the frame played whole", gam_n, nr + 44);
+		lane_rstat(rs);
+		check("lane 15: the reply FIFO holds its depth", rs[15:0], nr);
+		check("lane 15: 45 replies dropped", rs[31:16], 45);
+		for (m = 0; m < nr; m = m + 1) lane_pop(w);
+		lane_rstat(rs);
+		check("lane 15: drained, the drop count kept", rs, {16'd45, 16'd0});
+		f_set(0, 16'h001E, 1);
+		fw[0] = 16'hF00D;
+		lane_send_c(1, 1'b1);
+		lane_wait(p + 2);
+		lane_rstat(rs);
+		check("lane 15: a capture after the overflow", rs, {16'd45, 16'd2});
+		for (m = 0; m < 2; m = m + 1) lane_pop(w);
+	end
+
+	$display("-- LANE 16: two captured frames queue their replies in order");
+	begin : l16
+		reg [31:0] p, dr, rs;
+		reg [15:0] wa [0:8];
+		reg [15:0] w;
+		integer m;
+		lane_count(p, dr);
+		f_set(0, 16'h0029, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
+		lane_send_c(1, 1'b1);
+		f_set(0, 16'h001E, 2);
+		fw[0] = 16'h1601; fw[1] = 16'h1602;
+		lane_send_c(1, 1'b1);
+		lane_wait(p + 2);
+		lane_rstat(rs);
+		check("lane 16: 9 + 3 replies", rs[15:0], 12);
+		for (m = 0; m < 9; m = m + 1) lane_pop(wa[m]);
+		check("lane 16: the first frame's head is 0x29's", {wa[0][15:4], 4'd0}, 16'h00A0);
+		check("lane 16: the first frame's status words come first", {wa[2], wa[1]}, st_pat(300) >> 0);
+		for (m = 0; m < 3; m = m + 1) lane_pop(w);
+		lane_rstat(rs);
+		check("lane 16: drained", rs[15:0], 0);
+	end
+`endif
 
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");

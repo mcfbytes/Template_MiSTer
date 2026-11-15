@@ -229,6 +229,14 @@ end
 
 /////////////////////////  HPS I/O  /////////////////////////////////////
 
+// MISTER_LW_LANE (with MISTER_LW): the link nets below come from lw_link (LW BRIDGE), the link's own or the
+// LW frame lane's while it plays a frame. Without it the link front is the stock one.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_LANE
+`define LW_LANE_LINK
+`endif
+`endif
+
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
 `ifdef MISTER_LW
@@ -243,12 +251,28 @@ wire  [1:0] io_ver = 1; // 0 - obsolete. 1 - optimized HPS I/O. 2,3 - reserved f
 wire        io_wait;
 wire        io_wide;
 wire [15:0] io_dout;
+`ifdef LW_LANE_LINK
+wire [15:0] io_din;
+`else
 wire [15:0] io_din = gp_outr[15:0];
+`endif
 wire        io_clk = gp_outr[17];
 wire        io_ss0 = gp_outr[18];
 wire        io_ss1 = gp_outr[19];
 wire        io_ss2 = gp_outr[20];
 
+`ifdef LW_LANE_LINK
+wire  [3:0] io_sel;     // {osd_vga, osd_hdmi, fpga, uio}
+wire        io_strobe;
+wire        io_ack;
+
+`ifndef MISTER_DEBUG_NOHDMI
+	wire io_osd_hdmi = io_sel[2];
+`endif
+
+wire io_fpga     = io_sel[1];
+wire io_uio      = io_sel[0];
+`else
 `ifndef MISTER_DEBUG_NOHDMI
 	wire io_osd_hdmi = io_ss1 & ~io_ss0;
 `endif
@@ -266,6 +290,7 @@ always @(posedge clk_sys) begin
 		io_ack <= rack;
 	end
 end
+`endif
 
 reg [31:0] gp_outr;
 always @(posedge clk_sys) begin
@@ -303,7 +328,11 @@ reg        cfg_set      = 0;
 
 wire       audio_96k    = cfg[6];
 wire       csync_en     = cfg[3];
+`ifdef LW_LANE_LINK
+wire       io_osd_vga   = io_sel[3];
+`else
 wire       io_osd_vga   = io_ss1 & ~io_ss2;
+`endif
 `ifndef MISTER_DUAL_SDRAM
 	wire forced_scandoubler = cfg[4];
 	wire ypbpr_en           = cfg[5];
@@ -1796,7 +1825,8 @@ wire [13:0] fb_stride;
 ////////////////////  LW BRIDGE  ///////////////////////////////////
 // MISTER_LW: lwhps2fpga (0xFF200000, 2 MB) answers every offset (0xDEADBEEF default); the `SYS_LW_CAPS
 // window holds the directory and the PAD, OSDBUF and SYS blocks, plus SECTOR when the core declares it
-// (MISTER_LW_SECTOR_SLOT). Without MISTER_LW none of this is built. Register map: docs/LW_BRIDGE.md.
+// (MISTER_LW_SECTOR_SLOT) and the frame lane with MISTER_LW_LANE. Without MISTER_LW none of this is built.
+// Register map: docs/LW_BRIDGE.md.
 `ifdef MISTER_LW
 wire [20:0] lw_raddr, lw_waddr;
 wire        lw_ren, lw_rd_ack, lw_rd_word, lw_write;
@@ -1851,6 +1881,34 @@ localparam  [9:0] LW_MC_FRAME  = `MISTER_LW_CARD_FRAME;
 localparam  [9:0] LW_MC_FRAME  = 10'd256;
 `endif
 
+`ifdef LW_LANE_LINK
+localparam        LW_LANE_EN   = 1;
+wire        lane_own, lane_hold, lane_strobe;
+wire  [3:0] lane_sel;
+wire [15:0] lane_din;
+wire  [3:0] link_sel = {io_ss1 & ~io_ss2, io_ss1 & ~io_ss0, ~io_ss1 & io_ss0, ~io_ss1 & io_ss2};
+
+lw_link lw_link
+(
+	.clk_sys(clk_sys),
+	.l_sel(link_sel),
+	.l_clk(io_clk),
+	.l_din(gp_outr[15:0]),
+	.l_wait(io_wait | vs_wait),
+	.p_own(lane_own),
+	.p_hold(lane_hold),
+	.p_sel(lane_sel),
+	.p_strobe(lane_strobe),
+	.p_din(lane_din),
+	.io_sel(io_sel),
+	.io_strobe(io_strobe),
+	.io_din(io_din),
+	.io_ack(io_ack)
+);
+`else
+localparam        LW_LANE_EN   = 0;
+`endif
+
 hps_lw_bridge hps_lw_bridge
 (
 	.clk(clk_100m),
@@ -1868,7 +1926,8 @@ hps_lw_bridge hps_lw_bridge
 lw_sys_window #(
 	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .BLKSZ(LW_BLKSZ),
 	.MC_SLOT0(LW_MC_SLOT0), .MC_WSRC0(LW_MC_WSRC0), .MC_EXT0(LW_MC_EXT0),
-	.MC_SLOT1(LW_MC_SLOT1), .MC_WSRC1(LW_MC_WSRC1), .MC_EXT1(LW_MC_EXT1), .MC_FRAME(LW_MC_FRAME)
+	.MC_SLOT1(LW_MC_SLOT1), .MC_WSRC1(LW_MC_WSRC1), .MC_EXT1(LW_MC_EXT1), .MC_FRAME(LW_MC_FRAME),
+	.LANE_EN(LW_LANE_EN)
 ) lw_sys_window
 (
 	.clk(clk_100m),
@@ -1894,7 +1953,26 @@ lw_sys_window #(
 	.osd_addr(lw_osd_addr),
 	.osd_data(lw_osd_data),
 	.osd_be(lw_osd_be),
-	.osd_ctrl(lw_osd_ctrl)
+	.osd_ctrl(lw_osd_ctrl),
+`ifdef LW_LANE_LINK
+	.lane_busy(|link_sel),
+	.lane_wait(io_wait | vs_wait),
+	.lane_dout(io_dout | io_dout_sys),
+	.lane_own(lane_own),
+	.lane_hold(lane_hold),
+	.lane_sel(lane_sel),
+	.lane_strobe(lane_strobe),
+	.lane_din(lane_din)
+`else
+	.lane_busy(1'b0),
+	.lane_wait(1'b0),
+	.lane_dout(16'd0),
+	.lane_own(),
+	.lane_hold(),
+	.lane_sel(),
+	.lane_strobe(),
+	.lane_din()
+`endif
 );
 `else
 assign lw_doorbell = 0;
