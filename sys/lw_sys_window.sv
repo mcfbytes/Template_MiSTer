@@ -25,6 +25,9 @@
 // OSDBUF decodes image stores and CTRL; the shadow RAMs live in each osd instance (osd.v).
 // SYS (lw_sys_status.sv) raises the status back-channel's cause on its own line; entry 3 declares
 // the line's pool ordinal, the CAUSE word, the class tag and the cause bits, so the host reads them here.
+// LANE (lw_lane.sv, LANE_EN) replays ordered link frames onto sys_top's link nets and can capture their
+// replies; entry 4 declares it, and COUNT is 5. Without LANE_EN the directory is 4 entries and the block's
+// addresses read 0xDEADBEEF.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), the analog-drop count (reads 0)
 // and lw_sector's diagnostics; LW_DIAG=1 (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
@@ -45,7 +48,9 @@ module lw_sys_window #(
 	parameter  [3:0] MC_SLOT1  = 4'hF,       // card 1, likewise
 	parameter [31:0] MC_WSRC1  = 32'd0,
 	parameter [31:0] MC_EXT1   = 32'd0,
-	parameter  [9:0] MC_FRAME  = 10'd256     // 32-bit DATA words per card frame (256 = one 1 KB block)
+	parameter  [9:0] MC_FRAME  = 10'd256,    // 32-bit DATA words per card frame (256 = one 1 KB block)
+	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and declare entry 4.
+	parameter        LANE_EN   = 0
 )
 (
 	input             clk,          // clk_100m
@@ -71,6 +76,15 @@ module lw_sys_window #(
 	input      [19:0] card_up,      // {card 1, card 0}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
 	output     [12:0] card_dn,      // {ack1, en_sys1, ack0, en_sys0, addr[8:0]} on clk_sys, to emu
 	input     [131:0] st_up,        // {stflg[3:0], status_req[127:0]} on clk_sys, from hps_io
+
+	input             lane_busy,    // clk_sys: any of the link's own selects
+	input             lane_wait,    // clk_sys: io_wait | vs_wait
+	input      [15:0] lane_dout,    // clk_sys: the link's reply word, io_dout | io_dout_sys
+	output            lane_own,     // clk_sys: the lane player, to lw_link
+	output            lane_hold,
+	output      [3:0] lane_sel,
+	output            lane_strobe,
+	output     [15:0] lane_din,
 
 	output            osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image
 	output      [9:0] osd_addr,
@@ -101,7 +115,19 @@ localparam [20:0] SYS_SIZE = 21'h01000;
 localparam  [7:0] SYS_LINE = 8'd2;        // pool ordinal 2 = f2h_irq[9] (GIC SPI 49)
 localparam [31:0] SYS_TAG  = 32'h0010_0000;   // the cause word's class tag: bit 20 = SYS
 localparam [31:0] SYS_CAUSES = 32'h0000_0001; // payload bits it raises: bit 0 = STATUS (0x29)
-localparam  [6:0] DIR_WORDS = 7'd68;      // header + 4 entries
+localparam [20:0] LANE_OFF = 21'h06000;
+localparam [20:0] LANE_SIZE = 21'h01000;
+localparam        LANE_AW  = 10;          // FIFO depth 1024: a 256-entry 0x33 gamma table is 770 entries
+localparam  [7:0] LANE_GAP = 8'd4;        // clk_sys cycles without a wait between strobes, 2..7
+localparam        LANE_RAW = 8;           // reply FIFO depth 256
+localparam  [6:0] DIR_WORDS = LANE_EN ? 7'd84 : 7'd68;   // header + 5 or 4 entries
+
+// LANE entry: the UIO (sel 0) opcodes verified for write-only replay; word 12, the first-word reply the lane
+// stands in for, one byte per op: [7:0] = 0x20's 'b11 (sys_top answers it); a capture frame also records it.
+localparam [255:0] LANE_OPS = (256'd1 << 8'h01) | (256'd1 << 8'h1C) | (256'd1 << 8'h1D) | (256'd1 << 8'h1E) |
+                              (256'd1 << 8'h22) | (256'd1 << 8'h24) | (256'd1 << 8'h31) | (256'd1 << 8'h32) |
+                              (256'd1 << 8'h33) | (256'd1 << 8'h3B);
+localparam [31:0] LANE_CAPS = 32'h0000_0003;
 
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
@@ -122,6 +148,11 @@ wire        w_sec = w_in && wwin >= SEC_OFF && wwin < SEC_OFF + SEC_SIZE;
 wire        r_osd = r_in && rwin >= OSD_OFF && rwin < OSD_OFF + OSD_SIZE;
 wire        w_osd = w_in && wwin >= OSD_OFF && wwin < OSD_OFF + OSD_SIZE;
 wire        r_sys = r_in && rwin >= SYS_OFF && rwin < SYS_OFF + SYS_SIZE;
+wire        r_lane = LANE_EN && r_in && rwin >= LANE_OFF && rwin < LANE_OFF + LANE_SIZE;
+wire        w_lane = LANE_EN && w_in && wwin >= LANE_OFF && wwin < LANE_OFF + LANE_SIZE;
+wire [20:0] rlane = rwin - LANE_OFF;
+wire [20:0] wlane = wwin - LANE_OFF;
+wire [31:0] lane_rdata;
 wire [20:0] rsys  = rwin - SYS_OFF;
 wire [31:0] sys_rdata;
 wire [12:0] rosd  = rwin[12:0];           // OSD_OFF is 8 KB aligned
@@ -136,6 +167,7 @@ always @(*) begin
 	if (r_pad) lw_rdata = (DIAG && rwin == PAD_OFF + (21'h1A << 10)) ? adrop : 32'd0;
 	else if (r_sec) lw_rdata = SEC_EN ? sec_rdata : 32'd0;
 	else if (r_sys) lw_rdata = sys_rdata;
+	else if (r_lane) lw_rdata = lane_rdata;
 	else if (r_osd) lw_rdata = (rosd == OSD_CTRL)       ? {30'd0, octrl} :
 	                           (rosd == OSD_CTRL + 13'd4) ? 32'h3144534F :   // "OSD1"
 	                           32'd0;
@@ -143,7 +175,7 @@ always @(*) begin
 		case (rwin[8:2])
 			7'd0:  lw_rdata = 32'h31535953;          // "SYS1"
 			7'd1:  lw_rdata = 32'h00010000;
-			7'd2:  lw_rdata = 32'd4;
+			7'd2:  lw_rdata = LANE_EN ? 32'd5 : 32'd4;
 			7'd3:  lw_rdata = DIAG ? scratch : 32'd0;
 			7'd4:  lw_rdata = 32'd1;                 // entry 0: kind PAD
 			7'd5:  lw_rdata = 32'h00010000;
@@ -184,6 +216,22 @@ always @(*) begin
 			7'd57: lw_rdata = {11'd0, WIN_OFF + SYS_OFF};   // CAUSE, absolute LW
 			7'd58: lw_rdata = SYS_TAG;
 			7'd59: lw_rdata = SYS_CAUSES;
+			// entry 4: kind LANE, minor 1 (reply capture); reached only with LANE_EN (DIR_WORDS)
+			7'd68: lw_rdata = 32'd5;
+			7'd69: lw_rdata = 32'h00010001;
+			7'd70: lw_rdata = {11'd0, LANE_OFF};
+			7'd71: lw_rdata = {11'd0, LANE_SIZE};
+			7'd72: lw_rdata = LANE_OPS[ 31:  0];
+			7'd73: lw_rdata = LANE_OPS[ 63: 32];
+			7'd74: lw_rdata = LANE_OPS[ 95: 64];
+			7'd75: lw_rdata = LANE_OPS[127: 96];
+			7'd76: lw_rdata = LANE_OPS[159:128];
+			7'd77: lw_rdata = LANE_OPS[191:160];
+			7'd78: lw_rdata = LANE_OPS[223:192];
+			7'd79: lw_rdata = LANE_OPS[255:224];
+			7'd80: lw_rdata = LANE_CAPS;
+			7'd81: lw_rdata = {16'd1 << LANE_AW, 8'd0, LANE_GAP};
+			7'd82: lw_rdata = {16'd1 << LANE_RAW, 16'd0};   // reply FIFO depth
 			default: lw_rdata = 32'd0;
 		endcase
 	end
@@ -216,6 +264,27 @@ else begin : nosec
 	assign doorbell  = 1'b0;
 	assign blk_dn    = 19'd0;
 	assign card_dn   = 13'd0;
+end
+endgenerate
+
+generate
+if (LANE_EN) begin : lane
+	lw_lane #(.AW(LANE_AW), .GAP(LANE_GAP[2:0]), .RAW(LANE_RAW)) lane
+	(
+		.clk(clk),
+		.raddr(rlane[11:0]), .rdata(lane_rdata),
+		.waddr(wlane[11:0]), .wsel(w_lane), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+		.clk_sys(clk_sys), .l_busy(lane_busy), .l_wait(lane_wait), .l_dout(lane_dout),
+		.own(lane_own), .hold(lane_hold), .sel(lane_sel), .strobe(lane_strobe), .din(lane_din)
+	);
+end
+else begin : nolane
+	assign lane_rdata  = 32'd0;
+	assign lane_own    = 1'b0;
+	assign lane_hold   = 1'b0;
+	assign lane_sel    = 4'd0;
+	assign lane_strobe = 1'b0;
+	assign lane_din    = 16'd0;
 end
 endgenerate
 
