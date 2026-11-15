@@ -39,7 +39,11 @@
 module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, BLKSZ=2, PS2WE=0, STRLEN=$size(CONF_STR)>>3, F12KEYMOD=0, FFB=0)
 (
 	input             clk_sys,
+`ifdef MISTER_LW
+	inout     [313:0] HPS_BUS,
+`else
 	inout      [45:0] HPS_BUS,
+`endif
 
 	// buttons up to 32
 	output reg [31:0] joystick_0,
@@ -217,6 +221,19 @@ wire        io_wide  = (WIDE) ? 1'b1 : 1'b0;
 wire [15:0] io_din   = HPS_BUS[31:16];
 reg  [15:0] io_dout;
 
+`ifdef MISTER_LW
+// LW pad stores from sys_top (lw_sys_window.sv), already on clk_sys
+wire        lw_we    = HPS_BUS[94];
+wire  [7:0] lw_op    = HPS_BUS[93:86];
+wire  [7:0] lw_idx   = HPS_BUS[85:78];
+wire [31:0] lw_dat   = HPS_BUS[77:46];
+
+// The status back-channel's own flag and snapshot (0x29), exported to sys_top's LW SYS block.
+reg   [3:0] stflg = 0;
+reg [127:0] status_req = 0;
+assign HPS_BUS[313:182] = {stflg, status_req};
+`endif
+
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;
 assign HPS_BUS[32]   = io_wide;
@@ -299,8 +316,10 @@ always@(posedge clk_sys) begin : uio_block
 	reg  [7:0] atrig_idx;
 	reg  [3:0] pdsp_idx;
 	reg        ps2skip = 0;
+`ifndef MISTER_LW
 	reg  [3:0] stflg = 0;
 	reg[127:0] status_req;
+`endif
 	reg        old_status_set = 0;
 	reg        old_upload_req = 0;
 	reg [47:0] ffb_data;
@@ -600,6 +619,50 @@ always@(posedge clk_sys) begin : uio_block
 			endcase
 		end
 	end
+
+`ifdef MISTER_LW
+	// LW second write path: the same registers the link writes, one full word per store.
+	if(lw_we) begin
+		case(lw_op)
+			'h02: if(!lw_idx) joystick_0 <= lw_dat;
+			'h03: if(!lw_idx) joystick_1 <= lw_dat;
+			'h10: if(!lw_idx) joystick_2 <= lw_dat;
+			'h11: if(!lw_idx) joystick_3 <= lw_dat;
+			'h12: if(!lw_idx) joystick_4 <= lw_dat;
+			'h13: if(!lw_idx) joystick_5 <= lw_dat;
+			'h1a: case(lw_idx[3:0])
+					 0: joystick_l_analog_0 <= lw_dat[15:0];
+					 1: joystick_l_analog_1 <= lw_dat[15:0];
+					 2: joystick_l_analog_2 <= lw_dat[15:0];
+					 3: joystick_l_analog_3 <= lw_dat[15:0];
+					 4: joystick_l_analog_4 <= lw_dat[15:0];
+					 5: joystick_l_analog_5 <= lw_dat[15:0];
+					15: case(lw_idx[7:4])
+							 0: paddle_0 <= lw_dat[7:0];
+							 1: paddle_1 <= lw_dat[7:0];
+							 2: paddle_2 <= lw_dat[7:0];
+							 3: paddle_3 <= lw_dat[7:0];
+							 4: paddle_4 <= lw_dat[7:0];
+							 5: paddle_5 <= lw_dat[7:0];
+							 8: spinner_0 <= {~spinner_0[8],lw_dat[7:0]};
+							 9: spinner_1 <= {~spinner_1[8],lw_dat[7:0]};
+							10: spinner_2 <= {~spinner_2[8],lw_dat[7:0]};
+							11: spinner_3 <= {~spinner_3[8],lw_dat[7:0]};
+							12: spinner_4 <= {~spinner_4[8],lw_dat[7:0]};
+							13: spinner_5 <= {~spinner_5[8],lw_dat[7:0]};
+						endcase
+				endcase
+			'h3d: case(lw_idx[3:0])
+					 0: joystick_r_analog_0 <= lw_dat[15:0];
+					 1: joystick_r_analog_1 <= lw_dat[15:0];
+					 2: joystick_r_analog_2 <= lw_dat[15:0];
+					 3: joystick_r_analog_3 <= lw_dat[15:0];
+					 4: joystick_r_analog_4 <= lw_dat[15:0];
+					 5: joystick_r_analog_5 <= lw_dat[15:0];
+				endcase
+		endcase
+	end
+`endif
 end
 
 
