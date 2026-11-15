@@ -74,8 +74,8 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
 # LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io (pads, OSD shadow,
-# status back-channel). Comment it out for the stock build: sys/ then compiles exactly as without this branch.
-set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
+# status back-channel). Off by default: sys/ then compiles exactly as without this branch. Uncomment to build it.
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
 
 # LW window diagnostics (SCRATCH, SECTOR counters/timestamps): 0 or absent = shipping, 1 = debug builds
 #set_global_assignment -name VERILOG_MACRO "LW_DIAG=1"
