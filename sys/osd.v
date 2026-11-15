@@ -18,7 +18,17 @@ module osd
 	output reg    vs_out,
 	output reg    hs_out,
 
-	output reg    osd_status
+	output reg    osd_status,
+
+	// OSDBUF (lw_sys_window.sv, MISTER_LW): a shadow of osd_buffer stored over the LW bridge.
+	// lw_ctrl = {LWSEL & HR, LWSEL}, registers on clk_lw: video reads the shadow; highres for the shadow.
+	// Without MISTER_LW these inputs are unused and the pixel path is the stock one.
+	input         clk_lw,
+	input         lw_we,
+	input   [9:0] lw_addr,
+	input  [31:0] lw_data,
+	input   [3:0] lw_be,
+	input   [1:0] lw_ctrl
 );
 
 parameter  OSD_COLOR    =  3'd4;
@@ -46,6 +56,28 @@ reg [21:0] osd_w;
 
 reg  [1:0] rot = 0;
 
+`ifdef MISTER_LW
+// The shadow: four 1024x8 byte lanes written 32 bits wide on clk_lw, read on clk_video beside osd_buffer.
+(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf0[1024];
+(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf1[1024];
+(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf2[1024];
+(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf3[1024];
+
+always @(posedge clk_lw) if (lw_we) begin
+	if (lw_be[0]) lw_buf0[lw_addr] <= lw_data[7:0];
+	if (lw_be[1]) lw_buf1[lw_addr] <= lw_data[15:8];
+	if (lw_be[2]) lw_buf2[lw_addr] <= lw_data[23:16];
+	if (lw_be[3]) lw_buf3[lw_addr] <= lw_data[31:24];
+end
+
+`define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+`SYNC reg lwhr_s0 = 0;
+`SYNC reg lwhr_s1 = 0;
+`SYNC reg lwsel_v0 = 0;
+`SYNC reg lwsel_v1 = 0;
+`undef SYNC
+`endif
+
 always@(posedge clk_sys) begin
 	reg [12:0] bcnt;
 	reg  [7:0] cmd;
@@ -53,9 +85,20 @@ always@(posedge clk_sys) begin
 	reg        old_strobe;
 	reg        highres = 0;
 
+`ifdef MISTER_LW
+	reg        hr;
+
+	{lwhr_s1, lwhr_s0} <= {lwhr_s0, lw_ctrl[1]};
+	hr = highres | lwhr_s1;
+
+	osd_t <= rot[0] ? OSD_WIDTH : (OSD_HEIGHT<<1);
+	osd_h <= rot[0] ? (info ? infow : OSD_WIDTH) : info ? infoh : (OSD_HEIGHT<<hr);
+	osd_w <= rot[0] ? (info ? infoh : (OSD_HEIGHT<<hr)) : (info ? infow : OSD_WIDTH);
+`else
 	osd_t <= rot[0] ? OSD_WIDTH : (OSD_HEIGHT<<1);
 	osd_h <= rot[0] ? (info ? infow : OSD_WIDTH) : info ? infoh : (OSD_HEIGHT<<highres);
 	osd_w <= rot[0] ? (info ? infoh : (OSD_HEIGHT<<highres)) : (info ? infow : OSD_WIDTH);
+`endif
 
 	old_strobe <= io_strobe;
 
@@ -152,7 +195,11 @@ always @(posedge clk_video) if(ce_pix) begin
 	v_info_start_5 <= rot[0] ? (infox + (infox << 2)) : (infoy + (infoy << 2));
 end
 
+`ifdef LW_TB_PROBES
+always @(posedge clk_video) begin : pix   // named for the testbench's probes only (tb/lw_tb.sv)
+`else
 always @(posedge clk_video) begin
+`endif
 	reg        deD;
 	reg  [2:0] osd_div;
 	reg  [2:0] multiscan;
@@ -166,8 +213,22 @@ always @(posedge clk_video) begin
 	reg [21:0] osd_hcnt2;
 	reg        osd_de1,osd_de2;
 	reg  [1:0] osd_en;
+`ifdef MISTER_LW
+	reg        f1 = 0;
+`else
 	reg        f1;
+`endif
 	reg        half;
+`ifdef MISTER_LW
+	reg [12:0] ra;
+	reg  [7:0] lw_q0, lw_q1, lw_q2, lw_q3;
+	reg  [1:0] lw_lane;
+	reg        lw_hdr;                 // ra[12]: the header rows, never in the shadow
+	reg  [7:0] pbyte;
+
+	lwsel_v0 <= lw_ctrl[0];
+	lwsel_v1 <= lwsel_v0;
+`endif
 
 	if(ce_pix) begin
 
@@ -248,8 +309,21 @@ always @(posedge clk_video) begin
 			end
 		end
 
+`ifdef MISTER_LW
+		ra = rot[0] ? {1'b0, {osd_hcnt2[6:3], osd_vcnt[7:0]} ^ { {4{~rot[1]}}, {8{rot[1]}} }} : {osd_vcnt[7:3], osd_hcnt[7:0]};
+		osd_byte  <= osd_buffer[ra];
+		lw_q0     <= lw_buf0[ra[11:2]];
+		lw_q1     <= lw_buf1[ra[11:2]];
+		lw_q2     <= lw_buf2[ra[11:2]];
+		lw_q3     <= lw_buf3[ra[11:2]];
+		lw_lane   <= ra[1:0];
+		lw_hdr    <= ra[12];
+		pbyte      = (~lwsel_v1 | lw_hdr) ? osd_byte : lw_lane[1] ? (lw_lane[0] ? lw_q3 : lw_q2) : (lw_lane[0] ? lw_q1 : lw_q0);
+		osd_pixel <= pbyte[rot[0] ? ((osd_hcnt2[2:0]-1'd1) ^ {3{~rot[1]}}) : osd_vcnt[2:0]];
+`else
 		osd_byte  <= osd_buffer[rot[0] ? ({osd_hcnt2[6:3], osd_vcnt[7:0]} ^ { {4{~rot[1]}}, {8{rot[1]}} }) : {osd_vcnt[7:3], osd_hcnt[7:0]}];
 		osd_pixel <= osd_byte[rot[0] ? ((osd_hcnt2[2:0]-1'd1) ^ {3{~rot[1]}}) : osd_vcnt[2:0]];
+`endif
 		osd_de[2:1] <= osd_de[1:0];
 	end
 end

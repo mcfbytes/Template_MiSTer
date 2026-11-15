@@ -231,7 +231,12 @@ end
 
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
+`ifdef MISTER_LW
+// gp_in[27] = 1 - an LW directory ("SYS1") is decoded at LW offset 0x40000 (lw_sys_window.sv)
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 1'b1, 6'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 7'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`endif
 wire [31:0] gp_out;
 
 wire  [1:0] io_ver = 1; // 0 - obsolete. 1 - optimized HPS I/O. 2,3 - reserved for future.
@@ -570,7 +575,19 @@ cyclonev_hps_interface_peripheral_uart uart
 	.txd(uart_txd)
 );
 
-wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
+// LW lines and OSDBUF stores, all 0 without MISTER_LW.
+// f2h_irq[8] = pool line 1 (GIC SPI 48): the LW SECTOR doorbell, level-high (lw_sector.sv).
+wire        lw_doorbell;
+// f2h_irq[9] = pool line 2 (GIC SPI 49): the LW SYS cause, level-high (lw_sys_status.sv).
+wire        lw_sys_irq;
+
+// OSDBUF stores from lw_sys_window to both osd shadows.
+wire        lw_osd_we;
+wire  [9:0] lw_osd_addr;
+wire [31:0] lw_osd_data;
+wire  [3:0] lw_osd_be;
+wire  [1:0] lw_osd_ctrl;
+wire [63:0] f2h_irq = {54'd0, lw_sys_irq, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
 cyclonev_hps_interface_interrupts interrupts
 (
 	.irq(f2h_irq)
@@ -1197,7 +1214,14 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.dout(hdmi_data_osd),
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
-		.de_out(hdmi_de_osd)
+		.de_out(hdmi_de_osd),
+
+		.clk_lw(clk_100m),
+		.lw_we(lw_osd_we),
+		.lw_addr(lw_osd_addr),
+		.lw_data(lw_osd_data),
+		.lw_be(lw_osd_be),
+		.lw_ctrl(lw_osd_ctrl)
 	);
 
 	wire hdmi_cs_osd;
@@ -1418,7 +1442,14 @@ osd vga_osd
 	.dout(vga_data_osd),
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
-	.de_out(vga_de_osd)
+	.de_out(vga_de_osd),
+
+	.clk_lw(clk_100m),
+	.lw_we(lw_osd_we),
+	.lw_addr(lw_osd_addr),
+	.lw_data(lw_osd_data),
+	.lw_be(lw_osd_be),
+	.lw_ctrl(lw_osd_ctrl)
 );
 
 wire vga_cs_osd;
@@ -1762,14 +1793,136 @@ wire [13:0] fb_stride;
 	assign fb_stride = 0;
 `endif
 
+////////////////////  LW BRIDGE  ///////////////////////////////////
+// MISTER_LW: lwhps2fpga (0xFF200000, 2 MB) answers every offset (0xDEADBEEF default); the `SYS_LW_CAPS
+// window holds the directory and the PAD, OSDBUF and SYS blocks, plus SECTOR when the core declares it
+// (MISTER_LW_SECTOR_SLOT). Without MISTER_LW none of this is built. Register map: docs/LW_BRIDGE.md.
+`ifdef MISTER_LW
+wire [20:0] lw_raddr, lw_waddr;
+wire        lw_ren, lw_rd_ack, lw_rd_word, lw_write;
+wire [31:0] lw_rdata, lw_wdata;
+wire  [3:0] lw_be;
+wire [48:0] lw_pad;
+wire [34:0] lw_blk_up;
+wire [18:0] lw_blk_dn;
+wire [19:0] lw_card_up;
+wire [12:0] lw_card_dn;
+wire [131:0] lw_st_up;
+
+// The core's SECTOR declaration (its .qsf macros); every one is optional.
+`ifdef MISTER_LW_SECTOR_SLOT
+localparam        LW_SEC_EN    = 1;
+localparam  [7:0] LW_SEC_SLOT  = `MISTER_LW_SECTOR_SLOT;
+`else
+localparam        LW_SEC_EN    = 0;
+localparam  [7:0] LW_SEC_SLOT  = 8'd1;
+`endif
+`ifdef MISTER_LW_SECTOR_FRAME
+localparam  [9:0] LW_SEC_FRAME = `MISTER_LW_SECTOR_FRAME;
+`else
+localparam  [9:0] LW_SEC_FRAME = 10'd128;
+`endif
+`ifdef MISTER_LW_BLKSZ
+localparam  [2:0] LW_BLKSZ     = `MISTER_LW_BLKSZ;
+`else
+localparam  [2:0] LW_BLKSZ     = 3'd2;
+`endif
+`ifdef MISTER_LW_CARD0_WSRC
+localparam  [3:0] LW_MC_SLOT0  = `MISTER_LW_CARD0_SLOT;
+localparam [31:0] LW_MC_WSRC0  = `MISTER_LW_CARD0_WSRC;
+localparam [31:0] LW_MC_EXT0   = `MISTER_LW_CARD0_EXTENT;
+`else
+localparam  [3:0] LW_MC_SLOT0  = 4'hE;
+localparam [31:0] LW_MC_WSRC0  = 32'd0;
+localparam [31:0] LW_MC_EXT0   = 32'd0;
+`endif
+`ifdef MISTER_LW_CARD1_WSRC
+localparam  [3:0] LW_MC_SLOT1  = `MISTER_LW_CARD1_SLOT;
+localparam [31:0] LW_MC_WSRC1  = `MISTER_LW_CARD1_WSRC;
+localparam [31:0] LW_MC_EXT1   = `MISTER_LW_CARD1_EXTENT;
+`else
+localparam  [3:0] LW_MC_SLOT1  = 4'hF;
+localparam [31:0] LW_MC_WSRC1  = 32'd0;
+localparam [31:0] LW_MC_EXT1   = 32'd0;
+`endif
+`ifdef MISTER_LW_CARD_FRAME
+localparam  [9:0] LW_MC_FRAME  = `MISTER_LW_CARD_FRAME;
+`else
+localparam  [9:0] LW_MC_FRAME  = 10'd256;
+`endif
+
+hps_lw_bridge hps_lw_bridge
+(
+	.clk(clk_100m),
+	.lw_raddr(lw_raddr),
+	.lw_ren(lw_ren),
+	.lw_rd_ack(lw_rd_ack),
+	.lw_rd_word(lw_rd_word),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be)
+);
+
+lw_sys_window #(
+	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .BLKSZ(LW_BLKSZ),
+	.MC_SLOT0(LW_MC_SLOT0), .MC_WSRC0(LW_MC_WSRC0), .MC_EXT0(LW_MC_EXT0),
+	.MC_SLOT1(LW_MC_SLOT1), .MC_WSRC1(LW_MC_WSRC1), .MC_EXT1(LW_MC_EXT1), .MC_FRAME(LW_MC_FRAME)
+) lw_sys_window
+(
+	.clk(clk_100m),
+	.lw_raddr(lw_raddr),
+	.lw_ren(lw_ren),
+	.lw_rd_ack(lw_rd_ack),
+	.lw_rd_word(lw_rd_word),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be),
+	.doorbell(lw_doorbell),
+	.sys_irq(lw_sys_irq),
+	.clk_sys(clk_sys),
+	.lw_pad(lw_pad),
+	.blk_up(lw_blk_up),
+	.blk_dn(lw_blk_dn),
+	.card_up(lw_card_up),
+	.card_dn(lw_card_dn),
+	.st_up(lw_st_up),
+	.osd_we(lw_osd_we),
+	.osd_addr(lw_osd_addr),
+	.osd_data(lw_osd_data),
+	.osd_be(lw_osd_be),
+	.osd_ctrl(lw_osd_ctrl)
+);
+`else
+assign lw_doorbell = 0;
+assign lw_sys_irq  = 0;
+assign lw_osd_we   = 0;
+assign lw_osd_addr = 0;
+assign lw_osd_data = 0;
+assign lw_osd_be   = 0;
+assign lw_osd_ctrl = 0;
+`endif
+
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
+`ifdef MISTER_LW
+	// HPS_BUS[313:46]: the LW window's clk_sys lines (bit map: docs/LW_BRIDGE.md)
+	.HPS_BUS({lw_st_up, lw_card_up[19:10], lw_card_dn[12:11], lw_card_up[9:0], lw_card_dn[10:9], lw_card_dn[8:0],
+				 lw_blk_up, lw_blk_dn, lw_pad, f1, HDMI_TX_VS, 
+				 clk_100m, clk_ihdmi,
+				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
+				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
+`else
 	.HPS_BUS({f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
+`endif
 
 	.VGA_R(r_out),
 	.VGA_G(g_out),

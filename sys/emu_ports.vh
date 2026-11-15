@@ -1,3 +1,18 @@
+`ifndef SYS_LW_CAPS
+// CONF_STR field-1 tokens for the LW window sys_top builds with MISTER_LW, each with its trailing comma, then a
+// concatenation comma: write `"NAME;", `SYS_LW_CAPS "rest of field 1;"`. Without MISTER_LW it expands to nothing,
+// so CONF_STR is the stock string byte for byte. IRQ:BLK is the SECTOR doorbell, declared with MISTER_LW_SECTOR_SLOT.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+`define SYS_LW_CAPS "AXI:40000:80000:LW,IRQ:BLK=1:41000,",
+`else
+`define SYS_LW_CAPS "AXI:40000:80000:LW,",
+`endif
+`else
+`define SYS_LW_CAPS
+`endif
+`endif
+
 //Master input clock
 input         CLK_50M,
 
@@ -6,7 +21,11 @@ input         CLK_50M,
 input         RESET,
 
 //Must be passed to hps_io module
+`ifdef MISTER_LW
+inout [313:0] HPS_BUS,
+`else
 inout  [45:0] HPS_BUS,
+`endif
 
 //Base video clock. Usually equals to CLK_SYS.
 output        CLK_VIDEO,
