@@ -55,8 +55,10 @@ assign VIDEO_ARX = (!ar) ? 12'd4 : (ar - 1'd1);
 assign VIDEO_ARY = (!ar) ? 12'd3 : 12'd0;
 
 `include "build_id.v" 
+// `SYS_LW_CAPS (sys/emu_ports.vh) declares the LW window in field 1 when the .qsf sets MISTER_LW, and expands
+// to nothing otherwise, so this string is the stock one byte for byte. Note: no comma after the macro.
 localparam CONF_STR = {
-	"Template;;",
+	"Template;", `SYS_LW_CAPS ";",
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[2],TV Mode,NTSC,PAL;",
@@ -78,6 +80,7 @@ localparam CONF_STR = {
 	"P2O[7:6],Option 2,1,2,3,4;",
 	"-;",
 	"-;",
+	"J,Colour;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
 	"v,0;", // [optional] config version 0-99. 
@@ -90,6 +93,9 @@ wire forced_scandoubler;
 wire   [1:0] buttons;
 wire [127:0] status;
 wire  [10:0] ps2_key;
+wire  [31:0] joystick_0;
+reg  [127:0] status_in;
+reg          status_set = 0;
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
@@ -103,9 +109,34 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.buttons(buttons),
 	.status(status),
 	.status_menumask({status[5]}),
-	
+	.status_in(status_in),
+	.status_set(status_set),
+
+	.joystick_0(joystick_0),
+
 	.ps2_key(ps2_key)
 );
+
+///////////////////////   LW BRIDGE EXAMPLE   /////////////////////
+// The core never sees which link carried a value: with MISTER_LW the HPS may store pads through the LW
+// window's PAD block, and hps_io writes the same joystick_0 register the SPI link writes. Likewise the
+// status back-channel below is the stock status_in/status_set handshake; with MISTER_LW sys_top also raises
+// it as a cause on its own interrupt line (the SYS block), so the HPS need not poll for it.
+// The OSD shadow (OSDBUF) needs nothing here: it lives in sys/osd.v.
+// A core with a block device would also hook the SECTOR block: see docs/LW_BRIDGE.md.
+//
+// Example: the first pad button ("Colour" in CONF_STR's J line) cycles the Noise colour option. The core
+// writes the new status word back, and the OSD shows the change.
+always @(posedge clk_sys) begin
+	reg old_btn = 0;
+
+	old_btn    <= joystick_0[4];
+	status_set <= 0;
+	if (joystick_0[4] & ~old_btn) begin
+		status_in  <= {status[127:5], status[4:3] + 1'd1, status[2:0]};
+		status_set <= 1;
+	end
+end
 
 ///////////////////////   CLOCKS   ///////////////////////////////
 
