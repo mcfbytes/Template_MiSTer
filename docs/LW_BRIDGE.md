@@ -322,11 +322,12 @@ Re-run it after any `sys/` merge.
 - **Template base:** MiSTer-devel/Template_MiSTer `e901a9f` (2026-11-03). This branch applies the LW changes to
   that revision's own `sys/`; its `hps_io` (FFB, analog triggers) is newer than the one the framework was first
   built on.
-- **Register map:** identical to the build validated on a DE10-Nano on 2026-10-25, which covered pads, OSD shadow,
-  SECTOR (CD and cards) and the SYS status line. That build was driven by the reference host at revisions
-  `8a4726d6f`/`ed20140c1`. The testbench's reference configuration reproduces that build's directory word for word.
-  The host's directory, PAD, OSDBUF, SYS and SECTOR parsers at revision `b7ee0f09e` (2026-11-14) were checked
-  against this branch.
+- **Register map:** identical to a build validated on a DE10-Nano on 2026-10-25, which covered pads, the OSD
+  shadow, SECTOR (CD and save slots) and the SYS status line. The testbench's reference configuration reproduces
+  that build's directory word for word.
+- **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and
+  each block's registers, causes and lines. Nothing else about the host is assumed, and a host that never touches
+  the window drives the core over SPI as before.
 - **This Template build has not been run on hardware.**
 
 ## Cost and fit (Quartus 17.0.2 Lite, this Template, 2026-11-14)
