@@ -48,10 +48,11 @@ assign core_data = en ? HPS_BUS[110:95]  : hps_data;
 
 endmodule
 
-// emu side of a memory-card slot on the LW SECTOR route: CARD 0 = hps_io slot 2 (HPS_BUS[169:158]),
-// CARD 1 = slot 3 ([181:170]); the strobe address [157:149] is shared. While the slot's en_sys is set its
-// rd/wr are hidden from hps_io and the card's ack/write/addr/data come from the feeder, the write gated by
-// the card's own ack. memcard_dataOut keeps feeding hps_io (the SPI save path). All on hps_io's clk_sys.
+// emu side of a save slot on the LW SECTOR route: CARD 0 is the slot MISTER_LW_CARD0_SLOT declares
+// (HPS_BUS[169:158]), CARD 1 the MISTER_LW_CARD1_SLOT one ([181:170]); the strobe address [157:149] is shared.
+// While the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's ack/write/addr/data come from
+// the feeder, the write gated by the slot's own ack. The core's buffer read data keeps feeding hps_io's
+// sd_buff_din (the SPI save path). All on hps_io's clk_sys.
 
 module lw_card_mux #(parameter CARD = 0)
 (

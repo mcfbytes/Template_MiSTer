@@ -68,8 +68,8 @@ module lw_sys_window #(
 	output reg [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
 	input      [34:0] blk_up,       // {reset, hps_ack, req, lba[31:0]} on clk_sys, from emu
 	output     [18:0] blk_dn,       // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
-	input      [19:0] card_up,      // {card 2, card 1}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
-	output     [12:0] card_dn,      // {ack2, en_sys2, ack1, en_sys1, addr[8:0]} on clk_sys, to emu
+	input      [19:0] card_up,      // {card 1, card 0}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
+	output     [12:0] card_dn,      // {ack1, en_sys1, ack0, en_sys0, addr[8:0]} on clk_sys, to emu
 	input     [131:0] st_up,        // {stflg[3:0], status_req[127:0]} on clk_sys, from hps_io
 
 	output            osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image

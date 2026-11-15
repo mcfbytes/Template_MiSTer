@@ -63,7 +63,7 @@ always @(posedge clk) begin
 end
 endmodule
 
-// A memory card (rtl/memcard.vhd's HPS handshake): rd or wr with the LBA, both dropped on ack; the
+// A save-slot consumer (a memory card's usual HPS handshake): rd or wr with the LBA, both dropped on ack; the
 // transfer ends when ack falls. The buffer (dpram port B) is written on write & ack at addr.
 module mc_model(input clk, input reset, output reg rd = 0, output reg wr = 0, output reg [6:0] lba = 0,
                 input ack, input write, input [8:0] addr, input [15:0] din, input [8:0] haddr, output reg [15:0] dout);
@@ -342,7 +342,7 @@ always @(posedge clk_sys) begin
 	endcase
 end
 
-// A memcard on hps_io slot 2 (memcard.vhd gates the shared strobe with its own ack).
+// The memory card on hps_io slot 2, which gates the shared strobe with its own ack.
 integer mc_words = 0, mc_sum = 0;
 always @(posedge clk_sys) if (sd_buff_wr && sd_ack[2]) begin
 	mc_words <= mc_words + 1;
@@ -928,7 +928,7 @@ initial begin
 	check_buf("frame 0x1234", 32'h00001234, 588);
 	repeat (200) @(negedge clk_sys);
 	check("1176 strobes", cd_strobes - s0, 1176);
-	check("cd_top saw ack then dropped req", cd_req, 0);
+	check("the CD reader saw ack then dropped req", cd_req, 0);
 	rd("REQ cleared by ack", SEC + 21'h04, 32'd0);
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("STATUS: 1 frame, idle, en_sys", {d[31:16], d[3:0]}, DIAG ? 20'h00011 : 20'h00001);
@@ -970,7 +970,7 @@ initial begin
 	frame_data(32'h00001236, 101, 588);
 	rd("ACCEPT !ok, first_drop 100", SEC + 21'h18, 32'h00000064);
 	repeat (2000) @(negedge clk);
-	check("frame held open (cd_top waits)", cd_frames, n0);
+	check("frame held open (the CD reader waits)", cd_frames, n0);
 	frame_data(32'h00001236, 100, 588);
 	rd("ACCEPT ok after resend", SEC + 21'h18, 32'h8000024C);
 	wait_frame(n0);
@@ -1024,7 +1024,7 @@ initial begin
 	repeat (200) @(negedge clk_sys);
 	check("memcard took its 256 words", mc_words, 256);
 	check("memcard strobes landed while the LW frame was open", overlap, 1);
-	check("cd_top saw only its 1176 strobes", cd_strobes - s0, 1176);
+	check("the CD reader saw only its 1176 strobes", cd_strobes - s0, 1176);
 	check_buf("frame 0x1239 untouched by the memcard", 32'h00001239, 588);
 
 	$display("-- stale BEGIN rejected");
@@ -1056,7 +1056,7 @@ initial begin
 	check("STATUS idle after the fill, ack low", d[3:1], 3'b000);
 	axi_read(SEC + 21'h20, 0, d, dl, beats);
 	check("COUNTS: reset_fills 1", {d[31:24], d[15:0]}, dg(24'h010101));
-	check("cd_top (in reset) completed no frame", cd_frames, n0);
+	check("the CD reader (in reset) completed no frame", cd_frames, n0);
 	frame_data(32'h0000123B, 200, 588);
 	cd_request(32'h0000123C); settle;
 	sec_wr(21'h0C, 32'h0000123C);
@@ -1077,8 +1077,8 @@ initial begin
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("TEST frame counted", d[31:16] - d0[31:16], dg(1));
 	if (!DIAG) check("lean: the BEGIN with no request is rejected", d[3:1], 3'b100);
-	check("no strobes reached cd_top", cd_strobes - s0, 0);
-	check("no ack reached cd_top", cd_frames, n0);
+	check("no strobes reached the CD reader", cd_strobes - s0, 0);
+	check("no ack reached the CD reader", cd_frames, n0);
 	sec_wr(21'h10, 32'h1);
 
 	$display("-- CLR counters");
@@ -1136,7 +1136,7 @@ initial begin
 	check("card 1 took 512 strobes", mc1.strobes - s0, 512);
 	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h12, i)) bad = bad + 1;
 	check("card 1 buffer byte-exact (1 KB)", bad, 0);
-	check("cd_top saw no card strobe", cd_strobes - r, 0);
+	check("the CD reader saw no card strobe", cd_strobes - r, 0);
 	rd("REQ idle after the frame", SEC + 21'h04, 32'd0);
 
 	$display("-- card 2 WRITE answered by WACK");
@@ -1177,7 +1177,7 @@ initial begin
 	check("card 1 frame after the CD", mc1.done - r, 1);
 	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h20, i)) bad = bad + 1;
 	check("card 1 buffer after the CD", bad, 0);
-	check("the card frame put no strobe on cd_top", cd_strobes - n0, 0);
+	check("the card frame put no strobe on the CD reader", cd_strobes - n0, 0);
 
 	$display("-- stale and mismatched card answers rejected");
 	r = mc1.done; s0 = mc1.strobes;
