@@ -214,7 +214,7 @@ An undeclared card's words are 0.
 | `0x40 + 4s` | BEGIN_S[s] | write the LBA: opens a READ frame for slot *s*; `BEGIN_S[primary]` = BEGIN |
 | `0x50 + 4s` | WACK_S[s] | write the LBA: answers a card WRITE with an ack pulse and no strobes |
 | `0x60 + 4s` | LBA_S[s] | slot *s*'s latched LBA |
-| `0x1000 + 4i` | DATA[i] | word *i* of the open frame, *i* < frame_words |
+| `0x1000 + 4i` | DATA[i] | word *i* of the open frame, *i* < that frame's frame_words (a store past it is ignored) |
 
 GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], slot[3:0], wr, rd}`.
 
@@ -294,11 +294,13 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 
 ## Verification
 
-`tb/run.sh` runs the testbench in four arms:
+`tb/run.sh` runs the testbench in five arms:
 - `LW_DIAG=1`;
 - `LW_DIAG=0`;
 - `MENU_CORE`, which checks the header rows;
-- no SECTOR block, the Template's own configuration.
+- no SECTOR block, the Template's own configuration;
+- the SECTOR block at the default geometry (128-word primary, 256-word save slots): a save-slot frame longer
+  than the primary's completes, and the primary is served after it.
 
 It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image that has it.
 

@@ -70,6 +70,14 @@ localparam [1:0]  T_DATA = 2'd0, T_BEGIN = 2'd1, T_ABORT = 2'd2;
 
 `define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 
+// Servable geometry: frames of 1-1023 words; a save-slot frame of at most 256 words (the 9-bit strobe address).
+// synthesis translate_off
+initial if (FRAME == 0 || XFRAME == 0 || XFRAME > 256) begin
+	$display("lw_sector: unservable geometry FRAME=%0d XFRAME=%0d", FRAME, XFRAME);
+	$finish;
+end
+// synthesis translate_on
+
 /////////////////////////////// FIFO (M10K) ///////////////////////////////
 
 localparam DEPTH = 1 << AW;
@@ -149,7 +157,7 @@ wire [15:0] pst    = !any ? 16'd0 : pick == 2'd0 ? SDSTAT : pick == 2'd1 ? xst0 
 
 wire        rreg  = rsel & ~raddr[12] & ~|raddr[11:7];
 wire        wreg  = wsel & write & ~waddr[12] & ~|waddr[11:7] & &be;
-wire        wdat  = wsel & write &  waddr[12] & &be & (waddr[11:2] < FRAME);
+wire        wdat  = wsel & write &  waddr[12] & &be & (waddr[11:2] < flen_w);   // the OPEN frame's length
 wire  [4:0] widx  = waddr[6:2];
 wire  [3:0] ws    = {2'b00, waddr[3:2]};          // BEGIN_S/WACK_S slot number
 wire        w_cause = wreg && widx == 5'h00;

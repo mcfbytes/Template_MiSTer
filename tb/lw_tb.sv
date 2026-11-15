@@ -20,6 +20,8 @@
 // The reference configuration is a CD-style core: a 588-word primary frame on hps_io slot 1 and two 1 KB memory
 // cards on slots 2 and 3, each card image in DDR. LW_TB_NOSEC builds the window without a SECTOR block (the
 // Template's own configuration) and checks that the directory, the block and the doorbell are silent.
+// LW_TB_DEFGEOM runs the SECTOR block at the documented default geometry instead (a 128-word primary frame,
+// 256-word save-slot frames): a save-slot frame longer than the primary's must complete.
 // Run: tb/run.sh (Icarus Verilog >= 12).
 
 `timescale 1ns/1ps
@@ -142,9 +144,14 @@ localparam TB_SEC = 0;
 `else
 localparam TB_SEC = 1;
 `endif
+`ifdef LW_TB_DEFGEOM
+localparam TB_FRAME = 128;
+`else
+localparam TB_FRAME = 588;
+`endif
 
 lw_sys_window #(
-	.SEC_EN(TB_SEC), .SEC_SLOT(8'd1), .SEC_FRAME(10'd588), .BLKSZ(3'd3),
+	.SEC_EN(TB_SEC), .SEC_SLOT(8'd1), .SEC_FRAME(TB_FRAME), .BLKSZ(3'd3),
 	.MC_SLOT0(4'd2), .MC_WSRC0(32'h30100000), .MC_EXT0(32'h00020000),
 	.MC_SLOT1(4'd3), .MC_WSRC1(32'h30200000), .MC_EXT1(32'h00020000), .MC_FRAME(10'd256)
 ) win
@@ -290,8 +297,8 @@ lw_blk_mux cd_lw
 	.hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
 );
 
-// A CD fetch FSM: req with the LBA, drop req on ack, then exactly 1176 strobes, low half then high half,
-// into one staging buffer. It consumes ANY strobe.
+// A CD fetch FSM: req with the LBA, drop req on ack, then exactly 2 x TB_FRAME strobes, low half then high
+// half, into one staging buffer. It consumes ANY strobe.
 reg   [1:0] cst = 0;
 reg   [9:0] fcnt = 0;
 reg  [15:0] clo = 0;
@@ -323,7 +330,7 @@ always @(posedge clk_sys) begin
 		end
 		3: if (cd_wr) begin
 			cbuf[fcnt] <= {cd_data, clo};
-			if (fcnt == 587) begin
+			if (fcnt == TB_FRAME - 1) begin
 				cst       <= 0;
 				cd_frames <= cd_frames + 1;
 			end
@@ -478,13 +485,13 @@ task wait_frame(input integer n);
 	end
 endtask
 
-// words [0, n) carry the pattern, the rest of the 588 must be zero (fill)
+// words [0, n) carry the pattern, the rest of the frame must be zero (fill)
 task check_buf(input string what, input [31:0] lba, input integer n);
 	integer m, bad, first;
 	reg [31:0] e;
 	begin
 		bad = 0; first = -1;
-		for (m = 0; m < 588; m = m + 1) begin
+		for (m = 0; m < TB_FRAME; m = m + 1) begin
 			e = (m < n) ? pat(lba, m) : 32'd0;
 			if (cbuf[m] !== e) begin bad = bad + 1; if (first < 0) first = m; end
 		end
@@ -673,6 +680,59 @@ initial begin
 	check("the shadow was read elsewhere", shd_n > 0, 1);
 	check("header bytes all from osd_buffer", hdr_bad, 0);
 	$display("%s: %0d checks, %0d failures", fails ? "FAILED" : "PASSED", checks, fails);
+	$finish;
+end
+`elsif LW_TB_DEFGEOM
+// The documented default geometry: frames are bounded by the OPEN frame's length, so a save-slot frame longer
+// than the primary's completes, and the shared feeder still serves the primary after it.
+initial begin
+	repeat (4) @(negedge clk);
+	$display("-- default geometry: a %0d-word primary, 256-word save slots", TB_FRAME);
+	rd("e1 slot/frame 128", 21'h40060, 32'h01000080);
+	rd("e1 w7 card 1 slot/flags/frame 256", 21'h4006C, 32'h02030100);
+	sec_wr(21'h10, 32'hC1); settle;
+
+	$display("-- a 128-word primary frame");
+	n0 = cd_frames; s0 = cd_strobes;
+	cd_request(32'h00000100); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h0C, 32'h00000100);
+	frame_data(32'h00000100, 0, 128);
+	rd("ACCEPT ok, 128", SEC + 21'h18, 32'h80000080);
+	wait_frame(n0);
+	check_buf("primary frame 0x100", 32'h00000100, 128);
+	repeat (200) @(negedge clk_sys);
+	check("256 strobes", cd_strobes - s0, 256);
+
+	$display("-- a 256-word save-slot frame, longer than the primary's");
+	r = mc1.done; s0 = mc1.strobes;
+	mc1.go(0, 7'h12); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h48, 32'h00000012);
+	frame_data(32'h00000012, 0, 256);
+	rd("ACCEPT ok, 256: stores past the primary's length land", SEC + 21'h18, 32'h80000100);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame done", mc1.done - r, 1);
+	check("card 1 took 512 strobes", mc1.strobes - s0, 512);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h12, i)) bad = bad + 1;
+	check("card 1 buffer byte-exact (1 KB)", bad, 0);
+	axi_read(SEC + 21'h14, 0, d, dl, beats);
+	check("STATUS idle after the card frame, ack low", d[3:1], 3'b000);
+
+	$display("-- the primary after the card: the shared feeder is free");
+	n0 = cd_frames;
+	cd_request(32'h00000101); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h0C, 32'h00000101);
+	frame_data(32'h00000101, 0, 128);
+	rd("ACCEPT ok, 128 after the card", SEC + 21'h18, 32'h80000080);
+	wait_frame(n0);
+	check_buf("primary frame 0x101 after the card", 32'h00000101, 128);
+	rd("REQ idle", SEC + 21'h04, 32'd0);
+	check("no ring left", doorbell, 0);
+
+	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
+	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
 	$finish;
 end
 `else
