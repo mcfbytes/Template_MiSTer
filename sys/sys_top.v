@@ -604,7 +604,8 @@ cyclonev_hps_interface_peripheral_uart uart
 	.txd(uart_txd)
 );
 
-// LW lines and OSDBUF stores, all 0 without MISTER_LW.
+`ifdef MISTER_LW
+// LW lines and OSDBUF stores (lw_sys_window.sv).
 // f2h_irq[8] = pool line 1 (GIC SPI 48): the LW SECTOR doorbell, level-high (lw_sector.sv).
 wire        lw_doorbell;
 // f2h_irq[9] = pool line 2 (GIC SPI 49): the LW SYS cause, level-high (lw_sys_status.sv).
@@ -617,6 +618,9 @@ wire [31:0] lw_osd_data;
 wire  [3:0] lw_osd_be;
 wire  [1:0] lw_osd_ctrl;
 wire [63:0] f2h_irq = {54'd0, lw_sys_irq, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
+`else
+wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
+`endif
 cyclonev_hps_interface_interrupts interrupts
 (
 	.irq(f2h_irq)
@@ -1243,14 +1247,16 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.dout(hdmi_data_osd),
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
-		.de_out(hdmi_de_osd),
-
+		.de_out(hdmi_de_osd)
+`ifdef MISTER_LW
+		,
 		.clk_lw(clk_100m),
 		.lw_we(lw_osd_we),
 		.lw_addr(lw_osd_addr),
 		.lw_data(lw_osd_data),
 		.lw_be(lw_osd_be),
 		.lw_ctrl(lw_osd_ctrl)
+`endif
 	);
 
 	wire hdmi_cs_osd;
@@ -1471,14 +1477,16 @@ osd vga_osd
 	.dout(vga_data_osd),
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
-	.de_out(vga_de_osd),
-
+	.de_out(vga_de_osd)
+`ifdef MISTER_LW
+	,
 	.clk_lw(clk_100m),
 	.lw_we(lw_osd_we),
 	.lw_addr(lw_osd_addr),
 	.lw_data(lw_osd_data),
 	.lw_be(lw_osd_be),
 	.lw_ctrl(lw_osd_ctrl)
+`endif
 );
 
 wire vga_cs_osd;
@@ -1974,14 +1982,9 @@ lw_sys_window #(
 	.lane_din()
 `endif
 );
-`else
-assign lw_doorbell = 0;
-assign lw_sys_irq  = 0;
-assign lw_osd_we   = 0;
-assign lw_osd_addr = 0;
-assign lw_osd_data = 0;
-assign lw_osd_be   = 0;
-assign lw_osd_ctrl = 0;
+`ifdef LW_LANE_LINK
+`undef LW_LANE_LINK
+`endif
 `endif
 
 emu emu

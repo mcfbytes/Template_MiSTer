@@ -15,6 +15,9 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+`ifdef MISTER_LW
+`default_nettype none
+
 //============================================================================
 //  hps_lw_bridge.sv  --  lwhps2fpga bridge instantiation + AXI3 firewall
 //
@@ -30,20 +33,20 @@
 
 module hps_lw_bridge
 (
-	input             clk,          // clk_100m == h2f_user0_clk
+	input wire         clk,          // clk_100m == h2f_user0_clk
 
 	// simple synchronous register bus, read side
-	output     [20:0] lw_raddr,     // byte address inside the 2MB window
-	output            lw_ren,       // fetch pulse (NO side effects allowed)
-	output            lw_rd_ack,    // accepted-R-beat pulse (side effects fire here)
-	output            lw_rd_word,   // this beat is a word-exact single access
-	input      [31:0] lw_rdata,     // combinational, must answer every lw_raddr
+	output wire [20:0] lw_raddr,     // byte address inside the 2MB window
+	output wire        lw_ren,       // fetch pulse (NO side effects allowed)
+	output wire        lw_rd_ack,    // accepted-R-beat pulse (side effects fire here)
+	output wire        lw_rd_word,   // this beat is a word-exact single access
+	input wire  [31:0] lw_rdata,     // combinational, must answer every lw_raddr
 
 	// simple synchronous register bus, write side
-	output     [20:0] lw_waddr,
-	output            lw_write,     // accepted-W-beat pulse
-	output     [31:0] lw_wdata,
-	output      [3:0] lw_be
+	output wire [20:0] lw_waddr,
+	output wire        lw_write,     // accepted-W-beat pulse
+	output wire [31:0] lw_wdata,
+	output wire  [3:0] lw_be
 );
 
 // fabric side of the lwhps2fpga bridge (HPS is the AXI3 master)
@@ -176,53 +179,53 @@ endmodule
 
 module lw_axi_regbus
 (
-	input             clk,
+	input wire         clk,
 
 	// AXI3 slave
-	input      [11:0] awid,
-	input      [20:0] awaddr,
-	input       [3:0] awlen,
-	input       [2:0] awsize,
-	input       [1:0] awburst,
-	input             awvalid,
-	output            awready,
+	input wire  [11:0] awid,
+	input wire  [20:0] awaddr,
+	input wire   [3:0] awlen,
+	input wire   [2:0] awsize,
+	input wire   [1:0] awburst,
+	input wire         awvalid,
+	output wire        awready,
 
-	input      [31:0] wdata,
-	input       [3:0] wstrb,
-	input             wlast,
-	input             wvalid,
-	output            wready,
+	input wire  [31:0] wdata,
+	input wire   [3:0] wstrb,
+	input wire         wlast,
+	input wire         wvalid,
+	output wire        wready,
 
-	output     [11:0] bid,
-	output      [1:0] bresp,
-	output            bvalid,
-	input             bready,
+	output wire [11:0] bid,
+	output wire  [1:0] bresp,
+	output wire        bvalid,
+	input wire         bready,
 
-	input      [11:0] arid,
-	input      [20:0] araddr,
-	input       [3:0] arlen,
-	input       [2:0] arsize,
-	input       [1:0] arburst,
-	input             arvalid,
-	output            arready,
+	input wire  [11:0] arid,
+	input wire  [20:0] araddr,
+	input wire   [3:0] arlen,
+	input wire   [2:0] arsize,
+	input wire   [1:0] arburst,
+	input wire         arvalid,
+	output wire        arready,
 
-	output     [11:0] rid,
-	output     [31:0] rdata,
-	output      [1:0] rresp,
-	output            rlast,
-	output            rvalid,
-	input             rready,
+	output wire [11:0] rid,
+	output wire [31:0] rdata,
+	output wire  [1:0] rresp,
+	output wire        rlast,
+	output wire        rvalid,
+	input wire         rready,
 
 	// register bus
-	output     [20:0] lw_raddr,
-	output            lw_ren,
-	output            lw_rd_ack,
-	output            lw_rd_word,
-	input      [31:0] lw_rdata,
-	output     [20:0] lw_waddr,
-	output            lw_write,
-	output     [31:0] lw_wdata,
-	output      [3:0] lw_be
+	output wire [20:0] lw_raddr,
+	output wire        lw_ren,
+	output wire        lw_rd_ack,
+	output wire        lw_rd_word,
+	input wire  [31:0] lw_rdata,
+	output wire [20:0] lw_waddr,
+	output wire        lw_write,
+	output wire [31:0] lw_wdata,
+	output wire  [3:0] lw_be
 );
 
 // burst address stepping: FIXED holds, INCR adds 1<<size, WRAP wraps inside
@@ -351,3 +354,6 @@ always @(posedge clk) begin
 end
 
 endmodule
+
+`default_nettype wire
+`endif

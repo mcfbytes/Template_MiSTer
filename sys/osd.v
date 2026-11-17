@@ -18,17 +18,18 @@ module osd
 	output reg    vs_out,
 	output reg    hs_out,
 
-	output reg    osd_status,
-
-	// OSDBUF (lw_sys_window.sv, MISTER_LW): a shadow of osd_buffer stored over the LW bridge.
+	output reg    osd_status
+`ifdef MISTER_LW
+	,
+	// OSDBUF (lw_sys_window.sv): a shadow of osd_buffer stored over the LW bridge.
 	// lw_ctrl = {LWSEL & HR, LWSEL}, registers on clk_lw: video reads the shadow; highres for the shadow.
-	// Without MISTER_LW these inputs are unused and the pixel path is the stock one.
 	input         clk_lw,
 	input         lw_we,
 	input   [9:0] lw_addr,
 	input  [31:0] lw_data,
 	input   [3:0] lw_be,
 	input   [1:0] lw_ctrl
+`endif
 );
 
 parameter  OSD_COLOR    =  3'd4;
@@ -70,12 +71,12 @@ always @(posedge clk_lw) if (lw_we) begin
 	if (lw_be[3]) lw_buf3[lw_addr] <= lw_data[31:24];
 end
 
-`define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
-`SYNC reg lwhr_s0 = 0;
-`SYNC reg lwhr_s1 = 0;
-`SYNC reg lwsel_v0 = 0;
-`SYNC reg lwsel_v1 = 0;
-`undef SYNC
+`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+`LW_SYNC reg lwhr_s0 = 0;
+`LW_SYNC reg lwhr_s1 = 0;
+`LW_SYNC reg lwsel_v0 = 0;
+`LW_SYNC reg lwsel_v1 = 0;
+`undef LW_SYNC
 `endif
 
 always@(posedge clk_sys) begin
