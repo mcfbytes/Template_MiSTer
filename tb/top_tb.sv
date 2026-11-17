@@ -29,7 +29,9 @@
 //   - each osd instance that exists carries the window's OSDBUF store ports, on clk_100m;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
 //     also through the lane's link front;
-//   - an LW read through the bridge atom returns the directory magic and the default word.
+//   - an LW read through the bridge atom returns the directory magic and the default word;
+//   - h2f_rst_n reaches the firewall through sysmem: low raises lw_hrst, and a read its master abandoned is
+//     freed at the release, after which a read is answered.
 // Implicit nets and the elaboration itself are judged by tb/run.sh.
 
 `timescale 1ns/1ps
@@ -49,11 +51,11 @@ always #(`LW_TB_SYS_HP_PS / 1000.0) clk_sys = ~clk_sys;
 always #6.734  clk_hdmi  = ~clk_hdmi;
 always #20.345 clk_audio = ~clk_audio;
 
-// Driven into the design by the stubs: the HPS reset, GPO, and the LW master's address and valid lines.
+// Driven into the design by the stubs: the HPS reset, GPO, and the LW master's address, valid and RREADY lines.
 reg        h2f_rst_n = 0;
 reg [31:0] gp_out = 0;
 reg [20:0] araddr = 0, awaddr = 0;
-reg        arvalid = 0, awvalid = 0, wvalid = 0;
+reg        arvalid = 0, awvalid = 0, wvalid = 0, rready = 1;
 reg [31:0] wdata = 0;
 
 sys_top dut
@@ -135,6 +137,9 @@ endtask
 task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 
 `ifdef MISTER_LW
+integer n_freed = 0;   // the firewall's read machine freed at a release
+always @(posedge clk_100m) if (dut.hps_lw_bridge.lw_freed === 2'b01) n_freed = n_freed + 1;
+
 task lw_read(input [20:0] a, output [31:0] d);
 	integer n;
 	reg ar_hs;
@@ -300,6 +305,26 @@ initial begin
 	$display("-- an LW read through the bridge atom");
 	lw_read(21'h40000, d); check("directory magic at 0x40000", d, 32'h31535953);
 	lw_read(21'h00000, d); check("undecoded 0x00000", d, 32'hDEADBEEF);
+
+	$display("-- the HPS reset reaches the firewall");
+	check("lw_hrst low, the firewall idle", {dut.hps_lw_bridge.lw_hrst, dut.hps_lw_bridge.idle}, 2'b01);
+	rready = 0;
+	@(negedge clk_100m); araddr = 21'h40000; arvalid = 1;
+	@(negedge clk_100m); arvalid = 0;
+	repeat (4) @(negedge clk_100m);
+	check("a read its master abandoned: RVALID held, not idle", {dut.hps_lw_bridge.rvalid, dut.hps_lw_bridge.idle}, 2'b10);
+	k = n_freed;
+	h2f_rst_n = 0;
+	repeat (6) @(negedge clk_100m);
+	check("h2f_rst_n low: sysmem's hps_rst_n", dut.sysmem.hps_rst_n, 1'b0);
+	check("h2f_rst_n low: lw_hrst", dut.hps_lw_bridge.lw_hrst, 1'b1);
+	h2f_rst_n = 1;
+	repeat (16) @(negedge clk_100m);
+	check("after the release: lw_hrst", dut.hps_lw_bridge.lw_hrst, 1'b0);
+	check("after the release: read machines freed", n_freed - k, 1);
+	check("after the release: RVALID dropped, idle", {dut.hps_lw_bridge.rvalid, dut.hps_lw_bridge.idle}, 2'b01);
+	rready = 1;
+	lw_read(21'h40000, d); check("a read after the release", d, 32'h31535953);
 `endif
 
 	$display("%s: %0d checks, %0d failures", (fails != 0) ? "FAILED" : "PASSED", checks, fails);

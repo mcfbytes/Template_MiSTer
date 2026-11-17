@@ -650,9 +650,15 @@ end
 
 wire reset;
 wire clk_100m;
+`ifdef MISTER_LW
+wire lw_hps_rst_n;     // the HPS's fabric reset, to the LW firewall
+`endif
 
 sysmem_lite sysmem
 (
+`ifdef MISTER_LW
+	.hps_rst_n(lw_hps_rst_n),
+`endif
 	//Reset/Clock
 	.reset_core_req(reset_req),
 	.reset_out(reset),
@@ -1920,6 +1926,10 @@ localparam        LW_LANE_EN   = 0;
 hps_lw_bridge hps_lw_bridge
 (
 	.clk(clk_100m),
+	.hps_rst_n(lw_hps_rst_n),
+	.lw_hrst(),
+	.lw_freed(),
+	.idle(),
 	.lw_raddr(lw_raddr),
 	.lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr),
