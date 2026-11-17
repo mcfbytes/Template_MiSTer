@@ -84,6 +84,15 @@ and writes there are dropped.
 Nothing back-pressures. A store is accepted in fixed cycles. Where a FIFO is full, the store is dropped and counted,
 and the protocol detects the loss (PAD analog drops, SECTOR `ACCEPT`).
 
+**A store is a single-beat write** (`AWLEN` 0). The beats of a burst write are accepted, answered OKAY and dropped,
+so a `memcpy` into the window, or a write-combined or cached mapping that merges stores into bursts, loses them.
+**A store is in effect once its write response has returned**: read anything that depends on it (a CAUSE word after
+clearing it, ACCEPT after the last DATA, RHEAD after RPOP) only after that. Map the window strongly ordered, where
+each access completes before the next begins (on ARMv7 Linux an `mmap` of `/dev/mem` or a UIO mapping, both
+non-cached), or, with a Device mapping (`ioremap`), issue a DSB after the store. Read bursts of every type return
+the words of the addresses they step through; one that would cross a 4 KB boundary (an AXI master never issues
+one) wraps inside its 4 KB.
+
 ## The window
 
 Offsets are from the window start; absolute LW offset = `0x40000` + offset.

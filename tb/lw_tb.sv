@@ -139,7 +139,7 @@ reg [31:0] wdata = 0;
 reg  [3:0] wstrb = 4'hF;
 
 wire [20:0] lw_raddr, lw_waddr;
-wire        lw_write;
+wire        lw_write, lw_wburst;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
 wire [48:0] lw_pad;
@@ -160,8 +160,16 @@ hps_lw_bridge bridge
 (
 	.clk(clk),
 	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
-	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be)
+	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be), .lw_wburst(lw_wburst)
 );
+
+// The register bus's store pulses, the dropped burst beats and the OSD image stores, counted.
+integer n_lwwr = 0, n_lwwb = 0, n_osdwe = 0;
+always @(posedge clk) begin
+	if (lw_write)  n_lwwr  = n_lwwr + 1;
+	if (lw_wburst) n_lwwb  = n_lwwb + 1;
+	if (osd_we)    n_osdwe = n_osdwe + 1;
+end
 
 `ifdef MISTER_LW_SECTOR_SLOT
 localparam TB_SEC = 1;
@@ -523,7 +531,9 @@ end
 `endif
 
 integer fails = 0, checks = 0, lchecks = 0;
-integer wlat_ref = -1, rlat_ref = -1;
+// The read latency every read is checked against is the firewall's own; the write latency is the first one seen.
+integer wlat_ref = -1, rlat_ref;
+initial rlat_ref = bridge.adapter.RD_LAT;
 
 // The crossing cells alone (lw_cdc.sv): a 32-bit lw_xfer each way between clk_100m and clk_sys, and a Gray count
 // each way through lw_sync. Each receiver sorts every word: the next one its sender launched, a repeat of the
@@ -742,6 +752,66 @@ task axi_wburst(input [20:0] a, input [3:0] len, input [1:0] bt, output integer 
 	end
 endtask
 
+// The clk_100m edges of the last AR and W handshakes.
+realtime t_arhs = 0, t_whs = 0;
+always @(posedge clk) begin
+	if (arvalid && arready) t_arhs = $realtime;
+	if (wvalid && wready)   t_whs  = $realtime;
+end
+
+// A store, then a read whose ARVALID rises in the cycle after the write response is taken: the earliest read of
+// a host that waits for the response.
+task store_read(input [20:0] wa, input [31:0] wd, input [20:0] ra, output [31:0] rv);
+	integer n, nb;
+	reg aw_hs, w_hs;
+	reg [31:0] vl;
+	begin
+		@(negedge clk);
+		awaddr = wa; awlen = 0; awsize = 2; awvalid = 1;
+		wdata = wd; wstrb = 4'hF; wlast = 1; wvalid = 1;
+		n = 0;
+		while (!bvalid && n <= 64) begin
+			aw_hs = awvalid & awready; w_hs = wvalid & wready;
+			@(negedge clk); n = n + 1;
+			if (aw_hs) awvalid = 0;
+			if (w_hs) wvalid = 0;
+		end
+		awvalid = 0; wvalid = 0;
+		if (!bvalid) begin $display("FAIL write %06h: no BVALID", wa); fails = fails + 1; end
+		lat_check("BVALID", n, wlat_ref);
+		axi_read(ra, 0, rv, vl, nb);   // BREADY is high: the response is taken at the next edge
+	end
+endtask
+
+// A store's AW alone, then its data beat and a read placed so that the read's AR is accepted `off` cycles after
+// the data beat (before it when negative, -2 at the earliest). Returns the word read, and checks the placement.
+task race_store_read(input [20:0] wa, input [31:0] wd, input [20:0] ra, input integer off, output [31:0] rv);
+	integer dt;
+	begin
+		@(negedge clk);
+		awaddr = wa; awlen = 0; awsize = 2; awvalid = 1; wvalid = 0;
+		@(negedge clk);
+		awvalid = 0;
+		fork
+			begin
+				repeat (3) @(negedge clk);
+				wdata = wd; wstrb = 4'hF; wlast = 1; wvalid = 1;
+				@(negedge clk); wvalid = 0;
+			end
+			begin
+				repeat (3 + off) @(negedge clk);
+				araddr = ra; arlen = 0; arsize = 2; arvalid = 1;
+				@(negedge clk); arvalid = 0;
+				while (!rvalid) @(negedge clk);
+				rv = rdata;
+			end
+		join
+		repeat (4) @(negedge clk);
+		dt = $rtoi((t_arhs - t_whs + 1000.0) / 10.0 + 0.5) - 100;
+		check($sformatf("race: AR accepted %0d cycles from the data beat", off), dt, off);
+	end
+endtask
+
 function [20:0] pad_addr(input [7:0] op, input [7:0] idx);
 	pad_addr = 21'h40000 + 21'h40000 + {op, 10'd0} + {idx, 2'b00};
 endfunction
@@ -812,6 +882,47 @@ task burst_vs_ref(input string what, input [20:0] a, input [3:0] len, input [1:0
 	end
 endtask
 
+
+// The address a beat of a size-2 read burst reads: the low 12 bits step, [20:12] hold.
+function [20:0] beat12(input [20:0] a, input [3:0] len, input [1:0] bt, input [3:0] j);
+	reg [11:0] sz, lo;
+	begin
+		sz = ({8'd0, len} + 12'd1) << 2;
+		lo = a[11:0] & ~(sz - 12'd1);
+		case (bt)
+			2'b00:   beat12 = a;
+			2'b10:   beat12 = {a[20:12], lo + ((a[11:0] - lo + {6'd0, j, 2'b00}) % sz)};
+			default: beat12 = {a[20:12], a[11:0] + {6'd0, j, 2'b00}};
+		endcase
+	end
+endfunction
+
+// One read burst against single reads of the addresses beat12 gives (reads are pure): beats, words and ID.
+task burst_vs_single(input string what, input [20:0] a, input [3:0] len, input [1:0] bt);
+	integer j, nb, nbad;
+	reg [31:0] e [0:15];
+	reg [31:0] v, vl;
+	reg [20:0] ba;
+	begin
+		for (j = 0; j <= len; j = j + 1) begin axi_read(beat12(a, len, bt, j[3:0]), 0, v, vl, nb); e[j] = v; end
+		arburst = bt; arid = {8'hC4, len};
+		axi_read(a, len, d, dl, beats);
+		arburst = 2'b01; arid = 0;
+		nb = len;
+		nb = nb + 1;
+		check({what, ": beats"}, beats, nb);
+		if (beats < nb) nb = beats;
+		nbad = 0;
+		for (j = 0; j < nb; j = j + 1) begin
+			ba = beat12(a, len, bt, j[3:0]);
+			if (rb_d[j] !== e[j] || rb_id[j] !== {8'hC4, len}) begin
+				if (nbad == 0) $display("     %s: beat %0d at %06h got %08h/%03h exp %08h", what, j, ba, rb_d[j], rb_id[j], e[j]);
+				nbad = nbad + 1;
+			end
+		end
+		check({what, ": every beat's word and ID, stepped inside its 4 KB"}, nbad, 0);
+	end
+endtask
 
 localparam [20:0] SEC = 21'h41000;
 reg [31:0] gen0, d0;
@@ -1479,7 +1590,7 @@ initial begin
 	check("burst beats", beats, 4);
 	check("burst last (scratch)", dl, dg(32'hA5C35A5A));
 
-	$display("-- firewall: read bursts of every type step their words; a burst across 4 KB is answered");
+	$display("-- firewall: read bursts of every type step their words on 12 bits; a size above a word steps a word");
 	for (i = 0; i < 64; i = i + 1) begin axi_read(21'h40000 + {13'd0, i[5:0], 2'b00}, 0, d, dl, beats); wref[i] = d; end
 	burst_vs_ref("INCR 2",  21'h40008, 4'd1,  2'b01);
 	burst_vs_ref("INCR 4",  21'h40010, 4'd3,  2'b01);
@@ -1493,17 +1604,24 @@ initial begin
 	burst_vs_ref("WRAP 16 from the sixth word",  21'h40094, 4'd15, 2'b10);
 	burst_vs_ref("WRAP 16 from its first word",  21'h400C0, 4'd15, 2'b10);
 	burst_vs_ref("reserved burst type 3, 4 beats", 21'h40030, 4'd3, 2'b11);
+	rsize = 3;
+	burst_vs_ref("INCR 4 of 8-byte size steps a word", 21'h40010, 4'd3, 2'b01);
+	burst_vs_ref("WRAP 4 of 8-byte size wraps on words", 21'h40018, 4'd3, 2'b10);
+	rsize = 7;
+	burst_vs_ref("INCR 8 of 128-byte size steps a word", 21'h40020, 4'd7, 2'b01);
+	burst_vs_ref("WRAP 16 of 128-byte size wraps on words", 21'h40094, 4'd15, 2'b10);
+	rsize = 2;
 	arburst = 2'b10; axi_read(21'h40004, 4'd2, d, dl, beats); arburst = 2'b01;
 	check("WRAP of an illegal length (3 beats) answered", beats, 3);
-	axi_read(21'h40FF8, 4'd3, d, dl, beats);
-	check("INCR across a 4 KB boundary inside the window answered", beats, 4);
-	axi_read(21'h3FFF8, 4'd15, d, dl, beats);
-	check("INCR 16 across the window's first 4 KB boundary answered", beats, 16);
-	check("... its first beat is the default responder's", rb_d[0], 32'hDEADBEEF);
-	axi_read(21'h1FFFF8, 4'd3, d, dl, beats);
-	check("INCR across the top of the 2 MB answered", beats, 4);
-	arburst = 2'b00; axi_read(21'h1FFFFC, 4'd15, d, dl, beats); arburst = 2'b01;
-	check("FIXED 16 at the last word answered", beats, 16);
+
+	$display("-- firewall: a read burst that would cross 4 KB steps inside its 4 KB, and is answered");
+	burst_vs_single("INCR 4 across the directory's 4 KB end", 21'h40FF8, 4'd3, 2'b01);
+	burst_vs_single("INCR 16 across the window's first 4 KB boundary", 21'h3FFF8, 4'd15, 2'b01);
+	burst_vs_single("INCR 4 across the top of SYS", 21'h43FF8, 4'd3, 2'b01);
+	burst_vs_single("INCR 4 across the window's last 4 KB end, onto PAD", 21'h7FFF8, 4'd3, 2'b01);
+	burst_vs_single("INCR 4 across the top of the 2 MB", 21'h1FFFF8, 4'd3, 2'b01);
+	burst_vs_single("FIXED 16 at the last word", 21'h1FFFFC, 4'd15, 2'b00);
+	burst_vs_single("reserved type 3, 16 beats across 4 KB", 21'h40FE0, 4'd15, 2'b11);
 	for (i = 0; i < 4; i = i + 1) begin
 		awid = {10'h0F0, i[1:0]};
 		axi_wburst(21'h000100, 4'd3, i[1:0], beats);
@@ -1519,6 +1637,75 @@ initial begin
 		if (d !== wref[i]) bad = bad + 1;
 	end
 	check("the directory reads the same after every burst", bad, 0);
+
+	$display("-- firewall: a burst write has no effect, every beat answered; a single-beat store of any type does");
+	begin : burst_writes
+		reg [511:0] sw0, ss0;
+		reg [255:0] sl0;
+		reg [20:0]  a;
+		reg  [3:0]  len;
+		reg [31:0]  oc;
+		integer b, t, m, nw0, nb0, no0, nbeats, nresp, nbad;
+		// clk_sys stopped, so only a store can move the state compared
+		sys_run = 0;
+		repeat (50) @(negedge clk);
+		sw0 = pure_win(); ss0 = pure_sec(); sl0 = pure_lane();
+		pure_view(0, nbad);
+		nw0 = n_lwwr; nb0 = n_lwwb; no0 = n_osdwe; nbeats = 0;
+		for (b = 0; b < 13; b = b + 1) begin
+			case (b)
+				0:  a = SEC + 21'h10;                  // SECTOR CTRL
+				1:  a = SEC + 21'h0C;                  // BEGIN
+				2:  a = SEC + 21'h44;                  // BEGIN_S[1]
+				3:  a = SEC + 21'h00;                  // SECTOR CAUSE
+				4:  a = SEC + 21'h1000;                // DATA[0]
+				5:  a = pad_addr(8'h02, 0);            // PAD
+				6:  a = pad_addr(8'h1A, 0);            // PAD, analog
+				7:  a = OSD;                           // IMAGE
+				8:  a = OSD + 21'h1000;                // OSD CTRL
+				9:  a = SYSB;                          // SYS CAUSE
+				10: a = 21'h4000C;                     // SCRATCH
+				11: a = 21'h46000;                     // LANE BEGIN, WORD, END, RPOP
+				default: a = 21'h4600C;
+			endcase
+			for (t = 0; t < 4; t = t + 1)
+				for (m = 0; m < 3; m = m + 1) begin
+					len = (m == 0) ? 4'd1 : (m == 1) ? 4'd3 : 4'd15;
+					axi_wburst(a, len, t[1:0], nresp);
+					checks = checks + 1;
+					if (nresp != 1) begin
+						fails = fails + 1;
+						$display("FAIL burst write %06h type %0d, %0d beats: %0d responses", a, t, len + 1, nresp);
+					end
+					nbeats = nbeats + len + 1;
+				end
+		end
+		check("burst writes: no beat reached the register bus", n_lwwr - nw0, 0);
+		check("burst writes: no beat reached the OSD image", n_osdwe - no0, 0);
+		check("burst writes: every beat reported dropped", n_lwwb - nb0, nbeats);
+		pure_view(1, nbad);
+		check("burst writes: the readable view is unchanged", nbad, 0);
+		check("burst writes: the window's, PAD's and SYS's state is unchanged", pure_win() === sw0, 1);
+		check("burst writes: SECTOR's state is unchanged", pure_sec() === ss0, 1);
+		check("burst writes: the lane's state is unchanged", pure_lane() === sl0, 1);
+		sys_run = 1;
+		settle;
+		// a single beat (AWLEN 0) is a store whatever its burst type
+		axi_read(OSD + 21'h1000, 0, oc, dl, beats);
+		nw0 = n_lwwr; nb0 = n_lwwb;
+		for (t = 0; t < 4; t = t + 1) begin
+			awburst = t[1:0];
+			axi_write(OSD + 21'h1000, {30'd0, ~t[1:0]}, 4'hF);
+			rd($sformatf("single store, burst type %0d: OSD CTRL", t), OSD + 21'h1000, {30'd0, ~t[1:0]});
+			axi_write(21'h4000C, 32'h5C000000 | t, 4'hF);
+			rd($sformatf("single store, burst type %0d: SCRATCH", t), 21'h4000C, dg(32'h5C000000 | t));
+		end
+		awburst = 2'b01;
+		check("single stores: one bus pulse each", n_lwwr - nw0, 8);
+		check("single stores: none dropped", n_lwwb - nb0, 0);
+		axi_write(OSD + 21'h1000, oc, 4'hF);
+		rd("OSD CTRL restored", OSD + 21'h1000, oc);
+	end
 
 	$display("-- clk_sys stopped (core held in reset)");
 	sys_run = 0;
@@ -2638,6 +2825,82 @@ initial begin
 	end
 `endif
 
+	$display("-- a store is in effect at its response: a read issued after it sees it, one accepted before its beat may not");
+	begin : store_order
+		reg [31:0] v, oc, p, dr, rs, h;
+		integer k, nbad;
+		st_req(st_pat(600)); settle;
+		check("order: SYS cause pending", sys_irq, 1);
+		store_read(SYSB, 32'h1, SYSB, v);
+		check("order: a W1C store on SYS CAUSE, then CAUSE reads clear", v, 32'd0);
+		store_read(21'h4000C, 32'h0D15EA5E, 21'h4000C, v);
+		check("order: a store to SCRATCH, then SCRATCH", v, dg(32'h0D15EA5E));
+		axi_read(OSD + 21'h1000, 0, oc, dl, beats);
+		store_read(OSD + 21'h1000, 32'h2, OSD + 21'h1000, v);
+		check("order: a store to OSD CTRL, then OSD CTRL", v, 32'h2);
+		axi_write(OSD + 21'h1000, oc, 4'hF);
+		// the read's address accepted two cycles and one before the W1C's data beat, in its cycle and after it
+		for (k = -2; k <= 1; k = k + 1) begin
+			st_req(st_pat(610 + k)); settle;
+			race_store_read(SYSB, 32'h1, SYSB, k, v);
+			check($sformatf("order: CAUSE read accepted %0d cycles from the W1C's data beat", k), v,
+			      k < 0 ? 32'h00100001 : 32'd0);
+			check("order: the W1C cleared it either way", sys_irq, 0);
+		end
+		if (TB_SEC) begin
+			cause_drain(SEC);
+			sec_wr(21'h10, 32'h0); settle;
+			cd_request(32'h00007100); settle;
+			check("order: SECTOR cause pending", doorbell, 1);
+			store_read(SEC, 32'h1, SEC, v);
+			check("order: a W1C store on SECTOR CAUSE, then CAUSE reads clear", v, 32'd0);
+			store_read(SEC + 21'h10, 32'h1, SEC + 21'h04, v);
+			check("order: an EN store, then REQ shows the open request", v[31], 1);
+			sec_wr(21'h10, 32'h0);
+			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
+			if (doorbell) cause_drain(SEC);
+			rd("order: REQ idle again", SEC + 21'h04, 32'd0);
+			sec_wr(21'h10, 32'h1); settle;
+			n0 = cd_frames;
+			cd_request(32'h00007200); settle;
+			cause_drain(SEC);
+			sec_wr(21'h0C, 32'h00007200);
+			frame_data(32'h00007200, 0, TB_FRAME - 1);
+			store_read(SEC + 21'h1000 + 4*(TB_FRAME - 1), pat(32'h00007200, TB_FRAME - 1), SEC + 21'h18, v);
+			check("order: the last DATA store, then ACCEPT counts it", v, 32'h80000000 | TB_FRAME);
+			wait_frame(n0);
+			check_buf("order: that frame completes", 32'h00007200, TB_FRAME);
+			cause_drain(SEC);
+			sec_wr(21'h10, 32'h0); settle;
+		end
+`ifdef MISTER_LW_LANE
+		lane_count(p, dr);
+		f_set(0, 16'h0029, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
+		lane_send_c(1, 1'b1);
+		lane_wait(p + 1);
+		repeat (slow(100)) @(negedge clk);
+		lane_rstat(rs);
+		check("order: nine replies queued", rs[15:0], 9);
+		nbad = 0;
+		for (k = 0; k < 9; k = k + 1) begin
+			if (k[0]) begin
+				store_read(LANE + 21'h0C, 32'd0, LANE + 21'h1C, rs);   // RPOP, then RSTAT
+				if (rs[15:0] !== 8 - k) nbad = nbad + 1;
+			end
+			else begin
+				store_read(LANE + 21'h0C, 32'd0, LANE + 21'h20, h);    // RPOP, then RHEAD
+				axi_read(LANE + 21'h20, 0, v, dl, beats);
+				lane_rstat(rs);
+				if (h !== v || rs[15:0] !== 8 - k) nbad = nbad + 1;
+			end
+		end
+		check("order: RPOP, then RHEAD and RSTAT show the pop", nbad, 0);
+		lane_rstat(rs);
+		check("order: replies drained", rs[15:0], 0);
+`endif
+	end
+
 	$display("-- reads have no side effect: causes pending, a frame half stored, replies queued");
 	begin : pure_reads
 		reg [511:0] sw0, ss0;
@@ -2755,7 +3018,8 @@ initial begin
 `endif
 `endif
 
-	$display("fixed latency: BVALID %0d cycles after AWVALID, RVALID %0d cycles after ARVALID", wlat_ref, rlat_ref);
+	$display("fixed latency: BVALID %0d cycles after AWVALID, RVALID %0d cycles after ARVALID (the firewall's RD_LAT)",
+	         wlat_ref, rlat_ref);
 	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
 	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
 	$finish;
