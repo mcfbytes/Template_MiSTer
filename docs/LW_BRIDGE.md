@@ -342,6 +342,9 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
   `clk_sys` below about 50 MHz, the conservative bound; the analysed edge is near 70-100 MHz. A faster core must hold
   `F_REJECT` for `ceil(2 x f_sys / 100 MHz)` cycles, or widen the crossing.
 - **SECTOR FIFO:** dual-clock with Gray pointers. No ratio bound.
+- **SECTOR diagnostics (`LW_DIAG=1`):** FRAMES, TSTAMP_DONE and SUM cross together in one held-data handshake word,
+  so they change on the same `clk_100m` edge. Frames that complete while a word is in flight are all counted by
+  the next one, and SUM then shows the latest data frame's. No ratio bound.
 - **LANE:** frames and replies cross in dual-clock FIFOs with Gray pointers that step one entry per update. No
   ratio bound. PLAYED and the reply-drop count cross as toggles, at most one per `strobe_gap + 5` and per
   `strobe_gap + 2` `clk_sys` cycles; each toggle must outlast two `clk_100m` periods, which holds below about

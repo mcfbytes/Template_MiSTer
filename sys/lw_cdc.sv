@@ -199,7 +199,7 @@ endmodule
 // its acknowledge toggle, captures the hold register into an lw_qstat and takes the toggle's value, and d_v
 // pulses the cycle after, with the word in d_q. The acknowledge toggle crosses back; the source is busy while
 // its toggle differs from it. Both sides compare levels, so any state of the registers converges: an upset
-// costs at most one lost or one repeated word.
+// costs repeats of the held word (at most three) or one lost word.
 // Bound: the word is captured two destination cycles after its toggle is launched, so two destination periods
 // must exceed the constraints' 8 ns net delay plus setup.
 module lw_xfer #(parameter W = 1)

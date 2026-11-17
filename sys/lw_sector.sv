@@ -26,15 +26,19 @@
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
 // Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
-// (sys_lwx), each through lw_sync (lw_cdc.sv); a frame's SUM (DIAG) through lw_xfer. The request LBAs are latched on clk_100m straight from the core's
+// (sys_lwx), each through lw_sync (lw_cdc.sv). The request LBAs are latched on clk_100m straight from the core's
 // clk_sys registers, relying on their being stable while the request stands: the one such read tb/static.sh lists.
+// DIAG: each done event and the SUM of the last data frame cross together in one lw_xfer word, {done count, SUM},
+// so FRAMES, TSTAMP_DONE and SUM move on the same clk_100m edge. Events that come while a word is in flight
+// coalesce into the next word: FRAMES adds them all, SUM shows the latest data frame's.
 // Bridge side has no reset and answers in fixed cycles (no back-pressure); a full FIFO drops the store and
 // counts it. Clock-ratio bound of the reject path: docs/LW_BRIDGE.md.
 // DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:4], DROPS, COUNTS, GEN, TSTAMP_*, CYCLES, SUM and TEST:
 // they read 0 and CTRL.TEST/CLR are ignored. CAUSE, REQ, LBA, BEGIN, CTRL.EN/ABORT, STATUS[3:0], ACCEPT, ID stay.
 
-module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3, parameter AW = 9,
-                   parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3, parameter [9:0] XFRAME = 256)
+module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3,
+                   parameter AW = 9, parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3,
+                   parameter [9:0] XFRAME = 256)
 (
 	input wire        clk,          // clk_100m
 
@@ -117,7 +121,9 @@ reg   [1:0] ph = 0, ackc = 0;
 reg  [15:0] hi = 0;
 reg  [43:0] q;
 reg  [19:0] fsum = 0;
-reg   [4:0] evt = 0;                // {done, reset_fill, abort, skip, reject} toggles
+reg   [3:0] evt = 0;                // {reset_fill, abort, skip, reject} toggles
+reg   [3:0] dcnt = 0, dsent = 0;    // DIAG: done events counted, and the count last launched to clk_100m
+reg  [19:0] dsum = 0;               // DIAG: the last data frame's SUM
 
 reg         pending = 0;
 reg  [31:0] gen = 0, tsreq = 0, tsdone = 0, cycles = 0;
@@ -135,25 +141,29 @@ reg         bfail = 0;
 reg  [15:0] drops = 0, frames = 0;
 reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
-wire [19:0] sum;
+reg  [19:0] sum = 0;
+reg   [3:0] dseen = 0;              // the done count of the last word taken
 
 // clk_sys -> clk_100m: request levels, status bits, event toggles, the rejected answer's {tag, slot}
-(* preserve *) reg [16:0] sys_lwx = 0;
-wire [16:0] sb1;
-reg  [16:0] sb2 = 0;
+(* preserve *) reg [15:0] sys_lwx = 0;
+wire [15:0] sb1;
+reg  [15:0] sb2 = 0;
+wire [23:0] dn_q;                   // DIAG: {done count, SUM} from the feeder
+wire        dn_v, dn_busy;
+wire  [3:0] dn_add = dn_v ? dn_q[23:20] - dseen : 4'd0;
 
 lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(sector_r_lwgray), .q(rg_s));
-lw_sync #(.W(17)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
+lw_sync #(.W(16)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
 wire        req_s = sb1[0];
 wire        req_rise = sb1[0] & ~sb2[0];
 wire  [3:0] st_s = sb1[4:1];          // {rejecting, streaming, ack, en_sys}
-wire  [4:0] ev   = sb1[9:5] ^ sb2[9:5]; // {done, reset_fill, abort, skip, reject}
-wire  [1:0] xrd_s = {sb1[12], sb1[10]};
-wire  [1:0] xwr_s = {sb1[13], sb1[11]};
+wire  [3:0] ev   = sb1[8:5] ^ sb2[8:5]; // {reset_fill, abort, skip, reject}
+wire  [1:0] xrd_s = {sb1[11], sb1[9]};
+wire  [1:0] xwr_s = {sb1[12], sb1[10]};
 wire  [1:0] xreq_s = xrd_s | xwr_s;
-wire  [1:0] xrise  = xreq_s & ~({sb2[13], sb2[11]} | {sb2[12], sb2[10]});
-wire  [1:0] rjslot = sb1[15:14];   // the rejected BEGIN/WACK's slot and tag: stable a clk_sys cycle
-wire        rjtag  = sb1[16];      // before ev[0] (the reject toggle, synced in every build) moves
+wire  [1:0] xrise  = xreq_s & ~({sb2[12], sb2[10]} | {sb2[11], sb2[9]});
+wire  [1:0] rjslot = sb1[14:13];   // the rejected BEGIN/WACK's slot and tag: stable a clk_sys cycle
+wire        rjtag  = sb1[15];      // before ev[0] (the reject toggle, synced in every build) moves
 wire  [2:0] rjsel  = (rjslot == 2'd0) ? 3'b001 : (rjslot == 2'd1) ? 3'b010 : (rjslot == 2'd2) ? 3'b100 : 3'b000;
 wire  [2:0] cand   = {xreq_s & xen_lwx, req_s & en_lwx} & ~ans;
 wire        any    = |cand;
@@ -218,7 +228,11 @@ always @(posedge clk) begin
 	if (DIAG && fire) tsreq <= cycles;
 	if (rd_cause & ren) snap <= gen[3:0];
 
-	if (DIAG && ev[4]) tsdone <= cycles;
+	if (DIAG && dn_v) begin
+		dseen <= dn_q[23:20];
+		sum   <= dn_q[19:0];
+		if (|dn_add) tsdone <= cycles;
+	end
 
 	if (w_ctrl) begin
 		en_lwx   <= wdata[0];
@@ -243,15 +257,14 @@ always @(posedge clk) begin
 	else if (wdat && !ffull && waddr[11:2] == exp_w) exp_w <= exp_w + 10'd1;
 
 	if (DIAG) begin
+		frames <= (clr ? 16'd0 : frames) + {12'd0, dn_add};   // a done arriving with CLR counts after it
 		if (clr) begin
 			drops   <= 0;
-			frames  <= 0;
 			hw      <= 0;
 			{n_rej, n_skip, n_abort, n_rfill} <= 0;
 		end
 		else begin
 			if (used > hw) hw <= (used > 255) ? 8'd255 : used[7:0];
-			frames  <= frames + ev[4];
 			n_rej   <= sat8(n_rej,   ev[0]);
 			n_skip  <= sat8(n_skip,  ev[1]);
 			n_abort <= sat8(n_abort, ev[2]);
@@ -327,22 +340,26 @@ reg        rjt = 0, rjp = 0;           // one cycle after them (rjp)
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
 
-// SUM: the byte sum of each data frame the feeder completes, to clk_100m (DIAG builds only)
+// DIAG builds only: {done count, the last data frame's SUM} to clk_100m, launched whenever the count moved
+wire dn_go = dcnt != dsent;
 generate
-if (DIAG) begin : sumx
-	wire sum_go = em && ph == 2'd3 && fexp == flen - 1'd1;
-	lw_xfer #(.W(20)) sum_x(.s_clk(clk_sys), .s_go(sum_go), .s_d(fsum), .s_busy(), .d_clk(clk), .d_q(sum), .d_v());
+if (DIAG) begin : donex
+	wire [23:0] dn_word = {dcnt, dsum};
+	lw_xfer #(.W(24)) done_x(.s_clk(clk_sys), .s_go(dn_go), .s_d(dn_word), .s_busy(dn_busy),
+	                         .d_clk(clk), .d_q(dn_q), .d_v(dn_v));
 end
-else begin : nosum
-	assign sum = 20'd0;
+else begin : nodone
+	assign dn_q = 24'd0, dn_v = 1'b0, dn_busy = 1'b1;
 end
 endgenerate
 assign o_ack = fack[0];
 assign x_ack = fack[2:1];
 
 always @(posedge clk_sys) begin
-	sys_lwx <= {rjt, rjs, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt[4:1] : 4'd0, evt[0], fs == F_REJECT,
+	sys_lwx <= {rjt, rjs, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt[3:1] : 3'd0, evt[0], fs == F_REJECT,
 	            fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys, c_req};
+
+	if (DIAG && dn_go && !dn_busy) dsent <= dcnt;
 
 	qv <= pop;
 	if (pop) rptr <= rptr + 1'd1;
@@ -363,7 +380,7 @@ always @(posedge clk_sys) begin
 			if (fwack) begin
 				fack[fsel] <= 1'b0;
 				fs     <= F_IDLE;
-				evt[4] <= ~evt[4];
+				if (DIAG) dcnt <= dcnt + 4'd1;
 			end
 			else fs <= F_STREAM;
 		end
@@ -440,7 +457,10 @@ always @(posedge clk_sys) begin
 				fexp   <= 0;
 				fack[fsel] <= 1'b0;
 				fs     <= F_IDLE;
-				evt[4] <= ~evt[4];
+				if (DIAG) begin
+					dcnt <= dcnt + 4'd1;
+					dsum <= fsum;
+				end
 			end
 			else fexp <= fexp + 1'd1;
 		end
