@@ -27,6 +27,10 @@
 // CAUSE: bit 0, raised by each request rise (and each re-open after a reject); a full-word store with bit 0 set
 // clears it, and a raise in the store's cycle wins. Reads change nothing: the request word is REQ's.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
+// The lease (live, the window's live_q): while it is low every EN, TEST included, reads 0, so each slot's mux
+// returns to SPI once the feeder is off it. A primary frame in flight whose EN reads 0 on clk_sys, with the FIFO
+// empty for two cycles since, is zero-filled from its next word, so the core's ack completes; while its data is in
+// the FIFO it goes on.
 // Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
 // (sys_lwx), each through lw_sync (lw_cdc.sv). The request LBAs are latched on clk_100m straight from the core's
 // clk_sys registers, relying on their being stable while the request stands: the one such read tb/static.sh lists.
@@ -52,6 +56,7 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	input wire        write,
 	input wire [31:0] wdata,
 	input wire  [3:0] be,
+	input wire        live,         // the lease
 
 	output wire       doorbell,     // level, high while CAUSE != 0
 
@@ -230,7 +235,12 @@ always @(posedge clk) begin
 		if (|dn_add) tsdone <= cycles;
 	end
 
-	if (w_ctrl) begin
+	if (!live) begin
+		en_lwx   <= 0;
+		xen_lwx  <= 0;
+		test_lwx <= 0;
+	end
+	else if (w_ctrl) begin
 		en_lwx   <= wdata[0];
 		xen_lwx  <= {wdata[4 + XSLOT1], wdata[4 + XSLOT0]};
 		test_lwx <= DIAG ? wdata[3] : 1'b0;
@@ -335,6 +345,10 @@ reg        rjt = 0, rjp = 0;           // one cycle after them (rjp)
 
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
+reg  [1:0] mt   = 0;                // cycles the FIFO has read empty with EN low, saturating at 2
+// the primary frame in flight lost its EN and will get no more data: fill it from its next word
+wire       cut  = (fs == F_ACK || fs == F_STREAM) && fsel == 2'd0 && !fwack && !en_s && rempty && mt == 2'd2 &&
+                  !qv && !em;
 
 // DIAG builds only: {done count, the last data frame's SUM} to clk_100m, launched whenever the count moved
 wire dn_go = dcnt != dsent;
@@ -358,6 +372,7 @@ always @(posedge clk_sys) begin
 	if (DIAG && dn_go && !dn_busy) dsent <= dcnt;
 
 	qv <= pop;
+	mt <= (!rempty || en_s) ? 2'd0 : (mt == 2'd2) ? 2'd2 : mt + 2'd1;
 	if (pop) rptr <= rptr + 1'd1;
 	sector_r_lwgray <= rptr ^ (rptr >> 1);
 
@@ -462,6 +477,8 @@ always @(posedge clk_sys) begin
 		end
 		default: ;
 	endcase
+
+	if (cut) fs <= F_FILL;
 
 	if (c_reset) begin
 		if (fs == F_ACK && fwack) begin

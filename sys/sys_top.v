@@ -242,8 +242,9 @@ end
 `ifdef MISTER_LW
 // gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it)
 // gp_in[24]     - the firewall holds no transaction (its idle register)
-wire        lw_present, lw_idle;
-wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 3'b000, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+// gp_in[22]     - an LW lease is held (lw_sys_window's lease register)
+wire        lw_present, lw_idle, lw_held;
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
 `else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 7'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
 `endif
@@ -1852,6 +1853,16 @@ wire [18:0] lw_blk_dn;
 wire [19:0] lw_card_up;
 wire [12:0] lw_card_dn;
 wire [131:0] lw_st_up;
+wire        lw_wburst, lw_hrst, lw_idv;
+wire  [1:0] lw_freed;
+
+// GPO[31] = 0, the ID view or the core reset through GPO, as a clk_100m level: it ends the LW lease and refuses one
+lw_arst lw_idv_arst
+(
+	.clk(clk_100m),
+	.rst_n(gp_out[31]),
+	.q(lw_idv)
+);
 
 // The core's SECTOR declaration (its .qsf macros); every one is optional.
 `ifdef MISTER_LW_SECTOR_SLOT
@@ -1927,8 +1938,8 @@ hps_lw_bridge hps_lw_bridge
 (
 	.clk(clk_100m),
 	.hps_rst_n(lw_hps_rst_n),
-	.lw_hrst(),
-	.lw_freed(),
+	.lw_hrst(lw_hrst),
+	.lw_freed(lw_freed),
 	.present(lw_present),
 	.idle(lw_idle),
 	.lw_raddr(lw_raddr),
@@ -1936,7 +1947,8 @@ hps_lw_bridge hps_lw_bridge
 	.lw_waddr(lw_waddr),
 	.lw_write(lw_write),
 	.lw_wdata(lw_wdata),
-	.lw_be(lw_be)
+	.lw_be(lw_be),
+	.lw_wburst(lw_wburst)
 );
 
 lw_sys_window #(
@@ -1953,6 +1965,11 @@ lw_sys_window #(
 	.lw_write(lw_write),
 	.lw_wdata(lw_wdata),
 	.lw_be(lw_be),
+	.lw_wburst(lw_wburst),
+	.lw_hrst(lw_hrst),
+	.lw_freed(lw_freed),
+	.lw_idv(lw_idv),
+	.held(lw_held),
 	.lines(lw_lines),
 	.clk_sys(clk_sys),
 	.lw_pad(lw_pad),

@@ -27,8 +27,11 @@
 // pops with a store to RPOP. Bridge side has no reset and answers every store in fixed cycles: a frame that
 // does not fit is dropped whole at END and counted, a frame without END is never played, and a reply word
 // that finds the reply FIFO full is dropped and counted. Contracts: docs/LW_BRIDGE.md, "LANE block".
+// The lease (live, the window's live_q): while it is low the open frame is abandoned and the reply FIFO's read
+// pointer steps toward its write pointer, so replies that land after the lease are discarded; the player, seeing
+// its own copy of it low, completes the frame in flight and pops every queued entry unplayed while it is idle.
 // Crossings, each through lw_sync (lw_cdc.sv): the four Gray pointers of the two FIFOs, each recomputed from its
-// binary pointer in every cycle, and the played and reply-drop toggles.
+// binary pointer in every cycle, the played and reply-drop toggles, and the lease copy.
 
 module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 8)   // GAP: 2..7
 (
@@ -41,6 +44,7 @@ module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 
 	input wire         write,
 	input wire  [31:0] wdata,
 	input wire   [3:0] be,
+	input wire         live,         // the lease
 
 	input wire         clk_sys,
 	input wire         l_busy,       // any of the link's own selects
@@ -107,6 +111,7 @@ lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(lane_r_lwgray), .q(rg_s))
 lw_sync #(.W(RAW + 1), .GRAY(1)) rwg_sync (.clk(clk), .d(lane_rw_lwgray), .q(rwg_s));
 lw_sync #(.W(1)) pt_sync (.clk(clk), .d(pt_lwx), .q(pt_s));
 lw_sync #(.W(1)) rdt_sync (.clk(clk), .d(rdt_lwx), .q(rdt_s));
+(* preserve *) reg lease_lwx = 0;           // the lease, registered here for the player
 
 wire        st     = wsel & write & &be;
 wire        w_beg  = st && waddr[11:2] == 10'd0;
@@ -143,19 +148,25 @@ always @(posedge clk) if (we) fram[wa] <= wd;
 always @(posedge clk) rhead <= rram[rrp[RAW-1:0]];
 
 always @(posedge clk) begin
+	lease_lwx <= live;
 	if (wvis != wcom) wvis <= wvis + 1'd1;
 	lane_w_lwgray <= wvis ^ (wvis >> 1);
 
 	pt_d <= pt_s;
 	if (pt_s ^ pt_d) played <= played + 1'd1;
 
-	if (w_pop) rrp <= rrnext;
+	if (w_pop || (!live && rcount != 0)) rrp <= rrnext;
 	lane_rr_lwgray <= rrp ^ (rrp >> 1);
 	rdt_d <= rdt_s;
 	if (rdt_s ^ rdt_d) rdrops <= rdrops + 1'd1;
 
-	// BEGIN abandons any open frame: its entries past wcom are overwritten
-	if (w_beg) begin
+	// BEGIN abandons any open frame: its entries past wcom are overwritten; so does the lease's end
+	if (!live) begin
+		open  <= 0;
+		ovf   <= 0;
+		wspec <= wcom;
+	end
+	else if (w_beg) begin
 		open  <= 1;
 		ovf   <= ~b_ok;
 		wspec <= b_ok ? wcom + 1'd1 : wcom;
@@ -190,6 +201,8 @@ wire [AW:0]  wg_s;
 wire [RAW:0] rrg_s;
 lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(lane_w_lwgray), .q(wg_s));
 lw_sync #(.W(RAW + 1), .GRAY(1)) rrg_sync (.clk(clk_sys), .d(lane_rr_lwgray), .q(rrg_s));
+wire         lease_s;
+lw_sync #(.W(1)) lease_sync (.clk(clk_sys), .d(lease_lwx), .q(lease_s));
 reg  [AW:0] rptr  = 0;
 reg  [19:0] q     = 0;
 reg         fresh = 0;                      // q holds fram[rptr]
@@ -202,8 +215,8 @@ reg [RAW:0] rwp   = 0;
 wire [AW:0] rnext = rptr + 1'd1;
 wire        avail = fresh && lane_r_lwgray != wg_s;
 wire  [1:0] qk    = q[19:18];
-wire        t_beg = ps == S_IDLE && avail && qk[0] && quiet == 2'd2 && !l_busy;
-wire        t_odd = ps == S_IDLE && avail && !qk[0];
+wire        t_beg = ps == S_IDLE && avail && qk[0] && quiet == 2'd2 && !l_busy && lease_s;
+wire        t_odd = ps == S_IDLE && avail && (!qk[0] || !lease_s);   // a stray entry, or any, without the lease
 wire        t_ack = ps == S_ACK && !l_wait && cnt == GAP - 1'd1;
 wire        t_wrd = ps == S_NEXT && avail && qk == K_WORD;
 wire        t_end = ps == S_NEXT && avail && qk == K_END;

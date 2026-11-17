@@ -21,11 +21,20 @@
 // LW window declared by `SYS_LW_CAPS (emu_ports.vh): the directory, then the PAD, SECTOR, OSDBUF, SYS and LANE
 // blocks. Bridge side runs on clk_100m with no reset.
 // Directory, layout 2: a 16-word header (MAGIC "LWDR", VERSION 2.0, LAYOUT = {entry stride, header length} in
-// bytes, COUNT, WIN_BASE and WIN_SIZE, PENDING, SCRATCH), then one 32-word entry per block built, in ascending
-// kind order with no gaps. An entry's 8 common words are KIND, VERSION, OFFSET, SIZE, CAUSE, LINE, CAUSE_BITS and
+// bytes, COUNT, WIN_BASE and WIN_SIZE, LEASE, TIMEBASE, PENDING, OWNED, SCRATCH, OPEN, LINE_EN, RESETS), then one
+// 32-word entry per block built, in ascending kind order with no gaps. An entry's 8 common words are KIND, VERSION, OFFSET, SIZE, CAUSE, LINE, CAUSE_BITS and
 // TAG; its kind's own words follow. Every offset in the directory is window-relative. A line is declared in one
 // place, the entry's LINE word: the same localparam picks the entry's bit of `lines` (ordinal k = lines[k-1] =
 // f2h_irq[7+k]), and no two entries name one ordinal.
+// The lease: live_q, one clk_100m register, is the write enable of the whole window. Every store but one to LEASE
+// sees lw_write & live_q, here, above every block; a store dropped at that gate sets LEASE.stale. A CLAIM names the
+// storing host's id and is taken only with no lease held, no HPS reset seen (lw_hrst) and GPO[31] high (lw_idv
+// low); RENEW and RELEASE act only for the id that holds the lease. live_q clears, in this priority, on lw_hrst, on
+// lw_idv, on a RELEASE, or when the counter has run out (a RENEW in that cycle wins), and LEASE.end says which.
+// live_q is GPI[22] (held). It crosses no clock itself: each block that acts on it registers its own copy.
+// Lines: each is a register, live_q & the entry's LINE_EN bit & the entry's CAUSE word non-zero, so a line is a
+// level that falls only when one of the three does. LINE_EN reads 0 whenever no lease is held. PENDING is not
+// gated. RESETS counts rises of lw_hrst and the state machines the firewall freed, each saturating at 255.
 // Decode: each block's select compares the address's high bits with a constant, so the selects are exclusive;
 // every block's word is 0 unless it is selected, and the read word is one AND-OR of the block words and the
 // 0xDEADBEEF default. An address in no block that is built reads 0xDEADBEEF and drops stores; an unassigned
@@ -55,7 +64,9 @@ module lw_sys_window #(
 	parameter [31:0] MC_EXT1   = 32'd0,
 	parameter  [9:0] MC_FRAME  = 10'd256,    // 32-bit DATA words per card frame (256 = one 1 KB block)
 	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and list its entry.
-	parameter        LANE_EN   = 0
+	parameter        LANE_EN   = 0,
+	// the lease unit, 2^n clk cycles (25: 0.3355 s at 100 MHz); TIMEBASE reports it
+	parameter  [7:0] LEASE_UNIT_LOG2 = 8'd25
 )
 (
 	input wire         clk,          // clk_100m
@@ -67,6 +78,12 @@ module lw_sys_window #(
 	input wire         lw_write,
 	input wire  [31:0] lw_wdata,
 	input wire   [3:0] lw_be,
+	input wire         lw_wburst,    // a dropped beat of a burst write (the firewall's pulse)
+
+	input wire         lw_hrst,      // the HPS reset as a clk level (the firewall's lw_arst)
+	input wire   [1:0] lw_freed,     // the firewall's machines freed at a reset's release, pulses
+	input wire         lw_idv,       // GPO[31] reads 0, as a clk level (sys_top's lw_arst of gp_out[31])
+	output wire        held,         // the lease register live_q: GPI[22]
 
 	output wire  [2:0] lines,        // line ordinal k = lines[k-1] -> f2h_irq[7+k], level-high
 
@@ -171,10 +188,29 @@ localparam [255:0] LANE_OPS = (256'd1 << 8'h01) | (256'd1 << 8'h1C) | (256'd1 <<
                               (256'd1 << 8'h33) | (256'd1 << 8'h3B);
 localparam [31:0] LANE_CAPS = 32'h0000_0003;
 
+// The header's read/write words, as word indices of the directory page.
+localparam  [9:0] H_LEASE = 10'h006, H_LINEN = 10'h00C;
+localparam [31:0] PRESENT = (32'd1 << COUNT) - 32'd1;   // bit i = entry i is listed
+localparam        LCW     = 4 + LEASE_UNIT_LOG2;        // the lease counter: {TTL, unit}
+
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
                              (256'd1 << 8'h12) | (256'd1 << 8'h13) |
                              (256'd1 << 8'h1A) | (256'd1 << 8'h3D);
+
+// The lease and the lines.
+reg            live_q  = 0;           // the lease
+reg  [LCW-1:0] lcnt    = 0;           // counts down while live_q is set
+reg      [9:0] owner   = 0;           // the id of the last taken CLAIM
+reg      [7:0] epoch   = 0;           // taken CLAIMs, modulo 256
+reg      [1:0] lend    = 0;           // why the last lease ended: 0 RELEASE or none, 1 ran out, 2 HPS reset, 3 GPO[31]
+reg            stale   = 0;           // a store other than LEASE was dropped at the gate, since the last CLAIM
+reg            lburst  = 0;           // a burst-write beat was dropped, since the last CLAIM
+reg     [31:0] line_en = 0;           // LINE_EN
+reg      [2:0] line_q  = 0;           // the lines
+reg      [7:0] n_hrst  = 0, n_freed = 0;
+reg            hrst_d  = 1'b1;        // lw_hrst is high from configuration: configuration is no rise
+wire           quiet   = 1'b1;        // no block holds a claim back
 
 reg [31:0] scratch = 0;
 reg [31:0] adrop   = 0;               // analog stores dropped on a full FIFO
@@ -197,6 +233,17 @@ wire        w_osd  = lw_waddr[20:13] == OSD_A[20:13];
 wire        w_lane = LANE_EN && lw_waddr[20:12] == LANE_A[20:12];
 wire        w_pad  = lw_waddr[20:18] == PAD_A[20:18];
 
+// The gate: LEASE takes the raw store, every other store needs the lease.
+wire        w_lease_a = w_dir && lw_waddr[11:2] == H_LEASE;
+wire        wr        = lw_write & live_q;
+wire        l_st      = lw_write && w_lease_a && &lw_be && lw_wdata[31:16] == 16'h4C57;   // the key
+wire  [9:0] l_id      = lw_wdata[15:6];
+wire  [1:0] l_verb    = lw_wdata[5:4];
+wire  [3:0] l_ttl     = lw_wdata[3:0];
+wire        l_claim   = l_st && l_verb == 2'd1 && l_ttl != 4'd0 && !live_q && !lw_hrst && !lw_idv && quiet;
+wire        l_renew   = l_st && l_verb == 2'd2 && l_ttl != 4'd0 && live_q && l_id == owner;
+wire        l_release = l_st && l_verb == 2'd3 && live_q && l_id == owner;
+
 // Block-relative addresses: the address bits below each block's size (SECTOR's second page is its upper half).
 wire [12:0] rsec  = {lw_raddr[12] ^ SEC_A[12], lw_raddr[11:0]};
 wire [12:0] wsec  = {lw_waddr[12] ^ SEC_A[12], lw_waddr[11:0]};
@@ -212,12 +259,71 @@ wire [17:2] wpad  = lw_waddr[17:2];
 wire        sec_lvl, sys_lvl;          // each block's CAUSE word is non-zero
 wire [31:0] sec_rdata, sys_rdata, lane_rdata;
 
-// The lines: each entry's cause level on the bit its LINE word names.
+// The lines: each entry's cause level and LINE_EN bit on the bit its LINE word names, registered under the lease.
 function automatic [2:0] line_bit(input [7:0] ord);
 	line_bit = (ord >= 8'd1 && ord <= 8'd3) ? (3'd1 << (ord - 8'd1)) : 3'd0;
 endfunction
 
-assign lines = ({3{sec_lvl}} & line_bit(SEC_LINE)) | ({3{sys_lvl}} & line_bit(SYS_LINE));
+wire  [2:0] line_d = ({3{sec_lvl & line_en[E_SEC]}} & line_bit(SEC_LINE)) |
+                     ({3{sys_lvl & line_en[E_SYS]}} & line_bit(SYS_LINE));
+
+always @(posedge clk) line_q <= {3{live_q}} & line_d;
+
+assign lines = line_q;
+assign held  = live_q;
+
+function automatic [7:0] sat_add(input [7:0] v, input [1:0] n);
+	sat_add = ({1'b0, v} + {7'd0, n} > 9'd255) ? 8'd255 : v + {6'd0, n};
+endfunction
+
+always @(posedge clk) begin
+	hrst_d  <= lw_hrst;
+	n_hrst  <= sat_add(n_hrst, {1'b0, lw_hrst & ~hrst_d});
+	n_freed <= sat_add(n_freed, {1'b0, lw_freed[0]} + {1'b0, lw_freed[1]});
+
+	if (lw_hrst) begin
+		if (live_q) lend <= 2'd2;
+		live_q <= 0;
+		lcnt   <= 0;
+	end
+	else if (lw_idv) begin
+		if (live_q) lend <= 2'd3;
+		live_q <= 0;
+		lcnt   <= 0;
+	end
+	else if (l_release) begin
+		lend   <= 2'd0;
+		live_q <= 0;
+		lcnt   <= 0;
+	end
+	else if (l_renew) lcnt <= {l_ttl, {LEASE_UNIT_LOG2{1'b0}}};
+	else if (live_q && lcnt == 0) begin
+		lend   <= 2'd1;
+		live_q <= 0;
+	end
+	else if (l_claim) begin
+		live_q <= 1;
+		owner  <= l_id;
+		epoch  <= epoch + 8'd1;
+		lcnt   <= {l_ttl, {LEASE_UNIT_LOG2{1'b0}}};
+	end
+	else if (live_q) lcnt <= lcnt - 1'd1;
+
+	if (l_claim) begin
+		stale  <= 0;
+		lburst <= 0;
+	end
+	else begin
+		if (lw_write && !live_q && !w_lease_a) stale <= 1;
+		if (lw_wburst) lburst <= 1;
+	end
+
+	if (!live_q) line_en <= 0;
+	else if (wr && w_dir && lw_waddr[11:2] == H_LINEN && &lw_be) line_en <= lw_wdata & PRESENT;
+end
+
+wire [31:0] lease_rd = {live_q, quiet, stale, lburst, lcnt[LCW-1 -: 4], epoch, lw_hrst, 1'b0, lend, lw_idv, 1'b0,
+                        owner};
 
 // PENDING: bit i = entry i's CAUSE word is non-zero.
 wire [31:0] pending = ({31'd0, sec_lvl} << E_SEC) | ({31'd0, sys_lvl} << E_SYS);
@@ -300,10 +406,14 @@ always @(*) begin
 		4'd3:    dir_rdata = {27'd0, COUNT};
 		4'd4:    dir_rdata = {11'd0, WIN_OFF};               // WIN_BASE
 		4'd5:    dir_rdata = {11'd0, WIN_SIZE};
-		4'd7:    dir_rdata = 32'h190186A0;                   // TIMEBASE {lease unit log2 = 25, 100000 kHz}
+		4'd6:    dir_rdata = lease_rd;                       // LEASE
+		4'd7:    dir_rdata = {LEASE_UNIT_LOG2, 24'd100000};  // TIMEBASE {lease unit log2, bridge clock kHz}
 		4'd8:    dir_rdata = pending;
 		4'd10:   dir_rdata = DIAG ? scratch : 32'd0;
-		default: dir_rdata = 32'd0;                          // LEASE, OWNED and 0x2C-0x3C
+		4'd11:   dir_rdata = {32{live_q}} & PRESENT;         // OPEN: each listed block takes stores now
+		4'd12:   dir_rdata = line_en;                        // LINE_EN
+		4'd13:   dir_rdata = {16'd0, n_freed, n_hrst};       // RESETS
+		default: dir_rdata = 32'd0;                          // OWNED and 0x38-0x3C
 	endcase
 	else dir_rdata = dir_entry(dw - 10'd16);
 end
@@ -329,7 +439,7 @@ if (SEC_EN) begin : sec
 	(
 		.clk(clk),
 		.raddr(rsec), .rsel(r_sec), .rdata(sec_rdata),
-		.waddr(wsec), .wsel(w_sec), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+		.waddr(wsec), .wsel(w_sec), .write(wr), .wdata(lw_wdata), .be(lw_be), .live(live_q),
 		.doorbell(sec_lvl),
 		.clk_sys(clk_sys),
 		.c_reset(blk_up[34]), .hps_ack(blk_up[33]), .c_req(blk_up[32]), .c_lba(blk_up[31:0]),
@@ -362,7 +472,7 @@ if (LANE_EN) begin : lane
 	(
 		.clk(clk),
 		.raddr(rlane), .rdata(lane_rdata),
-		.waddr(wlane), .wsel(w_lane), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+		.waddr(wlane), .wsel(w_lane), .write(wr), .wdata(lw_wdata), .be(lw_be), .live(live_q),
 		.clk_sys(clk_sys), .l_busy(lane_busy), .l_wait(lane_wait), .l_dout(lane_dout),
 		.own(lane_own), .hold(lane_hold), .sel(lane_sel), .strobe(lane_strobe), .din(lane_din)
 	);
@@ -387,21 +497,28 @@ lw_sys_status sys_status
 (
 	.clk(clk),
 	.raddr(rsys[9:0]), .rsel(r_sys && rsys[11:10] == 2'd0), .rdata(sys_rdata),
-	.waddr(wsys[9:0]), .wsel(w_sys && wsys[11:10] == 2'd0), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+	.waddr(wsys[9:0]), .wsel(w_sys && wsys[11:10] == 2'd0), .write(wr), .wdata(lw_wdata), .be(lw_be),
 	.irq(sys_lvl),
 	.clk_sys(clk_sys), .stflg(st_up[131:128]), .status_req(st_up[127:0])
 );
 
-// OSDBUF: image stores go to both osd shadows (byte lanes honour BE); CTRL is {HR, LWSEL}.
-assign osd_we   = lw_write && w_osd && ~wosd[12];
+// OSDBUF: image stores go to both osd shadows (byte lanes honour BE); CTRL is {HR, LWSEL}, and reads 0 whenever
+// no lease is held, so no shadow is shown without one.
+assign osd_we   = wr && w_osd && ~wosd[12];
 assign osd_addr = wosd[11:2];
 assign osd_data = lw_wdata;
 assign osd_be   = lw_be;
 assign osd_ctrl = {ohr, octrl[0]};
 
-always @(posedge clk) if (lw_write && w_osd && wosd == OSD_CTRL && lw_be[0]) begin
-	octrl <= lw_wdata[1:0];
-	ohr   <= &lw_wdata[1:0];
+always @(posedge clk) begin
+	if (!live_q) begin
+		octrl <= 0;
+		ohr   <= 0;
+	end
+	else if (wr && w_osd && wosd == OSD_CTRL && lw_be[0]) begin
+		octrl <= lw_wdata[1:0];
+		ohr   <= &lw_wdata[1:0];
+	end
 end
 
 // clk_100m side: SCRATCH, the pending slots, and the round-robin drain into the handshake.
@@ -437,7 +554,7 @@ reg  [4:0] awp = 0, arp = 0;
 wire       aempty = (awp == arp);
 wire       afull  = (awp - arp) == 5'd16;
 
-wire       st   = lw_write && w_pad && &lw_be;
+wire       st   = wr && w_pad && &lw_be;
 wire [7:0] wop  = wpad[17:10];
 wire [7:0] widx = wpad[9:2];
 wire [2:0] wsl  = slot_of(wop);
@@ -476,7 +593,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-	if (DIAG && lw_write && w_dir && lw_waddr[11:0] == 12'h028) begin
+	if (DIAG && wr && w_dir && lw_waddr[11:0] == 12'h028) begin
 		if (lw_be[0]) scratch[ 7: 0] <= lw_wdata[ 7: 0];
 		if (lw_be[1]) scratch[15: 8] <= lw_wdata[15: 8];
 		if (lw_be[2]) scratch[23:16] <= lw_wdata[23:16];

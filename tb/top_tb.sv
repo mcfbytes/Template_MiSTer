@@ -21,9 +21,10 @@
 //   - every LW net and port tb/static.sh lists for this configuration (lw_e_nets.vh) is driven: no bit reads z,
 //     except the from-core SECTOR nets, which only a core's lw_blk_mux and lw_card_mux drive and the Template
 //     does not instantiate: those must read z in every bit, so nothing in sys/ drives a bit the core owns;
-//   - GPI: the ID view reads the core magic (bits 25 and 24 clear); in the I/O view bit 25 is the firewall's
-//     present output, 1, and bit 24 its idle register, in every clk_100m cycle of the run, both moving when
-//     their source is forced; without MISTER_LW bits 27:21 are clear;
+//   - GPI: the ID view reads the core magic (bits 25, 24 and 22 clear); in the I/O view bit 25 is the firewall's
+//     present output, 1, bit 24 its idle register and bit 22 the window's lease register, in every clk_100m cycle
+//     of the run, each moving when its source is forced; without MISTER_LW bits 27:21 are clear;
+//   - a CLAIM stored through the bridge atom sets GPI[22]; GPO[31] low raises lw_idv, which ends the lease;
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
 //     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window;
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
@@ -143,17 +144,38 @@ always @(posedge clk_100m) if (dut.hps_lw_bridge.lw_freed === 2'b01) n_freed = n
 
 // GPI in the I/O view against the firewall, every clk_100m cycle: bit 25 its present output, bit 24 its idle
 // register; gpi_on gates the monitor off while a check forces either source.
-integer n_gpi = 0, n_gpi_bad = 0, n_gpi_busy = 0;
+integer n_gpi = 0, n_gpi_bad = 0, n_gpi_busy = 0, n_gpi_held = 0;
 reg     gpi_on = 0;
 always @(negedge clk_100m) if (gpi_on && gp_out[31]) begin
 	n_gpi = n_gpi + 1;
 	if (dut.hps_lw_bridge.idle === 1'b0) n_gpi_busy = n_gpi_busy + 1;
-	if (dut.h2f_gp.gp_in[25:24] !== {1'b1, dut.hps_lw_bridge.idle} || dut.hps_lw_bridge.idle === 1'bx) begin
+	if (dut.lw_sys_window.live_q === 1'b1) n_gpi_held = n_gpi_held + 1;
+	if (dut.h2f_gp.gp_in[25:24] !== {1'b1, dut.hps_lw_bridge.idle} || dut.hps_lw_bridge.idle === 1'bx ||
+	    dut.h2f_gp.gp_in[22] !== dut.lw_sys_window.live_q || dut.lw_sys_window.live_q === 1'bx) begin
 		n_gpi_bad = n_gpi_bad + 1;
-		if (n_gpi_bad <= 4) $display("   GPI at %0t: gp_in[25:24] %b, the firewall's idle %b", $time,
-		                             dut.h2f_gp.gp_in[25:24], dut.hps_lw_bridge.idle);
+		if (n_gpi_bad <= 4) $display("   GPI at %0t: gp_in[25:22] %b, the firewall's idle %b, the lease %b", $time,
+		                             dut.h2f_gp.gp_in[25:22], dut.hps_lw_bridge.idle, dut.lw_sys_window.live_q);
 	end
 end
+
+task lw_write(input [20:0] a, input [31:0] v);
+	integer n;
+	reg aw_hs, w_hs;
+	begin
+		@(negedge clk_100m);
+		awaddr = a; awvalid = 1; wdata = v; wvalid = 1; n = 0;
+		while (dut.hps_lw_bridge.bvalid !== 1'b1 && n <= 64) begin
+			aw_hs = awvalid & dut.hps_lw_bridge.awready; w_hs = wvalid & dut.hps_lw_bridge.wready;
+			@(negedge clk_100m); n = n + 1;
+			if (aw_hs) awvalid = 0;
+			if (w_hs) wvalid = 0;
+		end
+		awvalid = 0; wvalid = 0;
+		checks = checks + 1;
+		if (n > 64) begin fails = fails + 1; $display("FAIL LW store %06h: no BVALID", a); end
+		@(negedge clk_100m);
+	end
+endtask
 
 task lw_read(input [20:0] a, output [31:0] d);
 	integer n;
@@ -208,7 +230,7 @@ initial begin
 `else
 	check("ID view", dut.h2f_gp.gp_in, 32'h5CA623A4);
 `endif
-	check("ID view gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b00);
+	check("ID view gp_in[25:24] and gp_in[22]", {dut.h2f_gp.gp_in[25:24], dut.h2f_gp.gp_in[22]}, 3'b000);
 	gp_out = 32'h8000_0000; #20;
 `ifdef MISTER_LW
 	check("I/O view gp_in[27:21], the firewall idle", dut.h2f_gp.gp_in[27:21], 7'b0011000);
@@ -333,6 +355,34 @@ initial begin
 	lw_read(21'h40000, d); check("directory magic at 0x40000", d, 32'h5244574C);
 	lw_read(21'h00000, d); check("undecoded 0x00000", d, 32'hDEADBEEF);
 
+	$display("-- the lease: GPI[22] is the window's lease register; GPO[31] low ends it");
+	check("no lease: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b0);
+	lw_write(21'h40018, {16'h4C57, 10'h2A7, 2'd1, 4'd15});
+	lw_read(21'h40018, d);
+	check("a CLAIM through the bridge atom: held, owner", {d[31], d[9:0]}, {1'b1, 10'h2A7});
+	check("gp_in[22] shows it", dut.h2f_gp.gp_in[22], 1'b1);
+	gpi_on = 0;
+	@(negedge clk_100m);
+	force dut.lw_sys_window.held = 1'b0; #1;
+	check("the window's held output forced 0: gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0011000);
+	release dut.lw_sys_window.held; #1;
+	check("released: gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0011010);
+	check("no GPO[31] low seen yet: lw_idv", dut.lw_idv, 1'b0);
+	gp_out[31] = 1'b0;
+	repeat (8) @(negedge clk_100m);
+	check("GPO[31] low: lw_idv", dut.lw_idv, 1'b1);
+	check("GPO[31] low: the lease ended", dut.lw_sys_window.live_q, 1'b0);
+	check("the ID view: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b0);
+	gp_out[31] = 1'b1;
+	repeat (8) @(negedge clk_100m);
+	check("GPO[31] high again: lw_idv", dut.lw_idv, 1'b0);
+	gpi_on = 1;
+	lw_read(21'h40018, d);
+	check("LEASE: not held, end 3 (GPO[31] seen low)", {d[31], d[13:12]}, {1'b0, 2'd3});
+	lw_write(21'h40018, {16'h4C57, 10'h2A7, 2'd1, 4'd15});
+	repeat (4) @(negedge clk_100m);
+	check("claimed again: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b1);
+
 	$display("-- the HPS reset reaches the firewall");
 	check("lw_hrst low, the firewall idle", {dut.hps_lw_bridge.lw_hrst, dut.hps_lw_bridge.idle}, 2'b01);
 	rready = 0;
@@ -357,9 +407,10 @@ initial begin
 
 	$display("-- GPI against the firewall in every clk_100m cycle of the I/O view");
 	gpi_on = 0;
-	$display("     %0d cycles, %0d with a transaction held", n_gpi, n_gpi_busy);
-	check("cycles where gp_in[25:24] differs from {1, the firewall's idle}", n_gpi_bad, 0);
-	check("cycles compared, with and without a transaction held", {n_gpi > 100, n_gpi_busy > 10}, 2'b11);
+	$display("     %0d cycles, %0d with a transaction held, %0d with the lease held", n_gpi, n_gpi_busy, n_gpi_held);
+	check("cycles where gp_in[25:22] differs from {1, the firewall's idle, 0, the lease}", n_gpi_bad, 0);
+	check("cycles compared, with and without a transaction held, with and without the lease",
+	      {n_gpi > 100, n_gpi_busy > 10, n_gpi_held > 10, n_gpi - n_gpi_held > 10}, 4'b1111);
 `endif
 
 	$display("%s: %0d checks, %0d failures", (fails != 0) ? "FAILED" : "PASSED", checks, fails);
