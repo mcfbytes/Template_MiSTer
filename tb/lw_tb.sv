@@ -139,7 +139,7 @@ reg [31:0] wdata = 0;
 reg  [3:0] wstrb = 4'hF;
 
 wire [20:0] lw_raddr, lw_waddr;
-wire        lw_ren, lw_rd_ack, lw_rd_word, lw_write;
+wire        lw_write;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
 wire [48:0] lw_pad;
@@ -159,7 +159,7 @@ wire  [1:0] osd_ctrl;
 hps_lw_bridge bridge
 (
 	.clk(clk),
-	.lw_raddr(lw_raddr), .lw_ren(lw_ren), .lw_rd_ack(lw_rd_ack), .lw_rd_word(lw_rd_word), .lw_rdata(lw_rdata),
+	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be)
 );
 
@@ -187,7 +187,7 @@ lw_sys_window #(
 ) win
 (
 	.clk(clk),
-	.lw_raddr(lw_raddr), .lw_ren(lw_ren), .lw_rd_ack(lw_rd_ack), .lw_rd_word(lw_rd_word), .lw_rdata(lw_rdata),
+	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be),
 	.doorbell(doorbell), .sys_irq(sys_irq),
 	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn), .card_up(card_up), .card_dn(card_dn),
@@ -443,6 +443,69 @@ always @(posedge clk_sys) if (sd_buff_wr && sd_ack[2]) begin
 	mc_sum   <= mc_sum + sd_buff_dout;
 end
 
+// Reads have no side effect: the state a read could move, by hierarchical reference. With clk_sys stopped nothing
+// else moves it, so it must be identical before and after any reads.
+function [511:0] pure_win;
+	pure_win = {255'd0, win.scratch, win.adrop, win.octrl, win.ohr, win.dirty, win.awp, win.arp, win.ds, win.psel, win.rr,
+	           doorbell, sys_irq, win.sys_status.flg, win.sys_status.seq, win.sys_status.snap, win.sys_status.cause};
+endfunction
+function [511:0] pure_sec;
+`ifdef MISTER_LW_SECTOR_SLOT
+	pure_sec = {206'd0, win.sec.sector.pending, win.sec.sector.gen, win.sec.sector.ans, win.sec.sector.btag,
+	           win.sec.sector.lba, win.sec.sector.xlba, win.sec.sector.wptr, win.sec.sector.exp_w,
+	           win.sec.sector.flen_w, win.sec.sector.fdrops, win.sec.sector.bfail, win.sec.sector.en_lwx,
+	           win.sec.sector.xen_lwx, win.sec.sector.test_lwx, win.sec.sector.frames, win.sec.sector.drops,
+	           win.sec.sector.hw, win.sec.sector.n_rej, win.sec.sector.n_skip, win.sec.sector.n_abort,
+	           win.sec.sector.n_rfill, win.sec.sector.sum, win.sec.sector.tsreq, win.sec.sector.tsdone,
+	           win.sec.sector.dseen, win.sec.sector.sb2};
+`else
+	pure_sec = 0;
+`endif
+endfunction
+function [255:0] pure_lane;
+`ifdef MISTER_LW_LANE
+	pure_lane = {146'd0, win.lane.lane.wspec, win.lane.lane.wcom, win.lane.lane.wvis, win.lane.lane.open, win.lane.lane.ovf,
+	            win.lane.lane.played, win.lane.lane.drops, win.lane.lane.rrp, win.lane.lane.rhead,
+	            win.lane.lane.rdrops, win.lane.lane.pt_d, win.lane.lane.rdt_d};
+`else
+	pure_lane = 0;
+`endif
+endfunction
+
+// The readable view: every word of the directory and the blocks (0x40000-0x47FFC), then one word per KB of the
+// rest of the window. SECTOR's CYCLES counts clk_100m cycles and is left out.
+localparam PURE_N = 8192 + 480;
+reg [31:0] pure_v [0:PURE_N-1];
+function [20:0] pure_addr(input integer i);
+	integer j;
+	begin
+		j = i - 8192;
+		pure_addr = (i < 8192) ? 21'h40000 + {i[18:0], 2'b00} : 21'h48000 + {j[10:0], 10'd0};
+	end
+endfunction
+task pure_view(input do_cmp, output integer nbad);
+	integer m, nb;
+	reg [31:0] v, vl;
+	begin
+		nbad = 0;
+		for (m = 0; m < PURE_N; m = m + 1) begin
+			axi_read(pure_addr(m), 0, v, vl, nb);
+			if (pure_addr(m) == 21'h41030) v = 0;
+			if (do_cmp && v !== pure_v[m]) begin
+				if (nbad == 0) $display("     view: %06h was %08h, now %08h", pure_addr(m), pure_v[m], v);
+				nbad = nbad + 1;
+			end
+			pure_v[m] = v;
+		end
+	end
+endtask
+
+// The clk_100m edge of SECTOR's last cause raise.
+realtime t_fire = 0;
+`ifdef MISTER_LW_SECTOR_SLOT
+always @(posedge clk) if (win.sec.sector.fire) t_fire = $realtime;
+`endif
+
 // SECTOR's DIAG SUM, sampled on every clk_100m edge: it may change only on an edge where FRAMES changes too, so
 // a host that sees a frame counted reads that frame's sum.
 integer sum_moves = 0, sum_alone = 0;
@@ -692,6 +755,20 @@ endtask
 
 task settle; repeat (slow(100)) @(negedge clk); endtask
 
+// The host's first two drain steps on a CAUSE word: read it, store the value back (write-one-to-clear).
+task cause_drain(input [20:0] a);
+	reg [31:0] c, cl;
+	integer nb;
+	begin axi_read(a, 0, c, cl, nb); axi_write(a, c, 4'hF); end
+endtask
+
+// The clk_100m edge of the last full-word store to each CAUSE word, seen on the register bus.
+realtime t_wsec = 0, t_wsys = 0;
+always @(posedge clk) if (lw_write && &lw_be) begin
+	if (lw_waddr == 21'h41000) t_wsec = $realtime;
+	if (lw_waddr == 21'h43000) t_wsys = $realtime;
+end
+
 // The word a beat of a read burst must carry: wref[] holds the single-read words of 0x40000 .. 0x400FC.
 reg [31:0] wref [0:63];
 function [20:0] beat_addr(input [20:0] a, input [3:0] len, input [1:0] bt, input [3:0] j);
@@ -845,12 +922,9 @@ function [127:0] st_pat(input integer k);
 endfunction
 
 // One core status request: st_in, then a rising edge of status_set (held one clk_sys, then dropped).
-// The last capture of the snapshot and the last CAUSE fetch, for the race sweep's level property.
-realtime t_cap = 0, t_fetch = 0;
-always @(posedge clk) begin
-	if (win.sys_status.capture) t_cap = $realtime;
-	if (win.sys_status.rd_cause && lw_ren) t_fetch = $realtime;
-end
+// The last capture of the snapshot, for the race sweep's level property.
+realtime t_cap = 0;
+always @(posedge clk) if (win.sys_status.capture) t_cap = $realtime;
 
 task st_req(input [127:0] v);
 	begin
@@ -1232,7 +1306,7 @@ initial begin
 	$display("-- a 128-word primary frame");
 	n0 = cd_frames; s0 = cd_strobes;
 	cd_request(32'h00000100); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h0C, 32'h00000100);
 	frame_data(32'h00000100, 0, 128);
 	rd("ACCEPT ok, 128", SEC + 21'h18, 32'h80000080);
@@ -1244,7 +1318,7 @@ initial begin
 	$display("-- a 256-word save-slot frame, longer than the primary's");
 	r = mc1.done; s0 = mc1.strobes;
 	mc1.go(0, 7'h12); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000012);
 	frame_data(32'h00000012, 0, 256);
 	rd("ACCEPT ok, 256: stores past the primary's length land", SEC + 21'h18, 32'h80000100);
@@ -1259,7 +1333,7 @@ initial begin
 	$display("-- the primary after the card: the shared feeder is free");
 	n0 = cd_frames;
 	cd_request(32'h00000101); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h0C, 32'h00000101);
 	frame_data(32'h00000101, 0, 128);
 	rd("ACCEPT ok, 128 after the card", SEC + 21'h18, 32'h80000080);
@@ -1502,10 +1576,20 @@ initial begin
 	rd("REQ hides a request whose EN is 0", SEC + 21'h04, 32'd0);
 	rd("LBA captured", SEC + 21'h08, 32'h00001234);
 	rd("GEN +1", SEC + 21'h24, dg(gen0 + 1));
-	rsize = 0; rd("CAUSE byte read: data", SEC + 21'h00, 32'h000180C5); rsize = 2;
+	rsize = 0; rd("CAUSE byte read: data", SEC + 21'h00, 32'h00010001); rsize = 2;
 	check("byte read does not clear", doorbell, 1);
-	rd("CAUSE word read: BLK tag + 0x80C5", SEC + 21'h00, 32'h000180C5);
-	check("word read clears the line", doorbell, 0);
+	rd("CAUSE word read: BLK tag + bit 0", SEC + 21'h00, 32'h00010001);
+	check("word read does not clear", doorbell, 1);
+	arburst = 2'b00; axi_read(SEC + 21'h00, 4'd15, d, dl, beats); arburst = 2'b01;
+	check("a 16-beat FIXED burst on CAUSE: every beat the cause", {d, dl}, {32'h00010001, 32'h00010001});
+	check("burst read does not clear", doorbell, 1);
+	axi_write(SEC + 21'h00, 32'hFFFFFFFE, 4'hF);
+	check("a store with bit 0 clear clears nothing", doorbell, 1);
+	axi_write(SEC + 21'h00, 32'h00000001, 4'h7);
+	check("a partial-width store clears nothing", doorbell, 1);
+	rd("CAUSE kept", SEC + 21'h00, 32'h00010001);
+	axi_write(SEC + 21'h00, 32'h00000001, 4'hF);
+	check("a store of bit 0 clears the line", doorbell, 0);
 	rd("CAUSE zero iff idle", SEC + 21'h00, 32'd0);
 	sec_wr(21'h10, 32'h1); settle;
 	rd("REQ is a level (pending once EN)", SEC + 21'h04, 32'h800080C5);
@@ -1581,8 +1665,10 @@ initial begin
 	rd("DROPS 76", SEC + 21'h1C, dg(32'd76));
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("STATUS high-water saturates at 255", d[15:8], dg(255));
-	rd("CAUSE pending, clk_sys stopped", SEC + 21'h00, 32'h000180C5);
-	check("CAUSE read clears with clk_sys stopped", doorbell, 0);
+	rd("CAUSE pending, clk_sys stopped", SEC + 21'h00, 32'h00010001);
+	check("CAUSE read keeps the line with clk_sys stopped", doorbell, 1);
+	axi_write(SEC + 21'h00, 32'h00000001, 4'hF);
+	check("CAUSE store clears with clk_sys stopped", doorbell, 0);
 	rd("ID, clk_sys stopped", SEC + 21'h38, 32'h32434553);
 	rd("undecoded, clk_sys stopped", 21'h1FFFFC, 32'hDEADBEEF);
 	sys_run = 1;
@@ -1687,7 +1773,7 @@ initial begin
 	sec_wr(21'h10, 32'h0); settle;
 	rd("STATUS en_sys 0", SEC + 21'h14, DIAG ? 32'd0 : 32'h8);   // lean: still rejecting the TEST-less BEGIN
 	n0 = cd_frames;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	cd_request(32'h00002000); settle;
 	check("SPI slot 1 offered", sd_rd[1], 1);
 	check("doorbell still rings", doorbell, 1);
@@ -1695,8 +1781,50 @@ initial begin
 	wait_frame(n0);
 	check_buf("frame 0x2000 over SPI through the mux", 32'h00002000, 588);
 
+	$display("-- CAUSE: a request racing the store-back is never lost; a raise in the clear's cycle survives");
+	begin : sec_race
+		integer k, lost, kept, same, gone, stale, m;
+		realtime t0, lat_f, lat_w, off, lead;
+		// one raise per round: the request rises (EN is 0, so nothing serves it), then a core reset drops it;
+		// calibrated from the clk_sys edge each starts on; the store leads the request's edge by up to 48 ns
+		cause_drain(SEC);
+		fork
+			begin @(negedge clk_sys) t0 = $realtime; end
+			cd_request(32'h00002100);
+		join
+		settle; lat_f = t_fire - t0;
+		@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
+		cause_drain(SEC);
+		@(negedge clk_sys) t0 = $realtime; axi_write(SEC + 21'h00, 32'h00000000, 4'hF); lat_w = t_wsec - t0;
+		m = $rtoi(64.0 / (2.0 * SYS_HP_NS)) + 2; lead = m * 2.0 * SYS_HP_NS;
+		lost = 0; kept = 0; same = 0; gone = 0; stale = 0;
+		for (k = 0; k < 64; k = k + 1) begin
+			off = lat_f - lat_w + (k - 32) * 1.5;
+			fork
+				begin @(negedge clk_sys); if (lead + off > 0) #(lead + off); axi_write(SEC + 21'h00, 32'h00000001, 4'hF); end
+				begin repeat (m) @(negedge clk_sys); cd_request(32'h00002200 + k); end
+			join
+			settle;
+			if (t_fire >= t_wsec) begin kept = kept + 1; if (!doorbell) lost = lost + 1; end
+			else begin gone = gone + 1; if (doorbell) stale = stale + 1; end
+			if (t_fire == t_wsec) same = same + 1;
+			// the drain's level read after the store-back: the request the bit no longer shows is in LBA
+			axi_read(SEC + 21'h08, 0, d, dl, beats);
+			if (!doorbell && d !== 32'h00002200 + k) lost = lost + 1;
+			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
+			if (doorbell) cause_drain(SEC);
+		end
+		$display("     %0d offsets: %0d raises before the clear, %0d in or after it, %0d in its cycle", 64, gone, kept,
+		         same);
+		check("no request lost across 64 offsets", lost, 0);
+		check("some raises came before the clear", gone > 0, 1);
+		check("the store cleared every raise before it", stale, 0);
+		check("some raises landed in the clear's own cycle (the raise won)", same > 0, 1);
+		check("no ring left after the sweep", doorbell, 0);
+	end
+
 	$display("-- memory cards: EN=0 leaves both cards on hps_io");
-	axi_read(SEC + 21'h00, 0, d, dl, beats);           // clears the CD's pending cause
+	cause_drain(SEC);                                 // clears the CD's pending cause
 	n0 = mc1.done; s0 = mc1.strobes;
 	mc1.go(0, 7'h05); settle;
 	check("card 1 rd offered to hps_io", sd_rd[2], 1);
@@ -1718,7 +1846,8 @@ initial begin
 	mc1.go(0, 7'h12); settle;
 	check("card 1 hidden from hps_io", sd_rd[2], 0);
 	check("card rd rings", doorbell, 1);
-	rd("CAUSE names card 1 read", SEC + 21'h00, 32'h000180C9);
+	rd("CAUSE: the event bit", SEC + 21'h00, 32'h00010001);
+	cause_drain(SEC);
 	rd("REQ card 1 read", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2]", SEC + 21'h68, 32'h00000012);
 	rd("LBA_S[0] reads 0", SEC + 21'h60, 32'd0);
@@ -1738,7 +1867,8 @@ initial begin
 	n0 = mc2.done; s0 = mc2.strobes; r = mc1.strobes;
 	mc2.go(1, 7'h7F); settle;
 	check("card 2 wr hidden from hps_io", sd_wr[3], 0);
-	rd("CAUSE names card 2 write", SEC + 21'h00, 32'h000180CE);
+	rd("CAUSE: the event bit again", SEC + 21'h00, 32'h00010001);
+	cause_drain(SEC);
 	rd("REQ card 2 write", SEC + 21'h04, 32'h800080CE);
 	rd("LBA_S[3]", SEC + 21'h6C, 32'h0000007F);
 	sec_wr(21'h5C, 32'h0000007F);
@@ -1757,7 +1887,8 @@ initial begin
 	join
 	settle;
 	rd("REQ: the CD first", SEC + 21'h04, 32'h800080C5);
-	rd("CAUSE: the CD first", SEC + 21'h00, 32'h000180C5);
+	rd("CAUSE: one event bit for both", SEC + 21'h00, 32'h00010001);
+	cause_drain(SEC);
 	sec_wr(21'h44, 32'h00003000);                          // BEGIN_S[1] aliases BEGIN
 	rd("REQ: answered CD hidden, card 1 next", SEC + 21'h04, 32'h800080C9);
 	frame_data(32'h00003000, 0, 588);
@@ -1777,7 +1908,7 @@ initial begin
 	$display("-- stale and mismatched card answers rejected");
 	r = mc1.done; s0 = mc1.strobes;
 	mc1.go(0, 7'h21); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000099); settle;
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("STATUS rejecting after a stale BEGIN_S", d[3:1], 3'b100);
@@ -1812,21 +1943,21 @@ initial begin
 	$display("-- core reset during a card load: the stale BEGIN_S is rejected, the request re-opens");
 	r = mc1.done; s0 = mc1.strobes;
 	mc1.go(0, 7'h30); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);              // the HPS drains the cause
+	cause_drain(SEC);                                    // the HPS drains the cause
 	rd("REQ card 1 read", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2] 0x30", SEC + 21'h68, 32'h00000030);       // the HPS fills LBA 0x30 ...
 	@(negedge clk_sys) cd_reset = 1;
 	repeat (4) @(negedge clk_sys);
 	cd_reset = 0;
 	mc1.go(0, 7'h00); settle;                              // ... the load restarts at LBA 0
-	axi_read(SEC + 21'h00, 0, d, dl, beats);              // the restart's ring, drained early
+	cause_drain(SEC);                                    // the restart's ring, drained early
 	sec_wr(21'h48, 32'h00000030); settle;                  // the stale answer
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("STATUS rejecting after the stale BEGIN_S", d[3:1], 3'b100);
 	check("the reject re-rings the doorbell", doorbell, 1);
 	rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2] 0", SEC + 21'h68, 32'h00000000);
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000000);
 	frame_data(32'h00000000, 0, 256);
 	repeat (1500) @(negedge clk_sys);
@@ -1840,7 +1971,7 @@ initial begin
 	r = mc1.done; n0 = cd_frames;
 	mc1.go(0, 7'h31); settle;
 	cd_request(32'h00004000); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h0C, 32'h00004000);
 	frame_data(32'h00004000, 0, 588);                       // the feeder is still streaming it ...
 	sec_wr(21'h48, 32'h00000077);                           // ... when both card answers queue
@@ -1857,7 +1988,7 @@ initial begin
 	$display("-- the card's LBA moves while its request stays high: the reject re-latches it");
 	r = mc1.done;
 	mc1.go(0, 7'h40); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	rd("LBA_S[2] 0x40", SEC + 21'h68, 32'h00000040);
 	@(negedge clk_sys) mc1.lba = 7'h41;                     // rd never fell
 	settle;
@@ -1866,7 +1997,7 @@ initial begin
 	check("the moved LBA's answer re-rings", doorbell, 1);
 	rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2] re-latched 0x41", SEC + 21'h68, 32'h00000041);
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000041);
 	frame_data(32'h00000041, 0, 256);
 	repeat (1500) @(negedge clk_sys);
@@ -1881,7 +2012,7 @@ initial begin
 	mc1.go(0, 7'h70);
 	mc2.go(0, 7'h10);
 	cd_request(32'h00006000); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sys_run = 0;                                            // every answer queues before the feeder runs
 	sec_wr(21'h48, 32'h00000071);                           // card 1, the wrong LBA: rejected first
 	sec_wr(21'h4C, 32'h00000010);                           // card 2, right: its frame holds the feeder
@@ -1894,7 +2025,7 @@ initial begin
 	frame_data(32'h00006000, 0, 588);
 	wait_frame(n0);
 	check_buf("CD buffer 0x6000 behind the card's reject", 32'h00006000, 588);
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000070);
 	frame_data(32'h00000070, 0, 256);
 	repeat (1500) @(negedge clk_sys);
@@ -1906,19 +2037,19 @@ initial begin
 	r = mc1.done; s0 = mc2.done;
 	mc1.go(0, 7'h24);
 	mc2.go(0, 7'h34); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sys_run = 0;                                            // both stale answers queue back to back
 	sec_wr(21'h48, 32'h00000025);
 	sec_wr(21'h4C, 32'h00000035);
 	sys_run = 1; settle;
 	rd("REQ shows card 1 re-opened", SEC + 21'h04, 32'h800080C9);
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000024);
 	frame_data(32'h00000024, 0, 256);
 	repeat (1500) @(negedge clk_sys);
 	check("card 1 frame at 0x24", mc1.done - r, 1);
 	rd("REQ shows card 2 re-opened", SEC + 21'h04, 32'h800080CD);
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	sec_wr(21'h4C, 32'h00000034);
 	frame_data(32'h00000034, 0, 256);
 	repeat (1500) @(negedge clk_sys);
@@ -1927,7 +2058,7 @@ initial begin
 
 	$display("-- card EN off: back to hps_io, no doorbell");
 	sec_wr(21'h10, 32'h1); settle;
-	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	cause_drain(SEC);
 	n0 = mc2.done; s0 = mc2.strobes;
 	mc2.go(1, 7'h44); settle;
 	check("card 2 wr offered to hps_io", sd_wr[3], 1);
@@ -1960,9 +2091,18 @@ initial begin
 	rsize = 0; axi_read(SYSB, 0, d, dl, beats); rsize = 2;
 	check("SYS byte read returns the cause", d, 32'h00100001);
 	check("SYS byte read does not clear", sys_irq, 1);
-	rd("SYS CAUSE: tag SYS (bit 20), payload STATUS", SYSB, 32'h00100001);
-	check("SYS word read clears the line", sys_irq, 0);
-	rd("SYS CAUSE idle after the read", SYSB, 32'd0);
+	rd("SYS CAUSE: tag SYS (bit 20), bit 0 STATUS", SYSB, 32'h00100001);
+	check("SYS word read does not clear", sys_irq, 1);
+	arburst = 2'b10; axi_read(SYSB, 4'd3, d, dl, beats); arburst = 2'b01;
+	check("SYS WRAP burst over CAUSE does not clear", sys_irq, 1);
+	axi_write(SYSB, 32'hFFFFFFFE, 4'hF);
+	check("SYS store with bit 0 clear clears nothing", sys_irq, 1);
+	axi_write(SYSB, 32'h00000001, 4'h1);
+	check("SYS partial-width store clears nothing", sys_irq, 1);
+	rd("SYS CAUSE kept", SYSB, 32'h00100001);
+	axi_write(SYSB, 32'h00000001, 4'hF);
+	check("SYS store of bit 0 clears the line", sys_irq, 0);
+	rd("SYS CAUSE idle after the store", SYSB, 32'd0);
 	st_read(stf0, stf1, stw);
 	check("STFLG {seq 1, A, flag 1}", stf0, 32'h000100A1);
 	check("STFLG stable across the words", stf1, stf0);
@@ -1996,31 +2136,50 @@ initial begin
 	settle;
 	check("SYS line raised once for the burst", sys_irq, 1);
 	rd("SYS CAUSE", SYSB, 32'h00100001);
-	check("cleared by one word read", sys_irq, 0);
+	axi_write(SYSB, 32'h00000001, 4'hF);
+	check("cleared by one store", sys_irq, 0);
 	st_read(stf0, stf1, stw);
 	check("STFLG flag 5 (the core's)", {stf0[7:4], stf0[3:0]}, {4'hA, hps_io.stflg});
 	check("STFLG stable", stf1, stf0);
 	check("snapshot is the last request", stw == st_pat(5), 1);
 
-	$display("-- SYS: a request racing the CAUSE read is never lost (offset sweep)");
+	$display("-- SYS: a capture racing the store-back is never lost; a raise in the clear's cycle survives");
 	begin : race
-		integer k, lost, kept;
-		lost = 0; kept = 0;
+		integer k, lost, kept, same, gone, stale, m;
+		realtime t0, lat_c, lat_w, off, lead;
+		// calibrate from the clk_sys edge each starts on: a request's capture, and a store's clear
+		fork
+			begin @(negedge clk_sys) t0 = $realtime; end
+			st_req(st_pat(99));
+		join
+		settle; lat_c = t_cap - t0;
+		axi_write(SYSB, 32'h00000001, 4'hF);
+		@(negedge clk_sys) t0 = $realtime; axi_write(SYSB, 32'h00000000, 4'hF); lat_w = t_wsys - t0;
+		// the request starts m clk_sys edges after the store's reference edge, so a store can lead it by 64 ns
+		m = $rtoi(64.0 / (2.0 * SYS_HP_NS)) + 2; lead = m * 2.0 * SYS_HP_NS;
+		lost = 0; kept = 0; same = 0; gone = 0; stale = 0;
 		for (k = 0; k < 64; k = k + 1) begin
+			off = lat_c - lat_w + (k - 32) * 1.5;   // the store's start after the request's edge
 			fork
-				begin #(k * 2); axi_read(SYSB, 0, d, dl, beats); end
-				st_req(st_pat(100 + k));
+				begin @(negedge clk_sys); if (lead + off > 0) #(lead + off); axi_write(SYSB, 32'h00000001, 4'hF); end
+				begin repeat (m) @(negedge clk_sys); st_req(st_pat(100 + k)); end
 			join
 			settle;
-			// a capture the read did not return is still pending: the line stays (or comes back) up
-			if (t_cap >= t_fetch) begin kept = kept + 1; if (!sys_irq) lost = lost + 1; end
-			// The HPS's drain: the snapshot after the CAUSE read; a capture it missed keeps the line up
+			// a capture in or after the clear's cycle keeps the bit: the line stays up
+			if (t_cap >= t_wsys) begin kept = kept + 1; if (!sys_irq) lost = lost + 1; end
+			else begin gone = gone + 1; if (sys_irq) stale = stale + 1; end
+			if (t_cap == t_wsys) same = same + 1;
+			// the drain's level read after the store-back: a capture the bit no longer shows is in the snapshot
 			st_read(stf0, stf1, stw);
 			if (!sys_irq && (stf0[3:0] !== hps_io.stflg || stw !== st_pat(100 + k))) lost = lost + 1;
-			if (sys_irq) axi_read(SYSB, 0, d, dl, beats);
+			if (sys_irq) cause_drain(SYSB);
 		end
+		$display("     %0d offsets: %0d captures before the clear, %0d in or after it, %0d in its cycle", 64, gone,
+		         kept, same);
 		check("no request lost across 64 offsets", lost, 0);
-		check("some captures landed after the fetch", kept > 0, 1);
+		check("some captures came before the clear", gone > 0, 1);
+		check("the store cleared every capture before it", stale, 0);
+		check("some captures landed in the clear's own cycle (the raise won)", same > 0, 1);
 		check("line idle after the sweep", sys_irq, 0);
 	end
 
@@ -2377,7 +2536,7 @@ initial begin
 		reg [15:0] w;
 		integer m;
 		st_req(st_pat(300)); settle;
-		axi_read(SYSB, 0, d, dl, beats);           // drain the SYS cause the request raised
+		cause_drain(SYSB);                         // drain the SYS cause the request raised
 		// the link: the reply to each word is io_dout once its ack is seen (the HPS reads gp_in then)
 		@(negedge clk_sys); io_enable = 1; repeat (2) @(negedge clk_sys);
 		for (m = 0; m < 9; m = m + 1) begin hps_word((m == 0) ? 16'h0029 : 16'h0000); ws[m] = hps_bus[15:0]; end
@@ -2478,6 +2637,95 @@ initial begin
 		check("lane 16: drained", rs[15:0], 0);
 	end
 `endif
+
+	$display("-- reads have no side effect: causes pending, a frame half stored, replies queued");
+	begin : pure_reads
+		reg [511:0] sw0, ss0;
+		reg [255:0] sl0;
+		reg [20:0]  a;
+		reg  [3:0]  len;
+		integer m, b, t, nbad, seed, rv;
+		reg [31:0] p, dr, rs;
+		reg [15:0] w;
+		st_req(st_pat(500)); settle;
+		check("pure reads: SYS cause pending", sys_irq, 1);
+		if (TB_SEC) begin
+			sec_wr(21'h10, 32'h1); settle;
+			cd_request(32'h00007000); settle;
+			check("pure reads: SECTOR cause pending", doorbell, 1);
+			n0 = cd_frames;
+			sec_wr(21'h0C, 32'h00007000);
+			frame_data(32'h00007000, 0, 294);
+			settle;
+		end
+`ifdef MISTER_LW_LANE
+		lane_count(p, dr);
+		f_set(0, 16'h0029, 8);
+		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
+		lane_send_c(1, 1'b1);
+		lane_wait_n(p + 1, 1'b1);
+		repeat (slow(100)) @(negedge clk);
+		lane_rstat(rs);
+		check("pure reads: nine replies queued", rs[15:0], 9);
+		f_set(0, 16'h001E, 2);
+		fw[0] = 16'h0F01; fw[1] = 16'h0F02;
+		lane_send_c(0, 1'b0);                      // a frame half stored: BEGIN and its words, no END
+`endif
+		sys_run = 0;
+		repeat (50) @(negedge clk);
+		sw0 = pure_win(); ss0 = pure_sec(); sl0 = pure_lane();
+		pure_view(0, nbad);
+		// every byte and half of each block's first 64 bytes, at both ends of the 2 MB
+		for (b = 0; b < 9; b = b + 1) begin
+			case (b)
+				0: a = 21'h040000; 1: a = 21'h041000; 2: a = 21'h043000; 3: a = 21'h044000; 4: a = 21'h045000;
+				5: a = 21'h046000; 6: a = 21'h080000; 7: a = 21'h1FFFC0; default: a = 21'h000000;
+			endcase
+			for (m = 0; m < 64; m = m + 1) begin
+				rsize = 0; axi_read(a + m[20:0], 0, d, dl, beats);
+				if (!m[0]) begin rsize = 1; axi_read(a + m[20:0], 0, d, dl, beats); end
+			end
+			rsize = 2;
+			// bursts of 2-16 beats of every type, words and bytes
+			for (m = 1; m < 16; m = m + 1) begin
+				for (t = 0; t < 4; t = t + 1) begin arburst = t[1:0]; axi_read(a, m[3:0], d, dl, beats); end
+				rsize = 0; arburst = 2'b01; axi_read(a, m[3:0], d, dl, beats); rsize = 2;
+			end
+		end
+		// 64 random addresses over the 2 MB: a word, a half, a byte and a burst of a random length and type
+		seed = 7;
+		for (m = 0; m < 64; m = m + 1) begin
+			rv = $random(seed);
+			a = {rv[20:2], 2'b00}; len = rv[24:21] | 4'd1; arburst = rv[26:25];
+			rsize = 2; axi_read(a, 0, d, dl, beats);
+			rsize = 1; axi_read(a + 21'd2, 0, d, dl, beats);
+			rsize = 0; axi_read(a + 21'd3, 0, d, dl, beats); rsize = 2;
+			axi_read(a, len, d, dl, beats);
+		end
+		arburst = 2'b01;
+		pure_view(1, nbad);
+		check("pure reads: the readable view is unchanged", nbad, 0);
+		check("pure reads: the window's and SYS's state is unchanged", pure_win() === sw0, 1);
+		check("pure reads: SECTOR's state is unchanged", pure_sec() === ss0, 1);
+		check("pure reads: the lane's state is unchanged", pure_lane() === sl0, 1);
+		check("pure reads: both lines still high", {30'd0, TB_SEC ? doorbell : 1'b1, sys_irq}, 32'd3);
+		sys_run = 1;
+		if (TB_SEC) begin
+			frame_data(32'h00007000, 294, 588);
+			wait_frame(n0);
+			check_buf("pure reads: the half-stored frame completes", 32'h00007000, 588);
+			cause_drain(SEC);
+			sec_wr(21'h10, 32'h0); settle;
+		end
+		cause_drain(SYSB);
+`ifdef MISTER_LW_LANE
+		axi_write(LANE + 21'h8, 32'd0, 4'hF);
+		lane_wait(p + 2);
+		for (m = 0; m < 9; m = m + 1) lane_pop(w);
+		lane_rstat(rs);
+		check("pure reads: replies drained", rs[15:0], 0);
+`endif
+	end
 
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");

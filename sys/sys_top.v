@@ -1837,7 +1837,7 @@ wire [13:0] fb_stride;
 // Register map: docs/LW_BRIDGE.md.
 `ifdef MISTER_LW
 wire [20:0] lw_raddr, lw_waddr;
-wire        lw_ren, lw_rd_ack, lw_rd_word, lw_write;
+wire        lw_write;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
 wire [48:0] lw_pad;
@@ -1921,9 +1921,6 @@ hps_lw_bridge hps_lw_bridge
 (
 	.clk(clk_100m),
 	.lw_raddr(lw_raddr),
-	.lw_ren(lw_ren),
-	.lw_rd_ack(lw_rd_ack),
-	.lw_rd_word(lw_rd_word),
 	.lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr),
 	.lw_write(lw_write),
@@ -1940,9 +1937,6 @@ lw_sys_window #(
 (
 	.clk(clk_100m),
 	.lw_raddr(lw_raddr),
-	.lw_ren(lw_ren),
-	.lw_rd_ack(lw_rd_ack),
-	.lw_rd_word(lw_rd_word),
 	.lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr),
 	.lw_write(lw_write),

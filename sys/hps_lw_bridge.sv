@@ -27,6 +27,8 @@
 //   * NO reset input: a read landing in a reset window must still answer.
 //   * Clock is clk_100m (h2f_user0_clk), never a reconfigurable PLL.
 //   * AXI3 LEN/SIZE/BURST handled; IDs echoed; BRESP/RRESP always OKAY.
+//   * Reads are pure: the register bus carries no read strobe, so no read of
+//     any address, size or burst can change state.
 //  Atom port list (names, widths, directions) checked against Quartus 17.0.2
 //  libraries/megafunctions/xml_info/cyclonev_hps_interface_hps2fpga_light_weight_info.xml.
 //============================================================================
@@ -37,9 +39,6 @@ module hps_lw_bridge
 
 	// simple synchronous register bus, read side
 	output wire [20:0] lw_raddr,     // byte address inside the 2MB window
-	output wire        lw_ren,       // fetch pulse (NO side effects allowed)
-	output wire        lw_rd_ack,    // accepted-R-beat pulse (side effects fire here)
-	output wire        lw_rd_word,   // this beat is a word-exact single access
 	input wire  [31:0] lw_rdata,     // combinational, must answer every lw_raddr
 
 	// simple synchronous register bus, write side
@@ -151,8 +150,7 @@ lw_axi_regbus adapter
 	.rid(rid), .rdata(rdata), .rresp(rresp), .rlast(rlast),
 	.rvalid(rvalid), .rready(rready),
 
-	.lw_raddr(lw_raddr), .lw_ren(lw_ren), .lw_rd_ack(lw_rd_ack),
-	.lw_rd_word(lw_rd_word), .lw_rdata(lw_rdata),
+	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata),
 	.lw_be(lw_be)
 );
@@ -167,11 +165,10 @@ endmodule
 //  direction; read and write channels are fully independent (no shared
 //  state), so neither can deadlock the other.
 //
-//  Read pipeline per beat: FETCH (assert lw_ren, capture combinational
-//  lw_rdata) -> DATA (RVALID with registered data -- AXI requires RDATA
-//  stable while RVALID & ~RREADY).  On RVALID&RREADY the lw_rd_ack pulse
-//  commits downstream side effects; lw_raddr still holds the beat's
-//  address at that instant and only steps afterwards.  Cost: 2 cycles
+//  Read pipeline per beat: FETCH (capture combinational lw_rdata) -> DATA
+//  (RVALID with registered data -- AXI requires RDATA stable while
+//  RVALID & ~RREADY).  The read side is lw_raddr alone: no strobe leaves
+//  it, so a slave cannot tell a read happened.  Cost: 2 cycles
 //  AR-accept -> RVALID ("registered decode, single wait state") -- count
 //  this fixed overhead separately when timing an LW read from the HPS, or
 //  the measured number is an artifact of this adapter.
@@ -218,9 +215,6 @@ module lw_axi_regbus
 
 	// register bus
 	output wire [20:0] lw_raddr,
-	output wire        lw_ren,
-	output wire        lw_rd_ack,
-	output wire        lw_rd_word,
 	input wire  [31:0] lw_rdata,
 	output wire [20:0] lw_waddr,
 	output wire        lw_write,
@@ -267,15 +261,6 @@ assign rid       = rid_q;
 assign rresp     = 2'b00;                 // always OKAY: never a no-ack
 assign rlast     = (rbeat == rlen_q);
 assign lw_raddr  = raddr_q;
-assign lw_ren    = (rstate == R_FETCH);
-assign lw_rd_ack = rvalid & rready;       // side effects ONLY here
-// Word-exact access qualifier: single beat, 32-bit, word-aligned.  ARSIZE and
-// ARLEN are otherwise discarded on this register bus, which would make a byte
-// read of 0x1003 -- or any burst whose stepped address merely passes through a
-// read-to-clear word -- commit that word's clear while returning only a lane of
-// it.  Destructive-read registers gate their commit on this bit; the read data
-// itself is returned regardless, so answer-everything is untouched.
-assign lw_rd_word = (rlen_q == 4'd0) & (rsize_q == 3'd2) & (raddr_q[1:0] == 2'd0);
 
 always @(posedge clk) begin
 	case (rstate)

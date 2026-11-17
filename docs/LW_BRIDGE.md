@@ -125,10 +125,16 @@ A host matches entries by kind, refuses a major it does not know, and checks tha
 | `f2h_irq[9]` | 49 | 2 | SYS CAUSE (directory entry 3) | high while the CAUSE word is non-zero |
 
 Both are level lines into the GIC. The HPS kernel must expose them to userspace (for example as
-`uio_pdrv_genirq` nodes); a host without them can poll the CAUSE words instead. A CAUSE word's `[23:16]` is a one-hot
-class tag (bit 16 = BLK, bit 20 = SYS) and `[15:0]` its payload. A **word-exact read clears it**: a single 32-bit
-aligned beat, never a byte read or a burst passing through. If a new event arrives between the read's fetch and its
-completion, the bit stays set and the line stays high.
+`uio_pdrv_genirq` nodes); a host without them can poll the CAUSE words instead. A CAUSE word's `[15:0]` are event
+bits, each raised by every occurrence of its event, and `[23:16]` a read-only one-hot class tag (bit 16 = BLK, bit
+20 = SYS), shown while a bit is set; the word is 0 when nothing is pending. **Reads change nothing**, in any size or
+burst. **A full 32-bit store clears each bit written as 1**; a bit raised in the store's own cycle stays set, and a
+partial-width store clears nothing.
+
+**Drain:** read CAUSE; store the value back; once that store's response has returned, read the block's level
+registers and serve what they show; after the last service, read the level again until it shows nothing; then
+re-arm the interrupt. An event before the store-back is in the level read after it, and one after it sets its bit
+again, so the line is high at the re-arm. A bit the host does not know is cleared by the store-back.
 
 ### PAD block (kind 1)
 
@@ -171,13 +177,13 @@ A shadow of `osd_buffer` in each `osd` instance (HDMI and VGA), written over the
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `0x00100001` while pending, else 0; a word-exact read clears it |
+| `0x00` | CAUSE | `0x00100001` while pending, else 0: bit 0 = STATUS, raised by every capture; a store of bit 0 clears it |
 | `0x04` | STFLG | `{SEQ[15:0], 8'h00, 4'hA, flag[3:0]}`: the `0x29` head byte, plus a capture count |
 | `0x08`-`0x14` | STATUS[0..3] | the captured `status_req`, `[31:0]` first |
 | `0x1C` | ID | `0x31535453` ("STS1") |
 
 **Read it as a seqlock:**
-1. Read CAUSE.
+1. Read CAUSE and store the value back.
 2. Read STFLG.
 3. Read the four STATUS words.
 4. Read STFLG again.
@@ -208,7 +214,7 @@ An undeclared card's words are 0.
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `{0, 4'b0001, GET_SDSTAT word}` while pending; word-exact read clears; a write clears |
+| `0x00` | CAUSE | `0x00010001` while pending, else 0: bit 0 = a request opened or re-opened; a store of bit 0 clears it |
 | `0x04` | REQ | `{pending[31], 0, GET_SDSTAT word[15:0]}` of the highest-priority open request (primary, card 0, card 1) |
 | `0x08` | LBA | the primary's LBA, latched when its request rises |
 | `0x0C` | BEGIN | write the LBA: opens a primary frame |
@@ -225,9 +231,9 @@ An undeclared card's words are 0.
 GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], slot[3:0], wr, rd}`.
 
 **One frame:**
-1. The core raises `sd_rd[slot]`. While EN is set, `lw_blk_mux` hides the request from `hps_io`. REQ and CAUSE show
-   it, and `f2h_irq[8]` rises.
-2. The host reads CAUSE (which clears it) and LBA.
+1. The core raises `sd_rd[slot]`. While EN is set, `lw_blk_mux` hides the request from `hps_io`. CAUSE bit 0
+   sets, `f2h_irq[8]` rises and REQ shows the request.
+2. The host reads CAUSE, stores it back, then reads REQ and the slot's LBA.
 3. The host writes BEGIN with that LBA. A BEGIN whose LBA is not the core's current request is rejected, and the
    request re-opens.
 4. The host stores DATA[0 .. n-1], then reads ACCEPT.

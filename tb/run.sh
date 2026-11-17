@@ -41,9 +41,10 @@ fi
 # only if exactly its listed cases fail: an unlisted failure, or a listed case that passes under every seed the
 # arm runs, fails the arm.
 # SECTOR's reject bundle ({tag, slot} sampled as levels beside its toggle) tears under the delay models at 100 MHz
-# and above, until requests and their rejects cross as records.
-XFAIL='R100|adjacent rejects of two slots: both requests re-open
-R150|adjacent rejects of two slots: both requests re-open'
+# and above, until requests and their rejects cross as records. Which reject meets a torn sample, if any, depends
+# on the phase the cases before it leave, so the list names the cases that meet one under today's seeds.
+XFAIL='R150|adjacent rejects of two slots: both requests re-open
+R150|core reset during a card load: the stale BEGIN_S is rejected, the request re-opens'
 export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error

@@ -21,6 +21,9 @@
 // SYS block (LW directory kind 4, "STS1"): the core->host status back-channel (hps_io's 0x29) as a
 // cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG, the four
 // STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
+// CAUSE [15:0] are event bits, STATUS (bit 0) raised by every capture; [23:16] is the read-only class tag, shown
+// while a bit is set. A full-word store clears each bit written as 1, and a raise in the store's cycle wins.
+// Reads change nothing.
 // clk_sys side: hps_io's stflg as a registered Gray code. clk_100m side: the Gray code through lw_sync
 // (lw_cdc.sv), a capture of status_req on every change of it (SEQ counts captures), the CAUSE word and its line.
 // The capture reads status_req across the clocks with no cell: it relies on the words being stable from before
@@ -34,10 +37,12 @@ module lw_sys_status
 
 	input wire   [9:0] raddr,        // block-relative, bytes
 	input wire         rsel,
-	input wire         ren,
-	input wire         rd_ack,
-	input wire         rd_word,
 	output reg  [31:0] rdata,
+	input wire   [9:0] waddr,
+	input wire         wsel,
+	input wire         write,
+	input wire  [31:0] wdata,
+	input wire   [3:0] be,
 
 	output wire        irq,          // level, high while CAUSE != 0
 
@@ -69,11 +74,10 @@ reg   [3:0] flg  = 0;          // the snapshot's flag
 reg  [15:0] seq  = 0;          // captures since configuration
 reg [127:0] snap = 0;
 reg  [15:0] cause = 0;
-reg   [3:0] gen  = 0, cgen = 0;
 
-wire        capture  = flg_s != flg;
-wire        rd_cause = rsel && raddr[9:2] == 8'h00 && rd_word;
-wire        clr      = rd_cause & rd_ack & (gen == cgen);
+wire        capture = flg_s != flg;
+wire        w_cause = wsel && write && &be && waddr[9:2] == 8'h00;
+wire [15:0] clr     = w_cause ? wdata[15:0] : 16'd0;
 
 always @(posedge clk) begin
 	if (capture) begin
@@ -81,10 +85,7 @@ always @(posedge clk) begin
 		seq  <= seq + 16'd1;
 		snap <= status_req;     // quasi-static: stable since the flag's Gray code moved
 	end
-	// a raise beats a concurrent clear; a raise between fetch and ack keeps the bit
-	gen   <= gen + capture;
-	if (rd_cause & ren) cgen <= gen;
-	cause <= (clr ? 16'd0 : cause) | (capture ? C_STATUS : 16'd0);
+	cause <= (cause & ~clr) | (capture ? C_STATUS : 16'd0);   // a raise beats a clear in the same cycle
 end
 
 assign irq = |cause;
