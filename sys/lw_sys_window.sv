@@ -21,8 +21,8 @@
 // LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR, OSDBUF and SYS blocks.
 // Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
 // or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a held-data handshake
-// (lw_xfer, lw_cdc.sv) drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) is built only when the core
-// declares it (SEC_EN): one primary hps_io read slot plus up to two save slots ("cards"); entry 1
+// (lw_xfer, lw_cdc.sv) drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) is built only when
+// the core declares it (SEC_EN): one primary hps_io read slot plus up to two save slots ("cards"); entry 1
 // words 7-12 declare each card slot, its DDR image base (wsrc) and extent. Without SEC_EN, entry 1
 // reads 0 (no kind) and the block's addresses read 0.
 // OSDBUF decodes image stores and CTRL; the shadow RAMs live in each osd instance (osd.v).

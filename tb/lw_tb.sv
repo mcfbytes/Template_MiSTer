@@ -443,6 +443,22 @@ always @(posedge clk_sys) if (sd_buff_wr && sd_ack[2]) begin
 	mc_sum   <= mc_sum + sd_buff_dout;
 end
 
+// SECTOR's DIAG SUM, sampled on every clk_100m edge: it may change only on an edge where FRAMES changes too, so
+// a host that sees a frame counted reads that frame's sum.
+integer sum_moves = 0, sum_alone = 0;
+`ifdef MISTER_LW_SECTOR_SLOT
+reg [19:0] sum_p = 0;
+reg [15:0] frames_p = 0;
+always @(posedge clk) begin
+	if (win.sec.sector.sum !== sum_p) begin
+		sum_moves = sum_moves + 1;
+		if (win.sec.sector.frames === frames_p) sum_alone = sum_alone + 1;
+	end
+	sum_p    <= win.sec.sector.sum;
+	frames_p <= win.sec.sector.frames;
+end
+`endif
+
 integer fails = 0, checks = 0, lchecks = 0;
 integer wlat_ref = -1, rlat_ref = -1;
 
@@ -1922,6 +1938,13 @@ initial begin
 	check("card 2 SPI write completed", mc2.done - n0, 1);
 	check("SPI write: no strobe into card 2", mc2.strobes - s0, 0);
 	sec_wr(21'h10, 32'h0); settle;
+
+	if (DIAG) begin
+		$display("-- DIAG: SUM and FRAMES move on the same edge");
+		$display("     %0d SUM changes, %0d without FRAMES", sum_moves, sum_alone);
+		check("SUM changed during the SECTOR cases", sum_moves > 0, 1);
+		check("SUM never changed without FRAMES", sum_alone, 0);
+	end
 
 `endif
 
