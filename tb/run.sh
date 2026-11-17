@@ -1,11 +1,18 @@
 #!/bin/sh
-# LW bridge framework testbench (tb/lw_tb.sv), one run per arm:
+# LW bridge framework testbench (tb/lw_tb.sv, tb/top_tb.sv and the scripts below), one run per arm:
 #   S  the off-state guard (tb/offstate.sh): without MISTER_LW, sys/ reads upstream's text under every upstream
 #      macro set; every LW-only file is empty without its macro and keeps no macro defined
+#   N  static checks on the preprocessed top level (tb/static.sh): the discovery bit with both LW instances or
+#      neither, the f2h_irq lines, the LW nets arm E checks, in every configuration arm E builds
+#   E  sys_top.v elaborated (tb/top_tb.sv, against the stand-ins of tb/sys_stubs.sv) in every configuration of
+#      "tb/static.sh --configs": off and each LW tier set, each with no upstream macro, MISTER_DEBUG_NOHDMI and
+#      MISTER_DUAL_SDRAM. Fails if it does not elaborate, if an LW run warns of an implicit net or a port width
+#      that the off run of the same upstream variant does not, or if a check of top_tb fails (an LW net that
+#      reads z among them)
 #   1  LW_DIAG=1 (debug build: diagnostics compiled in)
 #   0  LW_DIAG=0 (shipping build)
 #   M  LW_DIAG=0 with MENU_CORE (the osd header-row gate only)
-#   N  LW_DIAG=0 without MISTER_LW_SECTOR_SLOT (the Template's own configuration): no SECTOR files, no muxes
+#   F  LW_DIAG=0 without MISTER_LW_SECTOR_SLOT (the Template's own configuration): no SECTOR files, no muxes
 #   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots)
 #   L  LW_DIAG=0 with the SECTOR block and the frame lane (MISTER_LW_LANE): the link nets through lw_link
 #   R12 R21 R53 R62 R100 R150  arm L with clk_sys at 12.0, 21.477, 53.69, 62.5, 100.0 and 150.0 MHz
@@ -14,14 +21,15 @@
 #      the window with every block, at both LW_DIAG values, with every tier macro; and the floor modules with
 #      MISTER_LW alone. Any error fails (a name used before its declaration is one, which the Icarus arms
 #      accept). Without slang on PATH the arm reports SKIPPED and does not fail.
-# LW_TB_ARMS selects arms (default: all). Needs Icarus Verilog >= 12 (11 cannot parse hps_io's default-less
-# CONF_STR). Without a local one, set LW_TB_IMAGE to a container image that has it; the tree is mounted at /w.
+# LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F and 0. Needs Icarus Verilog >= 12
+# (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
+# that has it; the tree is mounted at /w.
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
 if [ -z "$LW_TB_INNER" ] && ! iverilog -V 2>/dev/null | grep -q 'version 1[2-9]'; then
   if [ -n "$LW_TB_IMAGE" ]; then
     sh tb/offstate.sh --extract   # arm S's upstream tree: the container has no git
-    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
+    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
       "$LW_TB_IMAGE" sh tb/run.sh
   fi
   echo "tb/run.sh: needs Icarus Verilog >= 12 on PATH, or LW_TB_IMAGE set to an image with it" >&2; exit 2
@@ -51,6 +59,45 @@ lint() {
   return $st
 }
 
+# elab LOG: arm E, one elaboration and simulation of tb/top_tb.sv per configuration; the log ends with one
+# PASSED/FAILED line for the arm. Files from sys.qip and files.qip, less those sys_stubs.sv stands in for.
+ESTUB="sys/yc_out.sv sys/mcp23009.sv sys/audio_out.sv sys/f2sdram_safe_terminator.sv sys/ddr_svc.sv rtl/cos.sv"
+elab() {
+  E=$O/e; rm -rf "$E"; mkdir -p "$E"; : > "$1"
+  printf '`define BUILD_DATE "000000"\n' > "$E/build_id.v"
+  F=""
+  for q in sys/sys.qip files.qip; do
+    for f in $(tr -d '\r' < $q |
+               sed -n 's/^set_global_assignment -name \(SYSTEM\)\{0,1\}VERILOG_FILE *\(\[file join \$::quartus(qip_path) \)\{0,1\}\([^] ]*\).*/\3/p'); do
+      case $q in sys/*) f=sys/$f;; esac
+      case " $ESTUB " in *" $f "*) ;; *) F="$F $f";; esac
+    done
+  done
+  sh tb/static.sh --configs > "$E/configs" || { echo "FAILED: 1 (tb/static.sh --configs)" >> "$1"; return 1; }
+  while IFS='|' read -r c d; do
+    v=${c#*.}; [ "$v" = "$c" ] && v=""; b=off${v:+.$v}
+    mkdir -p "$E/$c"
+    echo "-- $c: elaborates, with no implicit net and no port width beyond $b's ($d)" >> "$1"
+    sh tb/static.sh --nets "$E/$c/lw_e_nets.vh" $d >> "$1" 2>&1 || echo "FAIL $c: no net list" >> "$1"
+    if ! iverilog -g2012 -Wimplicit $d -I sys -I "$E" -I "$E/$c" -s top_tb -o "$E/$c/top.vvp" tb/top_tb.sv \
+         tb/sys_stubs.sv $F > "$E/$c/err" 2>&1; then
+      echo "FAIL $c: does not elaborate" >> "$1"
+      grep -E 'error|sorry' "$E/$c/err" | head -20 | sed 's/^/   /' >> "$1"; continue
+    fi
+    grep -E 'warning: (implicit definition|Port .* expects)' "$E/$c/err" | grep -v '^tb/' | sort -u > "$E/$c.w"
+    [ "$c" = "$b" ] || comm -13 "$E/$b.w" "$E/$c.w" | sed "s/^/FAIL $c: beyond $b: /" >> "$1"
+    echo "-- $c: tb/top_tb.sv" >> "$1"
+    vvp -n "$E/$c/top.vvp" > "$E/$c/log" 2>&1
+    sed -e "s/^-- /-- $c: /" -e "s/^\(PASSED\|FAILED\): /$c: \1: /" -e '/\$finish called/d' "$E/$c/log" >> "$1"
+    grep -Eq '^(PASSED|FAILED): [0-9]' "$E/$c/log" ||
+      printf -- '-- %s: tb/top_tb.sv ends\nFAIL %s: tb/top_tb.sv gave no result\n' "$c" "$c" >> "$1"
+  done < "$E/configs"
+  awk -v n="$(wc -l < "$E/configs")" '/^FAIL / { f++ } / PASSED: [0-9]+ checks/ { c += $3 }
+    END { if (f) printf "FAILED: %d failures over %d configurations\n", f, n
+          else printf "PASSED: %d configurations, %d checks\n", n, c }' "$1" > "$E/result"
+  cat "$E/result" >> "$1"
+}
+
 # verdict ARM LOG: one result line; status 0 if the arm passes
 verdict() {
   awk -v arm="$1" '
@@ -73,7 +120,26 @@ verdict() {
 }
 
 O=${LW_TB_OUT:-tb/out}; mkdir -p "$O"; rc=0; R=""
-for g in ${LW_TB_ARMS:-S 1 0 M N G L R12 R21 R53 R62 R100 R150 V}; do
+[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
+for g in ${LW_TB_ARMS:-S N E 1 0 M F G L R12 R21 R53 R62 R100 R150 V}; do
+  if [ "$g" = N ]; then
+    echo "== arm N: tb/static.sh"
+    sh tb/static.sh > "$O/lw_staticN.log" 2>&1
+    grep -v "^pass " "$O/lw_staticN.log" | grep -v '^[a-z.-]*: [0-9]* LW nets'
+    V=$(verdict N "$O/lw_staticN.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = E ]; then
+    echo "== arm E: sys_top.v elaborated against tb/sys_stubs.sv"
+    elab "$O/lw_elabE.log"
+    grep -E '^FAIL|^   |^[a-z.-]*: (PASSED|FAILED)|^(PASSED|FAILED)' "$O/lw_elabE.log"
+    V=$(verdict E "$O/lw_elabE.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
   if [ "$g" = S ]; then
     echo "== arm S: tb/offstate.sh"
     sh tb/offstate.sh > "$O/lw_offS.log" 2>&1
@@ -97,7 +163,7 @@ for g in ${LW_TB_ARMS:-S 1 0 M N G L R12 R21 R53 R62 R100 R150 V}; do
   case $g in
     1|0) D="$B $S -DLW_DIAG=$g";;
     M) D="$B $S -DLW_DIAG=0 -DMENU_CORE";;
-    N) D="$B -DLW_DIAG=0";;
+    F) D="$B -DLW_DIAG=0";;
     G) D="$B $S -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
     L) D="$B $L";;
     R12) D="$B $L -DLW_TB_SYS_HP_PS=41667";;
