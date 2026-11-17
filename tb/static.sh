@@ -11,9 +11,13 @@
 # such as the link nets the lane takes over), and every port of osd, hps_io and emu that the configuration
 # declares differently from off, at each of their instances. Arm E fails if one of them reads z.
 # The checks, each in every configuration, on sys_top.v as Icarus preprocesses it:
-#   1. The discovery bit and the two LW instances come together or not at all: gp_in[27] is the constant 1 in
-#      exactly the configurations that instantiate both hps_lw_bridge and lw_sys_window, and those are exactly
-#      the ones with MISTER_LW. gp_in[26:21] are constant 0, and gp_in is 32 bits wide.
+#   1. The LW terms of GPI and the two LW instances come together or not at all: gp_in[25] is the net lw_present
+#      and gp_in[24] the net lw_idle in exactly the configurations that instantiate both hps_lw_bridge and
+#      lw_sys_window, and those are exactly the ones with MISTER_LW; each net is declared with no value, assigned
+#      nowhere, and connected to the firewall's output of its name (present, idle). Every other bit of
+#      gp_in[27:21] is a constant 0 (both bits too, without MISTER_LW), and gp_in is 32 bits wide. Once, in
+#      hps_lw_bridge.sv: present is assigned the constant 1 and nothing else, and idle is lw_axi_regbus's idle_q,
+#      a register assigned only on posedge clk.
 #   2. f2h_irq: bits 1:0 are upstream's, bit 8 is the net lw_sys_window's doorbell output drives and bit 9 the
 #      one its sys_irq output drives, each assigned nowhere else; every other bit is a constant 0.
 #   3. Every LW configuration has LW nets to check; the off configuration has none.
@@ -46,7 +50,8 @@ UPSTREAM = {'MISTER_DEBUG_NOHDMI', 'MISTER_DUAL_SDRAM'}
 CONFIGS = [(t + v, td + vd) for v, vd in VARIANTS for t, td in TIERS]
 # f2h_irq bit -> the lw_sys_window output that must drive it
 LINES = {8: 'doorbell', 9: 'sys_irq'}
-DISC = 27
+# gp_in bit -> (the net, the hps_lw_bridge output that must drive it); the rest of gp_in[27:21] is 0
+GPI = {25: ('lw_present', 'present'), 24: ('lw_idle', 'idle')}
 
 if args[:1] == ['--configs']:
     for n, d in CONFIGS:
@@ -284,7 +289,7 @@ if args[:1] == ['--nets']:
 
 for name, defs in CONFIGS:
     lw, top, D, nets, lwports = analyse(defs)
-    print('-- %s: the discovery bit, the lines and the LW nets (%s)' % (name, ' '.join(defs) or 'no macro'))
+    print('-- %s: the GPI terms, the lines and the LW nets (%s)' % (name, ' '.join(defs) or 'no macro'))
     W = {}
     for n, (_, rng, _) in D.items():
         W[n] = rng_width(rng) if rng else 1
@@ -295,11 +300,25 @@ for name, defs in CONFIGS:
     fw, win = len(inst['hps_lw_bridge']) == 1, len(inst['lw_sys_window']) == 1
     gp = bitmap(D.get('gp_in', (0, 0, None))[2], W)
     if check(gp is not None and len(gp) == 32, '%s: gp_in is not a 32-bit concatenation of sized terms' % name):
-        disc = gp[DISC][0] == ["1'b1"]
-        check(disc == fw == win == lw, "%s: discovery bit %d %s, hps_lw_bridge %s, lw_sys_window %s, MISTER_LW %s"
-              % (name, DISC, 'set' if disc else 'clear', fw, win, lw))
-        zero = all(lit_value(gp[b][0][0]) == 0 and len(gp[b][0]) == 1 for b in range(21, DISC))
-        check(zero, '%s: gp_in[26:21] is not constant 0' % name)
+        fwc = inst['hps_lw_bridge'][0][1] if fw else {}
+        terms = []
+        for b, (net, port) in sorted(GPI.items(), reverse=True):
+            t = gp[b][0]
+            terms.append(t == [net])
+            if t == [net]:
+                ok = W.get(net) == 1 and D.get(net, (0, 0, 0))[2] is None and fwc.get(port) == [net] and \
+                     not any(s[:1] == ['assign'] and net in s[1:s.index('=')] for s in statements(top) if '=' in s)
+                check(ok, '%s: gp_in[%d] is %s, not a 1-bit net driven by hps_lw_bridge.%s alone'
+                      % (name, b, net, port))
+            else:
+                check(len(t) == 1 and lit_value(t[0]) == 0, '%s: gp_in[%d] is %s, neither %s nor 0'
+                      % (name, b, ' '.join(t), net))
+        both = all(terms)
+        check(both == any(terms) and both == fw == win == lw,
+              "%s: gp_in[25] lw_present %s, gp_in[24] lw_idle %s, hps_lw_bridge %s, lw_sys_window %s, MISTER_LW %s"
+              % (name, terms[0], terms[1], fw, win, lw))
+        zero = all(lit_value(gp[b][0][0]) == 0 and len(gp[b][0]) == 1 for b in range(21, 28) if b not in GPI)
+        check(zero, '%s: gp_in[27:26] or gp_in[23:21] is not constant 0' % name)
     irq = bitmap(D.get('f2h_irq', (0, 0, None))[2], W)
     if check(irq is not None and len(irq) <= 64, '%s: f2h_irq is not a concatenation of sized terms' % name):
         irq += [(["1'b0"], 0)] * (64 - len(irq))
@@ -728,6 +747,27 @@ for a in sorted(XREAD_ALLOW - seen_allow):
     check(False, '%s: the listed read of %s by %s is gone; take it off the list' % (a[0], a[2], a[1]))
 print('crossing structure: %d lw_sync instances, %d source registers, %d listed reads across clocks' %
       (nsync, nsrc, len(seen_allow)))
+
+# ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
+print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')
+fwt = tokens(pp('sys/hps_lw_bridge.sv', ['MISTER_LW']))
+fwm, rbm = module(fwt, 'hps_lw_bridge'), module(fwt, 'lw_axi_regbus')
+FWM = modules_of('sys/hps_lw_bridge.sv', ['MISTER_LW'])
+def assigns(body, net):
+    return [st[st.index('=') + 1:] for st in statements(body)
+            if st[:1] == ['assign'] and '=' in st and st[1:st.index('=')] == [net]]
+check(ports(fwm).get('present', '').split()[:2] == ['output', 'wire'], 'hps_lw_bridge: present is not an output wire')
+check(assigns(fwm, 'present') == [["1'b1"]], 'hps_lw_bridge: present is %s, not the constant 1 alone'
+      % assigns(fwm, 'present'))
+check(not any('present' in idents(sum(con.values(), [])) for _, _, _, con in FWM['hps_lw_bridge']['insts']),
+      'hps_lw_bridge: present is connected to an instance')
+check([c.get('idle') for _, c in instances(fwm, 'lw_axi_regbus')] == [['idle']] and not assigns(fwm, 'idle'),
+      'hps_lw_bridge: idle is not lw_axi_regbus.idle alone')
+check(assigns(rbm, 'idle') == [['idle_q']], 'lw_axi_regbus: idle is %s, not idle_q' % assigns(rbm, 'idle'))
+RB = FWM['lw_axi_regbus']
+idq = [clk for clk, out in RB['blocks'] if any('idle_q' in lhs_names(lhs)[0] for lhs, _, _, _ in out)]
+check('idle_q' in RB['regs'] and idq == ['clk'] and 'idle_q' not in RB['comb'],
+      'lw_axi_regbus: idle_q is not a register assigned only on posedge clk (blocks on %s)' % idq)
 
 print('%s: %d checks, %d failures' % ('FAILED' if fails else 'PASSED', checks, fails))
 sys.exit(1 if fails else 0)

@@ -29,6 +29,8 @@
 //     orphaned: one whose master made no handshake on its channel between
 //     the reset reaching the fabric and the release.  `idle` shows whether
 //     both state machines are idle.
+//   * `present` (a constant 1) and `idle` are the top level's GPI bits 25
+//     and 24, so each bit is 1 only in a bitstream that holds this firewall.
 //   * Clock is clk_100m (h2f_user0_clk), never a reconfigurable PLL.
 //   * AXI3 LEN/SIZE/BURST handled; IDs echoed; BRESP/RRESP always OKAY.
 //   * Reads step every burst type on the address's low 12 bits.  Only a
@@ -49,6 +51,7 @@ module hps_lw_bridge
 
 	output wire        lw_hrst,      // hps_rst_n as a clk level: high while the reset is seen
 	output wire  [1:0] lw_freed,     // pulses: [0] the read, [1] the write state machine was freed at a release
+	output wire        present,      // the constant 1: this firewall is built
 	output wire        idle,         // a register: both state machines are idle
 
 	// simple synchronous register bus, read side
@@ -146,6 +149,8 @@ cyclonev_hps_interface_hps2fpga_light_weight hps2fpga_light_weight
 	.rvalid(rvalid),
 	.rready(rready)
 );
+
+assign present = 1'b1;
 
 lw_arst hrst_c(.clk(clk), .rst_n(hps_rst_n), .q(lw_hrst));
 
