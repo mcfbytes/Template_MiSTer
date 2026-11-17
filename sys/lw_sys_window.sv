@@ -136,6 +136,8 @@ localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
 
 reg [31:0] scratch = 0;
 reg [31:0] adrop   = 0;               // analog stores dropped on a full FIFO
+reg  [1:0] octrl   = 0;               // OSD CTRL, {HR, LWSEL}
+reg        ohr     = 0;
 
 wire [20:0] rwin = lw_raddr - WIN_OFF;
 wire [20:0] wwin = lw_waddr - WIN_OFF;
@@ -298,9 +300,6 @@ lw_sys_status sys_status
 );
 
 // OSDBUF: image stores go to both osd shadows (byte lanes honour BE); CTRL is {HR, LWSEL}.
-reg  [1:0] octrl = 0;
-reg        ohr   = 0;
-
 assign osd_we   = lw_write && w_osd && ~wosd[12];
 assign osd_addr = wosd[11:2];
 assign osd_data = lw_wdata;

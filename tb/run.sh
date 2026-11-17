@@ -8,6 +8,9 @@
 #   L  LW_DIAG=0 with the SECTOR block and the frame lane (MISTER_LW_LANE): the link nets through lw_link
 #   R12 R21 R53 R62 R100 R150  arm L with clk_sys at 12.0, 21.477, 53.69, 62.5, 100.0 and 150.0 MHz
 #      (the other arms run it at 33.8688 MHz); LW_TB_SYS_HP_PS is the half period in ps, plus 50 ppm
+#   V  front-end lint: slang elaborates every LW module at its defaults (the vendor atom left unknown), and
+#      the window with every block, at both LW_DIAG values; any error fails (a name used before its declaration
+#      is one, which the Icarus arms accept). Without slang on PATH the arm reports SKIPPED and does not fail.
 # LW_TB_ARMS selects arms (default: all). Needs Icarus Verilog >= 12 (11 cannot parse hps_io's default-less
 # CONF_STR). Without a local one, set LW_TB_IMAGE to a container image that has it; the tree is mounted at /w.
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
@@ -24,6 +27,21 @@ fi
 # only if exactly its listed cases fail: an unlisted failure, or a listed case that passes, fails the arm.
 XFAIL=''
 export XFAIL
+
+# lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
+LWF="sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_sector.sv sys/lw_sys_status.sv sys/lw_lane.sv sys/lw_blk_mux.sv"
+LWM="hps_lw_bridge lw_axi_regbus lw_sys_window lw_sector lw_sys_status lw_lane lw_link lw_blk_mux lw_card_mux"
+lint() {
+  : > "$1"; st=0
+  for d in 0 1; do
+    T=""; for m in $LWM; do T="$T --top $m"; done
+    for run in "$T" "--top lw_sys_window -G SEC_EN=1 -G LANE_EN=1"; do
+      echo "slang -DLW_DIAG=$d $run" >> "$1"
+      slang -q --ignore-unknown-modules -DLW_DIAG=$d $run $LWF >> "$1" 2>&1 || st=1
+    done
+  done
+  return $st
+}
 
 # verdict ARM LOG: one result line; status 0 if the arm passes
 verdict() {
@@ -47,7 +65,17 @@ verdict() {
 }
 
 O=${LW_TB_OUT:-tb/out}; mkdir -p "$O"; rc=0; R=""
-for g in ${LW_TB_ARMS:-1 0 M N G L R12 R21 R53 R62 R100 R150}; do
+for g in ${LW_TB_ARMS:-1 0 M N G L R12 R21 R53 R62 R100 R150 V}; do
+  if [ "$g" = V ]; then
+    echo "== arm V: slang"
+    if ! command -v slang >/dev/null 2>&1; then V="arm V: SKIPPED (no slang on PATH)"
+    elif lint "$O/lw_lintV.log"; then V="arm V: PASSED: slang, 4 runs, no error"
+    else grep -E 'error|warning' "$O/lw_lintV.log"; V="arm V: FAILED (slang errors, $O/lw_lintV.log)"; rc=1
+    fi
+    R="$R$V
+"
+    continue
+  fi
   B="-DMISTER_LW -DLW_TB_PROBES"; S="-DMISTER_LW_SECTOR_SLOT=1"; L="$S -DLW_DIAG=0 -DMISTER_LW_LANE"
   case $g in
     1|0) D="$B $S -DLW_DIAG=$g";;
