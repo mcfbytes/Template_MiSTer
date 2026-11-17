@@ -26,7 +26,7 @@
 //     their source is forced; without MISTER_LW bits 27:21 are clear;
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
 //     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window;
-//   - forcing each LW line output of lw_sys_window moves its f2h_irq bit at the interrupt atom and no other;
+//   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
 //   - each osd instance that exists carries the window's OSDBUF store ports, on clk_100m;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
 //     also through the lane's link front;
@@ -252,17 +252,16 @@ initial begin
 	end
 	sys_cycles(4);
 
-	$display("-- f2h_irq: each LW line moves its own bit and no other");
-	force dut.lw_sys_window.doorbell = 0; force dut.lw_sys_window.sys_irq = 0; #1;
+	$display("-- f2h_irq: each LW line ordinal k moves f2h_irq[7+k] and no other bit");
+	force dut.lw_sys_window.lines = 3'b000; #1;
 	irq0 = dut.interrupts.irq;
-	force dut.lw_sys_window.doorbell = 1; #1;
-	irq1 = dut.interrupts.irq;
-	check("SECTOR doorbell: f2h_irq[63:2] bits moved", {(irq0 ^ irq1) & IRQ_LW}, 64'h100);
-	force dut.lw_sys_window.doorbell = 0; force dut.lw_sys_window.sys_irq = 1; #1;
-	irq1 = dut.interrupts.irq;
-	check("SYS cause: f2h_irq[63:2] bits moved", {(irq0 ^ irq1) & IRQ_LW}, 64'h200);
-	check("f2h_irq[63:2] with both lines low", {irq0 & IRQ_LW}, 64'd0);
-	release dut.lw_sys_window.doorbell; release dut.lw_sys_window.sys_irq;
+	check("f2h_irq[63:2] with every line low", {irq0 & IRQ_LW}, 64'd0);
+	for (k = 1; k <= 3; k = k + 1) begin
+		force dut.lw_sys_window.lines = 3'd1 << (k - 1); #1;
+		irq1 = dut.interrupts.irq;
+		check($sformatf("line ordinal %0d: f2h_irq[63:2] bits moved", k), {(irq0 ^ irq1) & IRQ_LW}, 64'd1 << (7 + k));
+	end
+	release dut.lw_sys_window.lines;
 `else
 	$display("-- f2h_irq: no LW line");
 	check("f2h_irq[63:2]", {dut.interrupts.irq & IRQ_LW}, 64'd0);
@@ -331,7 +330,7 @@ initial begin
 
 `ifdef MISTER_LW
 	$display("-- an LW read through the bridge atom");
-	lw_read(21'h40000, d); check("directory magic at 0x40000", d, 32'h31535953);
+	lw_read(21'h40000, d); check("directory magic at 0x40000", d, 32'h5244574C);
 	lw_read(21'h00000, d); check("undecoded 0x00000", d, 32'hDEADBEEF);
 
 	$display("-- the HPS reset reaches the firewall");
@@ -354,7 +353,7 @@ initial begin
 	check("after the release: RVALID dropped, idle", {dut.hps_lw_bridge.rvalid, dut.hps_lw_bridge.idle}, 2'b01);
 	check("after the release: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b11);
 	rready = 1;
-	lw_read(21'h40000, d); check("a read after the release", d, 32'h31535953);
+	lw_read(21'h40000, d); check("a read after the release", d, 32'h5244574C);
 
 	$display("-- GPI against the firewall in every clk_100m cycle of the I/O view");
 	gpi_on = 0;

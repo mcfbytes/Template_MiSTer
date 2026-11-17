@@ -1,13 +1,10 @@
 `ifndef SYS_LW_CAPS
-// CONF_STR field-1 tokens for the LW window sys_top builds with MISTER_LW, each with its trailing comma, then a
+// CONF_STR field-1 token for the LW window sys_top builds with MISTER_LW, with its trailing comma, then a
 // concatenation comma: write `"NAME;", `SYS_LW_CAPS "rest of field 1;"`. Without MISTER_LW it expands to nothing,
-// so CONF_STR is the stock string byte for byte. IRQ:BLK is the SECTOR doorbell, declared with MISTER_LW_SECTOR_SLOT.
+// so CONF_STR is the stock string byte for byte. The token is the same whatever blocks are built: the window's
+// directory lists the blocks and declares their lines.
 `ifdef MISTER_LW
-`ifdef MISTER_LW_SECTOR_SLOT
-`define SYS_LW_CAPS "AXI:40000:80000:LW,IRQ:BLK=1:41000,",
-`else
 `define SYS_LW_CAPS "AXI:40000:80000:LW,",
-`endif
 `else
 `define SYS_LW_CAPS
 `endif

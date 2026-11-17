@@ -608,10 +608,8 @@ cyclonev_hps_interface_peripheral_uart uart
 
 `ifdef MISTER_LW
 // LW lines and OSDBUF stores (lw_sys_window.sv).
-// f2h_irq[8] = pool line 1 (GIC SPI 48): the LW SECTOR doorbell, level-high (lw_sector.sv).
-wire        lw_doorbell;
-// f2h_irq[9] = pool line 2 (GIC SPI 49): the LW SYS cause, level-high (lw_sys_status.sv).
-wire        lw_sys_irq;
+// f2h_irq[7+k] = LW line ordinal k (GIC SPI 47+k), level-high: the entry whose LINE word is k (the LW directory).
+wire  [2:0] lw_lines;
 
 // OSDBUF stores from lw_sys_window to both osd shadows.
 wire        lw_osd_we;
@@ -619,7 +617,7 @@ wire  [9:0] lw_osd_addr;
 wire [31:0] lw_osd_data;
 wire  [3:0] lw_osd_be;
 wire  [1:0] lw_osd_ctrl;
-wire [63:0] f2h_irq = {54'd0, lw_sys_irq, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
+wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
 `else
 wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
 `endif
@@ -1955,8 +1953,7 @@ lw_sys_window #(
 	.lw_write(lw_write),
 	.lw_wdata(lw_wdata),
 	.lw_be(lw_be),
-	.doorbell(lw_doorbell),
-	.sys_irq(lw_sys_irq),
+	.lines(lw_lines),
 	.clk_sys(clk_sys),
 	.lw_pad(lw_pad),
 	.blk_up(lw_blk_up),

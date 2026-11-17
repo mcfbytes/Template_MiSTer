@@ -18,26 +18,32 @@
 `ifdef MISTER_LW
 `default_nettype none
 
-// LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR, OSDBUF and SYS blocks.
-// Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
-// or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a held-data handshake
-// (lw_xfer, lw_cdc.sv) drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) is built only when
-// the core declares it (SEC_EN): one primary hps_io read slot plus up to two save slots ("cards"); entry 1
-// words 7-12 declare each card slot, its DDR image base (wsrc) and extent. Without SEC_EN, entry 1
-// reads 0 (no kind) and the block's addresses read 0.
+// LW window declared by `SYS_LW_CAPS (emu_ports.vh): the directory, then the PAD, SECTOR, OSDBUF, SYS and LANE
+// blocks. Bridge side runs on clk_100m with no reset.
+// Directory, layout 2: a 16-word header (MAGIC "LWDR", VERSION 2.0, LAYOUT = {entry stride, header length} in
+// bytes, COUNT, WIN_BASE and WIN_SIZE, PENDING, SCRATCH), then one 32-word entry per block built, in ascending
+// kind order with no gaps. An entry's 8 common words are KIND, VERSION, OFFSET, SIZE, CAUSE, LINE, CAUSE_BITS and
+// TAG; its kind's own words follow. Every offset in the directory is window-relative. A line is declared in one
+// place, the entry's LINE word: the same localparam picks the entry's bit of `lines` (ordinal k = lines[k-1] =
+// f2h_irq[7+k]), and no two entries name one ordinal.
+// Decode: each block's select compares the address's high bits with a constant, so the selects are exclusive;
+// every block's word is 0 unless it is selected, and the read word is one AND-OR of the block words and the
+// 0xDEADBEEF default. An address in no block that is built reads 0xDEADBEEF and drops stores; an unassigned
+// offset inside a block reads 0.
+// PAD stores park in per-op latest-wins slots (digital) or a 16-deep FIFO (both analog ops, drop-and-count when
+// full), both in one M10K; a held-data handshake (lw_xfer, lw_cdc.sv) drains them round-robin to clk_sys.
+// The SECTOR block (lw_sector.sv) is built only when the core declares it (SEC_EN): one primary hps_io read slot
+// plus up to two save slots ("cards"); its kind words declare each card slot, its DDR image base and extent.
 // OSDBUF decodes image stores and CTRL; the shadow RAMs live in each osd instance (osd.v).
-// SYS (lw_sys_status.sv) raises the status back-channel's cause on its own line; entry 3 declares
-// the line's pool ordinal, the CAUSE word, the class tag and the cause bits, so the host reads them here.
-// LANE (lw_lane.sv, LANE_EN) replays ordered link frames onto sys_top's link nets and can capture their
-// replies; entry 4 declares it, and COUNT is 5. Without LANE_EN the directory is 4 entries and the block's
-// addresses read 0xDEADBEEF.
+// SYS (lw_sys_status.sv) raises the status back-channel's cause on its own line.
+// LANE (lw_lane.sv, LANE_EN) replays ordered link frames onto sys_top's link nets and can capture their replies.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), the analog-drop count (reads 0)
 // and lw_sector's diagnostics; LW_DIAG=1 (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
 
 module lw_sys_window #(
 	// SECTOR block, as the core declares it (sys_top.v maps the MISTER_LW_SECTOR_* / MISTER_LW_CARD* macros).
-	parameter        SEC_EN    = 0,          // 1 = build the SECTOR block and declare directory entry 1
+	parameter        SEC_EN    = 0,          // 1 = build the SECTOR block and list its directory entry
 	parameter  [7:0] SEC_SLOT  = 8'd1,       // the hps_io slot the primary frames feed (sd_rd[SEC_SLOT])
 	parameter  [9:0] SEC_FRAME = 10'd128,    // 32-bit DATA words per primary frame (128 = one 512-byte block)
 	parameter  [2:0] BLKSZ     = 3'd2,       // the core's hps_io BLKSZ, reported in the GET_SDSTAT word
@@ -48,22 +54,21 @@ module lw_sys_window #(
 	parameter [31:0] MC_WSRC1  = 32'd0,
 	parameter [31:0] MC_EXT1   = 32'd0,
 	parameter  [9:0] MC_FRAME  = 10'd256,    // 32-bit DATA words per card frame (256 = one 1 KB block)
-	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and declare entry 4.
+	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and list its entry.
 	parameter        LANE_EN   = 0
 )
 (
 	input wire         clk,          // clk_100m
 
 	input wire  [20:0] lw_raddr,
-	output reg  [31:0] lw_rdata,
+	output wire [31:0] lw_rdata,
 
 	input wire  [20:0] lw_waddr,
 	input wire         lw_write,
 	input wire  [31:0] lw_wdata,
 	input wire   [3:0] lw_be,
 
-	output wire        doorbell,     // SECTOR cause level -> f2h_irq[8]
-	output wire        sys_irq,      // SYS cause level -> f2h_irq[9]
+	output wire  [2:0] lines,        // line ordinal k = lines[k-1] -> f2h_irq[7+k], level-high
 
 	input wire         clk_sys,
 	output wire [48:0] lw_pad,       // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
@@ -95,34 +100,71 @@ localparam        DIAG     = `LW_DIAG;
 localparam        DIAG     = 0;
 `endif
 
-localparam [20:0] WIN_OFF  = 21'h40000;
-localparam [20:0] WIN_SIZE = 21'h80000;
-localparam [20:0] SEC_OFF  = 21'h01000;   // relative to the window
-localparam [20:0] SEC_SIZE = 21'h02000;
-localparam [20:0] PAD_OFF  = 21'h40000;
-localparam [20:0] PAD_SIZE = 21'h40000;
+// The window (absolute LW offset and size: the `SYS_LW_CAPS token's two numbers) and its blocks, window-relative.
+// Every block is aligned to its size, except SECTOR, which spans two 4 KB pages from 0x01000.
+localparam [20:0] WIN_OFF   = 21'h40000;
+localparam [20:0] WIN_SIZE  = 21'h80000;
+localparam [20:0] DIR_OFF   = 21'h00000;   // the directory: header and entries, the rest of its page reads 0
+localparam [20:0] SEC_OFF   = 21'h01000;
+localparam [20:0] SEC_SIZE  = 21'h02000;
+localparam [20:0] SYS_OFF   = 21'h03000;
+localparam [20:0] SYS_SIZE  = 21'h01000;
+localparam [20:0] OSD_OFF   = 21'h04000;
+localparam [20:0] OSD_SIZE  = 21'h02000;
+localparam [20:0] LANE_OFF  = 21'h06000;
+localparam [20:0] LANE_SIZE = 21'h01000;
+localparam [20:0] PAD_OFF   = 21'h40000;
+localparam [20:0] PAD_SIZE  = 21'h40000;
+
+localparam [20:0] DIR_A  = WIN_OFF + DIR_OFF;      // absolute block starts, for the selects
+localparam [20:0] SEC_A  = WIN_OFF + SEC_OFF;
+localparam [20:0] SEC_A2 = SEC_A + 21'h01000;
+localparam [20:0] SYS_A  = WIN_OFF + SYS_OFF;
+localparam [20:0] OSD_A  = WIN_OFF + OSD_OFF;
+localparam [20:0] LANE_A = WIN_OFF + LANE_OFF;
+localparam [20:0] PAD_A  = WIN_OFF + PAD_OFF;
+
+// The directory's header (bytes) and the entries, in ascending kind order: only blocks that are built are listed.
+localparam [15:0] HDR_LEN  = 16'h0040;
+localparam [15:0] STRIDE   = 16'h0080;
+localparam  [4:0] E_PAD    = 5'd0;
+localparam  [4:0] E_SEC    = E_PAD + 5'd1;                 // listed with SEC_EN only
+localparam  [4:0] E_OSD    = E_SEC + (SEC_EN ? 5'd1 : 5'd0);
+localparam  [4:0] E_SYS    = E_OSD + 5'd1;
+localparam  [4:0] E_LANE   = E_SYS + 5'd1;                 // listed with LANE_EN only
+localparam  [4:0] COUNT    = E_LANE + (LANE_EN ? 5'd1 : 5'd0);
+
+// Kinds, versions and lines. Ordinal 0 = no line; framework kinds use 1-15, each ordinal at most once.
+localparam [15:0] PAD_KIND  = 16'd1;
+localparam [31:0] PAD_VER   = 32'h00010000;
+localparam  [7:0] PAD_LINE  = 8'd0;
+localparam [15:0] SEC_KIND  = 16'd2;
+localparam [31:0] SEC_VER   = 32'h00010001;
+localparam  [7:0] SEC_LINE  = 8'd1;                        // f2h_irq[8], GIC SPI 48
+localparam [15:0] SEC_BITS  = 16'h0001;                    // the request event
+localparam [15:0] OSD_KIND  = 16'd3;
+localparam [31:0] OSD_VER   = 32'h00010000;
+localparam  [7:0] OSD_LINE  = 8'd0;
+localparam [15:0] SYS_KIND  = 16'd4;
+localparam [31:0] SYS_VER   = 32'h00010000;
+localparam  [7:0] SYS_LINE  = 8'd2;                        // f2h_irq[9], GIC SPI 49
+localparam [15:0] SYS_BITS  = 16'h0001;                    // STATUS, per capture
+localparam [15:0] LANE_KIND = 16'd5;
+localparam [31:0] LANE_VER  = 32'h00010001;
+localparam  [7:0] LANE_LINE = 8'd0;
+
 localparam        SEC_AW    = 9;          // FIFO depth 512
 localparam [15:0] SEC_GAP   = 16'd2;      // clk_sys cycles between write strobes
 localparam  [7:0] MC_FLAGS  = 8'h03;      // RD: BEGIN_S frames; WR: WACK_S, bytes from the DDR image
 localparam        MC_DECL0  = SEC_EN && MC_WSRC0 != 0;
 localparam        MC_DECL1  = SEC_EN && MC_WSRC1 != 0;
-localparam [20:0] OSD_OFF  = 21'h04000;
-localparam [20:0] OSD_SIZE = 21'h02000;
-localparam [12:0] OSD_CTRL = 13'h1000;   // block-relative; the image is 0x0000-0x0FFF
-localparam [31:0] OSD_GEOM = {16'd128, 16'd256};
-localparam [20:0] SYS_OFF  = 21'h03000;
-localparam [20:0] SYS_SIZE = 21'h01000;
-localparam  [7:0] SYS_LINE = 8'd2;        // pool ordinal 2 = f2h_irq[9] (GIC SPI 49)
-localparam [31:0] SYS_TAG  = 32'h0010_0000;   // the cause word's class tag: bit 20 = SYS
-localparam [31:0] SYS_CAUSES = 32'h0000_0001; // payload bits it raises: bit 0 = STATUS (0x29)
-localparam [20:0] LANE_OFF = 21'h06000;
-localparam [20:0] LANE_SIZE = 21'h01000;
-localparam        LANE_AW  = 10;          // FIFO depth 1024: a 256-entry 0x33 gamma table is 770 entries
-localparam  [7:0] LANE_GAP = 8'd4;        // clk_sys cycles without a wait between strobes, 2..7
-localparam        LANE_RAW = 8;           // reply FIFO depth 256
-localparam  [6:0] DIR_WORDS = LANE_EN ? 7'd84 : 7'd68;   // header + 5 or 4 entries
+localparam [12:0] OSD_CTRL  = 13'h1000;   // block-relative; the image is 0x0000-0x0FFF
+localparam [31:0] OSD_GEOM  = {16'd128, 16'd256};
+localparam        LANE_AW   = 10;         // FIFO depth 1024: a 256-entry 0x33 gamma table is 770 entries
+localparam  [7:0] LANE_GAP  = 8'd4;       // clk_sys cycles without a wait between strobes, 2..7
+localparam        LANE_RAW  = 8;          // reply FIFO depth 256
 
-// LANE entry: the UIO (sel 0) opcodes verified for write-only replay; word 12, the first-word reply the lane
+// LANE kind words K0-K7: the UIO (sel 0) opcodes verified for write-only replay; K8, the first-word reply the lane
 // stands in for, one byte per op: [7:0] = 0x20's 'b11 (sys_top answers it); a capture frame also records it.
 localparam [255:0] LANE_OPS = (256'd1 << 8'h01) | (256'd1 << 8'h1C) | (256'd1 << 8'h1D) | (256'd1 << 8'h1E) |
                               (256'd1 << 8'h22) | (256'd1 << 8'h24) | (256'd1 << 8'h31) | (256'd1 << 8'h32) |
@@ -139,107 +181,142 @@ reg [31:0] adrop   = 0;               // analog stores dropped on a full FIFO
 reg  [1:0] octrl   = 0;               // OSD CTRL, {HR, LWSEL}
 reg        ohr     = 0;
 
-wire [20:0] rwin = lw_raddr - WIN_OFF;
-wire [20:0] wwin = lw_waddr - WIN_OFF;
-wire        r_in = (lw_raddr >= WIN_OFF) && (lw_raddr < WIN_OFF + WIN_SIZE);
-wire        w_in = (lw_waddr >= WIN_OFF) && (lw_waddr < WIN_OFF + WIN_SIZE);
-wire        r_pad = r_in && rwin >= PAD_OFF;
-wire        w_pad = w_in && wwin >= PAD_OFF;
-wire        r_sec = r_in && rwin >= SEC_OFF && rwin < SEC_OFF + SEC_SIZE;
-wire        w_sec = w_in && wwin >= SEC_OFF && wwin < SEC_OFF + SEC_SIZE;
-wire        r_osd = r_in && rwin >= OSD_OFF && rwin < OSD_OFF + OSD_SIZE;
-wire        w_osd = w_in && wwin >= OSD_OFF && wwin < OSD_OFF + OSD_SIZE;
-wire        r_sys = r_in && rwin >= SYS_OFF && rwin < SYS_OFF + SYS_SIZE;
-wire        w_sys = w_in && wwin >= SYS_OFF && wwin < SYS_OFF + SYS_SIZE;
-wire        r_lane = LANE_EN && r_in && rwin >= LANE_OFF && rwin < LANE_OFF + LANE_SIZE;
-wire        w_lane = LANE_EN && w_in && wwin >= LANE_OFF && wwin < LANE_OFF + LANE_SIZE;
-wire [20:0] rlane = rwin - LANE_OFF;
-wire [20:0] wlane = wwin - LANE_OFF;
-wire [31:0] lane_rdata;
-wire [20:0] rsys  = rwin - SYS_OFF;
-wire [20:0] wsys  = wwin - SYS_OFF;
-wire [31:0] sys_rdata;
-wire [12:0] rosd  = rwin[12:0];           // OSD_OFF is 8 KB aligned
-wire [12:0] wosd  = wwin[12:0];
-wire [20:0] wblk = wwin - PAD_OFF;
-wire [20:0] rsec = rwin - SEC_OFF;
-wire [20:0] wsec = wwin - SEC_OFF;
-wire [31:0] sec_rdata;
+// Selects: high address bits against a constant, read and write side alike.
+wire        r_dir  = lw_raddr[20:12] == DIR_A[20:12];
+wire        r_sec  = SEC_EN && (lw_raddr[20:12] == SEC_A[20:12] || lw_raddr[20:12] == SEC_A2[20:12]);
+wire        r_sys  = lw_raddr[20:12] == SYS_A[20:12];
+wire        r_osd  = lw_raddr[20:13] == OSD_A[20:13];
+wire        r_lane = LANE_EN && lw_raddr[20:12] == LANE_A[20:12];
+wire        r_pad  = lw_raddr[20:18] == PAD_A[20:18];
+wire        r_none = ~(r_dir | r_sec | r_sys | r_osd | r_lane | r_pad);
 
-always @(*) begin
-	lw_rdata = 32'hDEADBEEF;
-	if (r_pad) lw_rdata = (DIAG && rwin == PAD_OFF + (21'h1A << 10)) ? adrop : 32'd0;
-	else if (r_sec) lw_rdata = SEC_EN ? sec_rdata : 32'd0;
-	else if (r_sys) lw_rdata = sys_rdata;
-	else if (r_lane) lw_rdata = lane_rdata;
-	else if (r_osd) lw_rdata = (rosd == OSD_CTRL)       ? {30'd0, octrl} :
-	                           (rosd == OSD_CTRL + 13'd4) ? 32'h3144534F :   // "OSD1"
-	                           32'd0;
-	else if (r_in && rwin < {DIR_WORDS, 2'b00}) begin
-		case (rwin[8:2])
-			7'd0:  lw_rdata = 32'h31535953;          // "SYS1"
-			7'd1:  lw_rdata = 32'h00010000;
-			7'd2:  lw_rdata = LANE_EN ? 32'd5 : 32'd4;
-			7'd3:  lw_rdata = DIAG ? scratch : 32'd0;
-			7'd4:  lw_rdata = 32'd1;                 // entry 0: kind PAD
-			7'd5:  lw_rdata = 32'h00010000;
-			7'd6:  lw_rdata = {11'd0, PAD_OFF};
-			7'd7:  lw_rdata = {11'd0, PAD_SIZE};
-			7'd8:  lw_rdata = PAD_OPS[ 31:  0];
-			7'd9:  lw_rdata = PAD_OPS[ 63: 32];
-			7'd10: lw_rdata = PAD_OPS[ 95: 64];
-			7'd11: lw_rdata = PAD_OPS[127: 96];
-			7'd12: lw_rdata = PAD_OPS[159:128];
-			7'd13: lw_rdata = PAD_OPS[191:160];
-			7'd14: lw_rdata = PAD_OPS[223:192];
-			7'd15: lw_rdata = PAD_OPS[255:224];
-			// entry 1: kind SECTOR, minor 1 ("SEC2": save slots in words 7-12); all 0 without SEC_EN
-			7'd20: lw_rdata = SEC_EN ? 32'd2 : 32'd0;
-			7'd21: lw_rdata = SEC_EN ? 32'h00010001 : 32'd0;
-			7'd22: lw_rdata = SEC_EN ? {11'd0, SEC_OFF} : 32'd0;
-			7'd23: lw_rdata = SEC_EN ? {11'd0, SEC_SIZE} : 32'd0;
-			7'd24: lw_rdata = SEC_EN ? {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME} : 32'd0;
-			7'd25: lw_rdata = SEC_EN ? {11'd0, WIN_OFF + SEC_OFF} : 32'd0;  // CAUSE, absolute LW (= the IRQ:BLK offset)
-			7'd26: lw_rdata = SEC_EN ? {16'd1 << SEC_AW, SEC_GAP} : 32'd0;
-			7'd27: lw_rdata = MC_DECL0 ? {4'd0, MC_SLOT0, MC_FLAGS, 6'd0, MC_FRAME} : 32'd0;
-			7'd28: lw_rdata = MC_DECL0 ? MC_WSRC0 : 32'd0;
-			7'd29: lw_rdata = MC_DECL1 ? {4'd0, MC_SLOT1, MC_FLAGS, 6'd0, MC_FRAME} : 32'd0;
-			7'd30: lw_rdata = MC_DECL1 ? MC_WSRC1 : 32'd0;
-			7'd31: lw_rdata = MC_DECL0 ? MC_EXT0 : 32'd0;
-			7'd32: lw_rdata = MC_DECL1 ? MC_EXT1 : 32'd0;
-			7'd36: lw_rdata = 32'd3;                 // entry 2: kind OSDBUF
-			7'd37: lw_rdata = 32'h00010000;
-			7'd38: lw_rdata = {11'd0, OSD_OFF};
-			7'd39: lw_rdata = {11'd0, OSD_SIZE};
-			7'd40: lw_rdata = OSD_GEOM;              // {height, width} in pixels, 1 bit each
-			7'd52: lw_rdata = 32'd4;                 // entry 3: kind SYS
-			7'd53: lw_rdata = 32'h00010000;
-			7'd54: lw_rdata = {11'd0, SYS_OFF};
-			7'd55: lw_rdata = {11'd0, SYS_SIZE};
-			7'd56: lw_rdata = {24'd0, SYS_LINE};     // the line: a 1-based pool ordinal, as IRQ: tokens
-			7'd57: lw_rdata = {11'd0, WIN_OFF + SYS_OFF};   // CAUSE, absolute LW
-			7'd58: lw_rdata = SYS_TAG;
-			7'd59: lw_rdata = SYS_CAUSES;
-			// entry 4: kind LANE, minor 1 (reply capture); reached only with LANE_EN (DIR_WORDS)
-			7'd68: lw_rdata = 32'd5;
-			7'd69: lw_rdata = 32'h00010001;
-			7'd70: lw_rdata = {11'd0, LANE_OFF};
-			7'd71: lw_rdata = {11'd0, LANE_SIZE};
-			7'd72: lw_rdata = LANE_OPS[ 31:  0];
-			7'd73: lw_rdata = LANE_OPS[ 63: 32];
-			7'd74: lw_rdata = LANE_OPS[ 95: 64];
-			7'd75: lw_rdata = LANE_OPS[127: 96];
-			7'd76: lw_rdata = LANE_OPS[159:128];
-			7'd77: lw_rdata = LANE_OPS[191:160];
-			7'd78: lw_rdata = LANE_OPS[223:192];
-			7'd79: lw_rdata = LANE_OPS[255:224];
-			7'd80: lw_rdata = LANE_CAPS;
-			7'd81: lw_rdata = {16'd1 << LANE_AW, 8'd0, LANE_GAP};
-			7'd82: lw_rdata = {16'd1 << LANE_RAW, 16'd0};   // reply FIFO depth
-			default: lw_rdata = 32'd0;
-		endcase
+wire        w_dir  = lw_waddr[20:12] == DIR_A[20:12];
+wire        w_sec  = SEC_EN && (lw_waddr[20:12] == SEC_A[20:12] || lw_waddr[20:12] == SEC_A2[20:12]);
+wire        w_sys  = lw_waddr[20:12] == SYS_A[20:12];
+wire        w_osd  = lw_waddr[20:13] == OSD_A[20:13];
+wire        w_lane = LANE_EN && lw_waddr[20:12] == LANE_A[20:12];
+wire        w_pad  = lw_waddr[20:18] == PAD_A[20:18];
+
+// Block-relative addresses: the address bits below each block's size (SECTOR's second page is its upper half).
+wire [12:0] rsec  = {lw_raddr[12] ^ SEC_A[12], lw_raddr[11:0]};
+wire [12:0] wsec  = {lw_waddr[12] ^ SEC_A[12], lw_waddr[11:0]};
+wire [11:0] rsys  = lw_raddr[11:0];
+wire [11:0] wsys  = lw_waddr[11:0];
+wire [12:0] rosd  = lw_raddr[12:0];
+wire [12:0] wosd  = lw_waddr[12:0];
+wire [11:0] rlane = lw_raddr[11:0];
+wire [11:0] wlane = lw_waddr[11:0];
+wire [17:0] rpad  = lw_raddr[17:0];
+wire [17:2] wpad  = lw_waddr[17:2];
+
+wire        sec_lvl, sys_lvl;          // each block's CAUSE word is non-zero
+wire [31:0] sec_rdata, sys_rdata, lane_rdata;
+
+// The lines: each entry's cause level on the bit its LINE word names.
+function automatic [2:0] line_bit(input [7:0] ord);
+	line_bit = (ord >= 8'd1 && ord <= 8'd3) ? (3'd1 << (ord - 8'd1)) : 3'd0;
+endfunction
+
+assign lines = ({3{sec_lvl}} & line_bit(SEC_LINE)) | ({3{sys_lvl}} & line_bit(SYS_LINE));
+
+// PENDING: bit i = entry i's CAUSE word is non-zero.
+wire [31:0] pending = ({31'd0, sec_lvl} << E_SEC) | ({31'd0, sys_lvl} << E_SYS);
+
+// One entry word: the 8 common words, then the kind's word kw (K0-K23).
+function automatic [31:0] ent(input [4:0] w, input [15:0] kind, input [31:0] ver, input [20:0] off,
+                              input [20:0] size, input [20:0] cause, input [7:0] line, input [15:0] bits,
+                              input [31:0] kw);
+	case (w)
+		5'd0:    ent = {16'd0, kind};
+		5'd1:    ent = ver;
+		5'd2:    ent = {11'd0, off};
+		5'd3:    ent = {11'd0, size};
+		5'd4:    ent = {11'd0, cause};
+		5'd5:    ent = {24'd0, line};
+		5'd6:    ent = {16'd0, bits};
+		5'd7:    ent = 32'd0;                                // TAG: 0 for a framework kind
+		default: ent = kw;
+	endcase
+endfunction
+
+// The kind words, K0 first.
+function automatic [31:0] pad_kw(input [4:0] k);
+	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : 32'd0;    // the honoured-opcode bitmap
+endfunction
+
+function automatic [31:0] sec_kw(input [4:0] k);
+	case (k)
+		5'd0:    sec_kw = {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME};
+		5'd2:    sec_kw = {16'd1 << SEC_AW, SEC_GAP};
+		5'd3:    sec_kw = MC_DECL0 ? {4'd0, MC_SLOT0, MC_FLAGS, 6'd0, MC_FRAME} : 32'd0;
+		5'd4:    sec_kw = MC_DECL0 ? MC_WSRC0 : 32'd0;
+		5'd5:    sec_kw = MC_DECL1 ? {4'd0, MC_SLOT1, MC_FLAGS, 6'd0, MC_FRAME} : 32'd0;
+		5'd6:    sec_kw = MC_DECL1 ? MC_WSRC1 : 32'd0;
+		5'd7:    sec_kw = MC_DECL0 ? MC_EXT0 : 32'd0;
+		5'd8:    sec_kw = MC_DECL1 ? MC_EXT1 : 32'd0;
+		default: sec_kw = 32'd0;                             // K1 is reserved: the CAUSE word is common
+	endcase
+endfunction
+
+function automatic [31:0] lane_kw(input [4:0] k);
+	case (k)
+		5'd8:    lane_kw = LANE_CAPS;
+		5'd9:    lane_kw = {16'd1 << LANE_AW, 8'd0, LANE_GAP};
+		5'd10:   lane_kw = {16'd1 << LANE_RAW, 16'd0};       // reply FIFO depth
+		default: lane_kw = (k < 5'd8) ? LANE_OPS[{k[2:0], 5'd0} +: 32] : 32'd0;
+	endcase
+endfunction
+
+// Entry word x of the table (x = word offset from the first entry): a constant of the build.
+function automatic [31:0] dir_entry(input [9:0] x);
+	reg [4:0] e, w, k;
+	begin
+		e = x[9:5];
+		w = x[4:0];
+		k = w - 5'd8;
+		dir_entry = 32'd0;
+		if (e == E_PAD)
+			dir_entry = ent(w, PAD_KIND, PAD_VER, PAD_OFF, PAD_SIZE, 21'd0, PAD_LINE, 16'd0, pad_kw(k));
+		if (SEC_EN && e == E_SEC)
+			dir_entry = ent(w, SEC_KIND, SEC_VER, SEC_OFF, SEC_SIZE, SEC_OFF, SEC_LINE, SEC_BITS, sec_kw(k));
+		if (e == E_OSD)
+			dir_entry = ent(w, OSD_KIND, OSD_VER, OSD_OFF, OSD_SIZE, 21'd0, OSD_LINE, 16'd0,
+			                (k == 5'd0) ? OSD_GEOM : 32'd0);    // K0: {height, width} in pixels, 1 bit each
+		if (e == E_SYS)
+			dir_entry = ent(w, SYS_KIND, SYS_VER, SYS_OFF, SYS_SIZE, SYS_OFF, SYS_LINE, SYS_BITS, 32'd0);
+		if (LANE_EN && e == E_LANE)
+			dir_entry = ent(w, LANE_KIND, LANE_VER, LANE_OFF, LANE_SIZE, 21'd0, LANE_LINE, 16'd0, lane_kw(k));
 	end
+endfunction
+
+// The directory's word: the header's registers and constants, then the entry table.
+wire  [9:0] dw = lw_raddr[11:2];
+reg  [31:0] dir_rdata;
+always @(*) begin
+	if (dw < 10'd16) case (dw[3:0])
+		4'd0:    dir_rdata = 32'h5244574C;                   // MAGIC "LWDR"
+		4'd1:    dir_rdata = 32'h00020000;                   // VERSION 2.0
+		4'd2:    dir_rdata = {STRIDE, HDR_LEN};              // LAYOUT
+		4'd3:    dir_rdata = {27'd0, COUNT};
+		4'd4:    dir_rdata = {11'd0, WIN_OFF};               // WIN_BASE
+		4'd5:    dir_rdata = {11'd0, WIN_SIZE};
+		4'd7:    dir_rdata = 32'h190186A0;                   // TIMEBASE {lease unit log2 = 25, 100000 kHz}
+		4'd8:    dir_rdata = pending;
+		4'd10:   dir_rdata = DIAG ? scratch : 32'd0;
+		default: dir_rdata = 32'd0;                          // LEASE, OWNED and 0x2C-0x3C
+	endcase
+	else dir_rdata = dir_entry(dw - 10'd16);
 end
+
+// The read word: one AND-OR over the exclusive selects.
+wire [31:0] osd_rdata = (rosd == OSD_CTRL)          ? {30'd0, octrl} :
+                        (rosd == OSD_CTRL + 13'd4)  ? 32'h3144534F :   // "OSD1"
+                        32'd0;
+wire [31:0] pad_rdata = (DIAG && rpad == {8'h1A, 10'd0}) ? adrop : 32'd0;
+
+assign lw_rdata = ({32{r_dir}}  & dir_rdata)  | ({32{r_sec}} & sec_rdata) | ({32{r_sys}} & sys_rdata) |
+                  ({32{r_osd}}  & osd_rdata)  | ({32{r_lane}} & lane_rdata) | ({32{r_pad}} & pad_rdata) |
+                  ({32{r_none}} & 32'hDEADBEEF);
 
 generate
 `ifdef MISTER_LW_SECTOR_SLOT
@@ -251,9 +328,9 @@ if (SEC_EN) begin : sec
 	            .XSLOT0(MC_SLOT0), .XSLOT1(MC_SLOT1), .XFRAME(MC_FRAME)) sector
 	(
 		.clk(clk),
-		.raddr(rsec[12:0]), .rsel(r_sec), .rdata(sec_rdata),
-		.waddr(wsec[12:0]), .wsel(w_sec), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
-		.doorbell(doorbell),
+		.raddr(rsec), .rsel(r_sec), .rdata(sec_rdata),
+		.waddr(wsec), .wsel(w_sec), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+		.doorbell(sec_lvl),
 		.clk_sys(clk_sys),
 		.c_reset(blk_up[34]), .hps_ack(blk_up[33]), .c_req(blk_up[32]), .c_lba(blk_up[31:0]),
 		.en_sys(blk_dn[18]), .o_ack(blk_dn[17]), .o_wr(blk_dn[16]), .o_dat(blk_dn[15:0]),
@@ -272,7 +349,7 @@ end
 `endif
 else begin : nosec
 	assign sec_rdata = 32'd0;
-	assign doorbell  = 1'b0;
+	assign sec_lvl   = 1'b0;
 	assign blk_dn    = 19'd0;
 	assign card_dn   = 13'd0;
 end
@@ -284,8 +361,8 @@ if (LANE_EN) begin : lane
 	lw_lane #(.AW(LANE_AW), .GAP(LANE_GAP[2:0]), .RAW(LANE_RAW)) lane
 	(
 		.clk(clk),
-		.raddr(rlane[11:0]), .rdata(lane_rdata),
-		.waddr(wlane[11:0]), .wsel(w_lane), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+		.raddr(rlane), .rdata(lane_rdata),
+		.waddr(wlane), .wsel(w_lane), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
 		.clk_sys(clk_sys), .l_busy(lane_busy), .l_wait(lane_wait), .l_dout(lane_dout),
 		.own(lane_own), .hold(lane_hold), .sel(lane_sel), .strobe(lane_strobe), .din(lane_din)
 	);
@@ -309,9 +386,9 @@ endgenerate
 lw_sys_status sys_status
 (
 	.clk(clk),
-	.raddr(rsys[9:0]), .rsel(r_sys && rsys < 21'h400), .rdata(sys_rdata),
-	.waddr(wsys[9:0]), .wsel(w_sys && wsys < 21'h400), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
-	.irq(sys_irq),
+	.raddr(rsys[9:0]), .rsel(r_sys && rsys[11:10] == 2'd0), .rdata(sys_rdata),
+	.waddr(wsys[9:0]), .wsel(w_sys && wsys[11:10] == 2'd0), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+	.irq(sys_lvl),
 	.clk_sys(clk_sys), .stflg(st_up[131:128]), .status_req(st_up[127:0])
 );
 
@@ -361,8 +438,8 @@ wire       aempty = (awp == arp);
 wire       afull  = (awp - arp) == 5'd16;
 
 wire       st   = lw_write && w_pad && &lw_be;
-wire [7:0] wop  = wblk[17:10];
-wire [7:0] widx = wblk[9:2];
+wire [7:0] wop  = wpad[17:10];
+wire [7:0] widx = wpad[9:2];
 wire [2:0] wsl  = slot_of(wop);
 wire       st_d = st && wsl != 3'd7 && widx == 8'd0;
 wire       st_a = st && (wop == 8'h1A || wop == 8'h3D) && !st_d;
@@ -399,7 +476,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-	if (DIAG && lw_write && w_in && wwin == 21'h0C) begin
+	if (DIAG && lw_write && w_dir && lw_waddr[11:0] == 12'h028) begin
 		if (lw_be[0]) scratch[ 7: 0] <= lw_wdata[ 7: 0];
 		if (lw_be[1]) scratch[15: 8] <= lw_wdata[15: 8];
 		if (lw_be[2]) scratch[23:16] <= lw_wdata[23:16];

@@ -18,8 +18,8 @@
 #      gp_in[27:21] is a constant 0 (both bits too, without MISTER_LW), and gp_in is 32 bits wide. Once, in
 #      hps_lw_bridge.sv: present is assigned the constant 1 and nothing else, and idle is lw_axi_regbus's idle_q,
 #      a register assigned only on posedge clk.
-#   2. f2h_irq: bits 1:0 are upstream's, bit 8 is the net lw_sys_window's doorbell output drives and bit 9 the
-#      one its sys_irq output drives, each assigned nowhere else; every other bit is a constant 0.
+#   2. f2h_irq: bits 1:0 are upstream's; bits 10:8 are the 3-bit net lw_sys_window's lines output drives, line
+#      ordinal k at bit 7+k, declared with no value and assigned nowhere else; every other bit is a constant 0.
 #   3. Every LW configuration has LW nets to check; the off configuration has none.
 # Then, once, the crossing structure, on every LW-only file and the LW text of the stock files, with every tier:
 #   4. The cell registers (lws0_, lws1_, lwa0_, lwa1_, lwq_, lwsrc_, lwtg_) are named only in sys/lw_cdc.sv, and
@@ -34,6 +34,12 @@
 #   7. No clocked block outside the cells reads, directly or through nets, a register or an input on another
 #      clock (input clocks from PORTDOM) other than through a cell's output, beside the listed reads
 #      (XREAD_ALLOW), each of which must still exist; and no register is assigned on two clocks.
+# Then, once, the directory's lines, in sys/lw_sys_window.sv with every tier:
+#   8. Every entry is one ent() call whose kind and LINE word are the localparams <B>_KIND and <B>_LINE of one
+#      block B, each localparam in one call. The LINE words name each non-zero ordinal once, a framework kind's
+#      ordinal (kind below 0x8000) in 1-15 and a private kind's in 16-31. lines is one OR of terms
+#      {3{<b>_lvl}} & line_bit(<B>_LINE), one per non-zero ordinal, and line_bit(k) is bit k-1; PENDING's terms
+#      put the same <b>_lvl on its entry's bit E_<B>.
 # Needs Icarus Verilog (for its preprocessor) and python3.
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}/static; mkdir -p "$O" || exit 2
@@ -48,8 +54,8 @@ TIERS = [('off', []), ('lw', ['MISTER_LW']), ('lw-sec', ['MISTER_LW', 'MISTER_LW
 VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI']), ('.dual', ['MISTER_DUAL_SDRAM'])]
 UPSTREAM = {'MISTER_DEBUG_NOHDMI', 'MISTER_DUAL_SDRAM'}
 CONFIGS = [(t + v, td + vd) for v, vd in VARIANTS for t, td in TIERS]
-# f2h_irq bit -> the lw_sys_window output that must drive it
-LINES = {8: 'doorbell', 9: 'sys_irq'}
+# f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
+LINES_LO, LINES_W, LINES_PORT = 8, 3, 'lines'
 # gp_in bit -> (the net, the hps_lw_bridge output that must drive it); the rest of gp_in[27:21] is 0
 GPI = {25: ('lw_present', 'present'), 24: ('lw_idle', 'idle')}
 
@@ -326,12 +332,12 @@ for name, defs in CONFIGS:
               '%s: f2h_irq[1:0] is not upstream\'s' % name)
         conn = inst['lw_sys_window'][0][1] if win else {}
         for b in range(2, 64):
-            t = irq[b][0]
-            if b in LINES and lw:
-                ok = len(t) == 1 and conn.get(LINES[b]) == t and D.get(t[0], (0, 0, 0))[2] is None and \
-                     not any(s[:2] == ['assign', t[0]] for s in statements(top))
-                check(ok, '%s: f2h_irq[%d] is %s, not a net driven by lw_sys_window.%s alone' % (name, b, ' '.join(t),
-                                                                                                   LINES[b]))
+            t, k = irq[b]
+            if LINES_LO <= b < LINES_LO + LINES_W and lw:
+                ok = len(t) == 1 and k == b - LINES_LO and conn.get(LINES_PORT) == t and W.get(t[0]) == LINES_W and \
+                     D.get(t[0], (0, 0, 0))[2] is None and not any(s[:2] == ['assign', t[0]] for s in statements(top))
+                check(ok, '%s: f2h_irq[%d] is bit %d of %s, not bit %d of a %d-bit net driven by lw_sys_window.%s alone'
+                      % (name, b, k, ' '.join(t), b - LINES_LO, LINES_W, LINES_PORT))
             else:
                 check(len(t) == 1 and lit_value(t[0]) == 0, '%s: f2h_irq[%d] is %s, not 0' % (name, b, ' '.join(t)))
     check(bool(nets) == lw, '%s: %d LW nets for arm E' % (name, len(nets)))
@@ -768,6 +774,42 @@ RB = FWM['lw_axi_regbus']
 idq = [clk for clk, out in RB['blocks'] if any('idle_q' in lhs_names(lhs)[0] for lhs, _, _, _ in out)]
 check('idle_q' in RB['regs'] and idq == ['clk'] and 'idle_q' not in RB['comb'],
       'lw_axi_regbus: idle_q is not a register assigned only on posedge clk (blocks on %s)' % idq)
+
+# ---- The directory's lines: one ordinal per entry, each driving its own bit of lines ----
+print('-- lw_sys_window: each LINE word an entry\'s own ordinal, and the same localparam picks its bit of lines')
+wtxt = ' '.join(toks2(pp('sys/lw_sys_window.sv', LWALL)))
+def lp(suffix, width):
+    r = {}
+    for m in re.finditer(r"localparam \[ %d : 0 \] (\w+)_%s = %d'd(\d+) ;" % (width - 1, suffix, width), wtxt):
+        r[m.group(1)] = int(m.group(2))
+    return r
+KINDS, ORDS = lp('KIND', 16), lp('LINE', 8)
+check(KINDS and set(KINDS) == set(ORDS), 'lw_sys_window: the blocks with a kind (%s) and with a LINE localparam (%s) '
+      'differ' % (' '.join(sorted(KINDS)), ' '.join(sorted(ORDS))))
+calls = re.findall(r'\bent \( w , (\w+)_KIND , [^;]*?, (\w+)_LINE ,', wtxt)
+check(len(calls) == len(KINDS) and all(a == b for a, b in calls) and sorted(a for a, _ in calls) == sorted(KINDS),
+      'lw_sys_window: the entries are not one ent() call per block with its own _KIND and _LINE: %s' % calls)
+nz = sorted(ORDS[b] for b in ORDS if ORDS[b])
+check(len(nz) == len(set(nz)), 'lw_sys_window: an ordinal is named by two entries: %s' % ORDS)
+for b, o in sorted(ORDS.items()):
+    if o:
+        lo, hi = (1, 15) if KINDS.get(b, 0) < 0x8000 else (16, 31)
+        check(lo <= o <= hi, 'lw_sys_window: %s_LINE = %d, outside %d-%d for kind %s' % (b, o, lo, hi, KINDS.get(b)))
+m = re.search(r'assign lines = (.*?) ;', wtxt)
+terms = re.findall(r"\( \{ 3 \{ (\w+)_lvl \} \} & line_bit \( (\w+)_LINE \) \)", m.group(1)) if m else []
+rest = re.sub(r"\( \{ 3 \{ \w+_lvl \} \} & line_bit \( \w+_LINE \) \)", '', m.group(1)).replace('|', '').strip() \
+       if m else 'none'
+check(m is not None and not rest and len(terms) == len(set(t for _, t in terms)) and
+      all(l.upper() == b for l, b in terms) and sorted(b for _, b in terms) == sorted(b for b in ORDS if ORDS[b]),
+      'lw_sys_window: lines is not one term {3{<b>_lvl}} & line_bit(<B>_LINE) per non-zero ordinal: %s %s' %
+      (terms, rest))
+check(re.search(r"line_bit = \( ord >= 8'd1 && ord <= 8'd3 \) \? \( 3'd1 << \( ord - 8'd1 \) \) : 3'd0 ;",
+                wtxt) is not None, 'lw_sys_window: line_bit(k) is not bit k-1 of the 3 lines')
+pm = re.search(r'wire \[ 31 : 0 \] pending = (.*?) ;', wtxt)
+pt = re.findall(r"\( \{ 31'd0 , (\w+)_lvl \} << E_(\w+) \)", pm.group(1)) if pm else []
+check(pm is not None and sorted(l.upper() for l, _ in pt) == sorted(b for _, b in pt) == sorted(b for _, b in terms),
+      'lw_sys_window: PENDING does not put each line\'s level on its own entry\'s bit: %s' % pt)
+print('directory lines: %s' % ', '.join('%s ordinal %d' % (b, ORDS[b]) for b in sorted(ORDS) if ORDS[b]))
 
 print('%s: %d checks, %d failures' % ('FAILED' if fails else 'PASSED', checks, fails))
 sys.exit(1 if fails else 0)

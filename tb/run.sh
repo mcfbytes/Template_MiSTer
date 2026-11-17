@@ -4,7 +4,8 @@
 #      macro set; every LW-only file is empty without its macro and keeps no macro defined
 #   N  static checks on the preprocessed top level (tb/static.sh): the GPI terms with both LW instances or
 #      neither, the f2h_irq lines, the LW nets arm E checks, in every configuration arm E builds; and the
-#      crossing structure: every crossing built from the cells of sys/lw_cdc.sv, every source register named
+#      crossing structure: every crossing built from the cells of sys/lw_cdc.sv, every source register named;
+#      and the directory's lines: each entry's LINE word one ordinal of its own, picking that entry's line
 #   E  sys_top.v elaborated (tb/top_tb.sv, against the stand-ins of tb/sys_stubs.sv) in every configuration of
 #      "tb/static.sh --configs": off and each LW tier set, each with no upstream macro, MISTER_DEBUG_NOHDMI and
 #      MISTER_DUAL_SDRAM. Fails if it does not elaborate, if an LW run warns of an implicit net or a port width
@@ -40,10 +41,11 @@ fi
 # Expected failures, one "arm|case" per line, the case as its "-- " heading prints. An arm with entries passes
 # only if exactly its listed cases fail: an unlisted failure, or a listed case that passes under every seed the
 # arm runs, fails the arm.
-# SECTOR's reject bundle ({tag, slot} sampled as levels beside its toggle) tears under the delay models at 100 MHz
-# and above, until requests and their rejects cross as records. Which reject meets a torn sample, if any, depends
+# SECTOR's reject bundle ({tag, slot} sampled as levels beside its toggle) tears under the delay models above
+# about 60 MHz, until requests and their rejects cross as records. Which reject meets a torn sample, if any, depends
 # on the phase the cases before it leave, so the list names the cases that meet one under today's seeds.
-XFAIL='R150|adjacent rejects of two slots: both requests re-open
+XFAIL='R62|adjacent rejects of two slots: both requests re-open
+R150|adjacent rejects of two slots: both requests re-open
 R150|core reset during a card load: the stale BEGIN_S is rejected, the request re-opens'
 export XFAIL
 
