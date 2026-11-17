@@ -21,9 +21,8 @@
 // SYS block (LW directory kind 4, "STS1"): the core->host status back-channel (hps_io's 0x29) as a
 // cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG, the four
 // STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
-// CAUSE [15:0] are event bits, STATUS (bit 0) raised by every capture; [23:16] is the read-only class tag, shown
-// while a bit is set. A full-word store clears each bit written as 1, and a raise in the store's cycle wins.
-// Reads change nothing.
+// CAUSE [15:0] are event bits, STATUS (bit 0) raised by every capture; [31:16] read 0. A full-word store clears
+// each bit written as 1, and a raise in the store's cycle wins. Reads change nothing.
 // clk_sys side: hps_io's stflg as a registered Gray code. clk_100m side: the Gray code through lw_sync
 // (lw_cdc.sv), a capture of status_req on every change of it (SEQ counts captures), the CAUSE word and its line.
 // The capture reads status_req across the clocks with no cell: it relies on the words being stable from before
@@ -51,7 +50,6 @@ module lw_sys_status
 	input wire [127:0] status_req    // hps_io's snapshot, clk_sys; changes only with stflg
 );
 
-localparam [31:0] TAG_SYS   = 32'h0010_0000;   // cause word [23:16] one-hot: bit 20 = SYS
 localparam [15:0] C_STATUS  = 16'h0001;
 
 /////////////////////////////// clk_sys ///////////////////////////////////
@@ -93,7 +91,7 @@ assign irq = |cause;
 always @(*) begin
 	rdata = 32'd0;
 	if (rsel) case (raddr[9:2])
-		8'h00: rdata = |cause ? (TAG_SYS | {16'd0, cause}) : 32'd0;
+		8'h00: rdata = {16'd0, cause};
 		8'h01: rdata = {seq, 8'd0, 4'hA, flg};          // STFLG: the 0x29 head byte, plus SEQ
 		8'h02: rdata = snap[ 31:  0];
 		8'h03: rdata = snap[ 63: 32];

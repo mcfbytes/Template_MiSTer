@@ -16,8 +16,10 @@ when to look. An optional frame lane carries whole link transactions, and their 
   string byte for byte, and `sys/` elaborates to the stock netlist. This repository's `Template.qsf` carries the
   define commented out, so the Template builds stock until it is uncommented.
 
-Status: proof of concept. The register map is stable for this revision; later revisions may add blocks (new
-directory kinds) and use entry word 15. See "Revision and validation" at the end.
+Status: proof of concept. The directory is layout 2 (magic `LWDR`, version 2.0): 32-word entries with common CAUSE
+and LINE words, every offset window-relative. A minor revision may add blocks (new kinds), header words, entry
+words or a larger stride, and a host that walks by the rules under "Directory" keeps working. See "Revision and
+validation" at the end.
 
 ## Adopting it in a core
 
@@ -36,8 +38,8 @@ directory kinds) and use entry word 15. See "Revision and validation" at the end
        ...
    ```
 
-   With `MISTER_LW` it expands to `"AXI:40000:80000:LW,",` (plus `IRQ:BLK=1:41000,` when the core declares a
-   SECTOR block). Without it, it expands to nothing.
+   With `MISTER_LW` it expands to `"AXI:40000:80000:LW,",` whatever blocks are built: the directory lists the
+   blocks and declares their lines. Without it, it expands to nothing.
 
 3. **Nothing else for pads, the OSD shadow and the status back-channel.** A core that uses `hps_io` gets all
    three. `Template.sv` shows the status back-channel: the first pad button cycles an option and writes the new
@@ -78,14 +80,16 @@ window exists before it touches it:
   so no bitstream without it can show 1. Stock bitstreams leave it 0, and the stock Main never reads bits 21-27.
 - **GPI bit 24** is the firewall's idle state, a register: 1 while it holds no transaction on either channel. It
   toggles with every access, so it means something only to a host that knows it has none of its own in flight.
-- **The directory magic `SYS1`** at the window's first word, then the entries.
+- **The directory** at the window's first word: MAGIC `LWDR`, a directory major the host knows (2), and WIN_BASE
+  and WIN_SIZE equal to the token's two numbers; then the entries.
 
 In the ID view (`gp_out[31] = 0`) GPI carries the core magic, which has bits 25 and 24 clear, and an unconfigured
 FPGA reads all ones, so the bits count only in a sample that also shows bit 31 = 0. Before its first LW access,
 and again after every core load and every bridge or HPS reset (with every cached directory value discarded), a
 host takes **one** GPI sample in the I/O view that shows bit 31 = 0, bit 25 = 1 and bit 24 = 1. Bit 24 = 0 at that
 point, with no access of its own in flight, means the firewall still holds a transaction nobody will finish: stay
-on SPI until the core is loaded again. Then the `CONF_STR` token, then the magic. Any failure: never touch the
+on SPI until the core is loaded again. Then the `CONF_STR` token, then MAGIC, VERSION, WIN_BASE and WIN_SIZE. Any
+failure: never touch the
 bridge. Bit 25 says nothing about the HPS side: the bridge must also be out of reset (the reset manager's bit for
 this bridge reads 0), which a host that did not release the bridge itself checks. A periodic task that accesses
 the window samples GPI first and requires bit 31 = 0 and bit 25 = 1 before each access (not bit 24, which another
@@ -114,50 +118,96 @@ one) wraps inside its 4 KB.
 
 ## The window
 
-Offsets are from the window start; absolute LW offset = `0x40000` + offset.
+Offsets are from the window start; absolute LW offset = `0x40000` + offset. Each block's range is decoded by a
+compare of the address's high bits; an address in no block that is built reads `0xDEADBEEF` and drops stores,
+inside the window or outside it, and an unassigned offset inside a block reads 0.
 
 | window offset | absolute LW | size | block |
 |---|---|---|---|
-| `0x00000` | `0x40000` | `0x110` | directory: header + 4 entries, or `0x150` and 5 with the lane (to `0x1000`: reads `0xDEADBEEF`) |
-| `0x01000` | `0x41000` | `0x2000` | SECTOR (reads 0 when not built) |
+| `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
+| `0x01000` | `0x41000` | `0x2000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`) |
 | `0x03000` | `0x43000` | `0x1000` | SYS |
 | `0x04000` | `0x44000` | `0x2000` | OSDBUF |
-| `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`; otherwise reads `0xDEADBEEF`) |
+| `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`) |
+| `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
 | `0x40000` | `0x80000` | `0x40000` | PAD |
 
 ### Directory
 
+**Header** (16 words, read-only except as noted):
+
 | offset | word | value |
 |---|---|---|
-| `0x00` | MAGIC | `0x31535953` ("SYS1") |
-| `0x04` | VERSION | `0x00010000`: major 1 `[31:16]`, minor 0 `[15:0]` |
-| `0x08` | COUNT | 4, or 5 with the lane |
-| `0x0C` | SCRATCH | read/write with `LW_DIAG=1`; 0 otherwise |
-| `0x10 + 0x40*i` | entry *i* | 16 words: 0 kind, 1 version, 2 offset (window-relative), 3 size, 4-14 per kind, 15 reserved (0) |
+| `0x00` | MAGIC | `0x5244574C` ("LWDR"); it does not change in a later major |
+| `0x04` | VERSION | `0x00020000`: major 2 `[31:16]`, minor 0 `[15:0]` |
+| `0x08` | LAYOUT | `{entry_stride[31:16], header_len[15:0]}` in bytes: `0x00800040` |
+| `0x0C` | COUNT | entries present, one per block built, at most 31 |
+| `0x10` | WIN_BASE | `0x00040000`: the window's absolute LW offset; equals the token's |
+| `0x14` | WIN_SIZE | `0x00080000`; equals the token's |
+| `0x18` | - | 0 in this revision |
+| `0x1C` | TIMEBASE | `0x190186A0`: `[23:0]` the bridge clock in kHz (100,000); `[31:24]` = 25, the log2 of a time unit in bridge clocks (2^25 cycles, about 0.34 s) |
+| `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero |
+| `0x24` | - | 0 in this revision |
+| `0x28` | SCRATCH | read/write with `LW_DIAG=1`; 0 otherwise |
+| `0x2C`-`0x3C` | - | 0, reserved |
 
-| entry | kind | version | offset / size | words 4+ |
-|---|---|---|---|---|
-| 0 | 1 PAD | `0x00010000` | `0x40000` / `0x40000` | 4-11: the honoured-opcode bitmap, bit *n* = opcode *n*: `0x040F000C`, `0x20000000`, then 0 |
-| 1 | 2 SECTOR | `0x00010001` | `0x1000` / `0x2000` | see SECTOR. All 16 words are 0 when the block is not built |
-| 2 | 3 OSDBUF | `0x00010000` | `0x4000` / `0x2000` | 4: geometry `{height, width}` = `0x00800100` (256 x 128, 1 bpp) |
-| 3 | 4 SYS | `0x00010000` | `0x3000` / `0x1000` | 4: line = pool ordinal 2; 5: CAUSE absolute = `0x43000`; 6: class tag `0x00100000`; 7: causes = `0x1` (STATUS) |
-| 4 | 5 LANE | `0x00010001` | `0x6000` / `0x1000` | see LANE. Present only with `MISTER_LW_LANE` |
+**Entries.** Entry *i* is at `header_len + i x entry_stride`, `0x40 + 0x80 x i` in this revision: 8 common words,
+then the kind's own words K0-K23. The table is compact and in ascending kind order, listing only the blocks this
+bitstream builds, so an entry's index (and its PENDING bit) depends on the core's configuration.
 
-A host matches entries by kind, refuses a major it does not know, and checks that every block lies inside the window.
+| word | offset | name | value |
+|---|---|---|---|
+| 0 | `+0x00` | KIND | `[15:0]`: 0 = empty, skip; `0x0001`-`0x7FFF` framework kinds; `0x8000`-`0xFFFF` a core's own |
+| 1 | `+0x04` | VERSION | `{major[31:16], minor[15:0]}` of the kind's register map |
+| 2 | `+0x08` | OFFSET | the block's start, window-relative |
+| 3 | `+0x0C` | SIZE | the block's length in bytes |
+| 4 | `+0x10` | CAUSE | the window-relative offset of the block's CAUSE word; 0 = none |
+| 5 | `+0x14` | LINE | `[7:0]` the line ordinal (below); 0 = no line |
+| 6 | `+0x18` | CAUSE_BITS | the CAUSE event bits this build can raise |
+| 7 | `+0x1C` | TAG | 0 for a framework kind; for a core's own kind, a tag the core chooses (a FourCC) |
+| 8-31 | `+0x20` | K0-K23 | per kind; unused words read 0 |
+
+| kind | block | version | offset / size | CAUSE | LINE | CAUSE_BITS | kind words |
+|---|---|---|---|---|---|---|---|
+| 1 | PAD | `0x00010000` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap |
+| 2 | SECTOR | `0x00010001` | `0x01000` / `0x02000` | `0x01000` | 1 | `0x1` | see SECTOR |
+| 3 | OSDBUF | `0x00010000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0: geometry `{height, width}` = `0x00800100` |
+| 4 | SYS | `0x00010000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0x1` | none |
+| 5 | LANE | `0x00010001` | `0x06000` / `0x01000` | 0 | 0 | 0 | see LANE |
+
+**Walking it.** A host:
+- refuses the directory, and drives everything over SPI, on an unknown MAGIC, a major it does not know, or a
+  WIN_BASE or WIN_SIZE that is not the token's;
+- walks with LAYOUT's header length and stride, never with constants, and requires the table to fit the page;
+- skips kind 0, a kind it does not know, a kind major it does not know, and a core's own kind whose TAG it does not
+  know;
+- checks that OFFSET and SIZE lie inside the window and CAUSE inside the block, and skips the entry (never the whole
+  directory) when they do not;
+- gives no line to an entry whose ordinal another entry also names, or that lies outside its kind's range (1-15
+  for framework kinds, 16-31 for a core's own).
+
+A minor revision only adds: reserved words that read 0 today, a larger header or stride, new kinds. A kind number is
+never reused; a kind's major changes only if one of its registers changes meaning. Reserved bits read 0 and are
+written 0.
 
 ### Interrupt lines
 
-| f2h line | GIC SPI | pool ordinal | raised by | level |
-|---|---|---|---|---|
-| `f2h_irq[8]` | 48 | 1 | SECTOR CAUSE (`IRQ:BLK=1:41000`) | high while the CAUSE word is non-zero |
-| `f2h_irq[9]` | 49 | 2 | SYS CAUSE (directory entry 3) | high while the CAUSE word is non-zero |
+A line is declared in one place: the LINE word of the entry it serves. Ordinal *k* is `f2h_irq[7 + k]`, the GIC's
+shared interrupt 47 + *k*, and no two entries name the same ordinal.
 
-Both are level lines into the GIC. The HPS kernel must expose them to userspace (for example as
-`uio_pdrv_genirq` nodes); a host without them can poll the CAUSE words instead. A CAUSE word's `[15:0]` are event
-bits, each raised by every occurrence of its event, and `[23:16]` a read-only one-hot class tag (bit 16 = BLK, bit
-20 = SYS), shown while a bit is set; the word is 0 when nothing is pending. **Reads change nothing**, in any size or
-burst. **A full 32-bit store clears each bit written as 1**; a bit raised in the store's own cycle stays set, and a
-partial-width store clears nothing.
+| ordinal | f2h line | GIC SPI | entry in this revision |
+|---|---|---|---|
+| 1 | `f2h_irq[8]` | 48 | SECTOR |
+| 2 | `f2h_irq[9]` | 49 | SYS |
+| 3-15 | `f2h_irq[10]`-`[22]` | 50-62 | framework kinds to come |
+| 16-31 | `f2h_irq[23]`-`[38]` | 63-78 | a core's own kinds |
+
+A line is high while its entry's CAUSE word is non-zero: configure it level-sensitive, active high, at the
+interrupt controller (`IRQ_TYPE_LEVEL_HIGH` in a Linux device tree). The HPS kernel must expose it to userspace (for
+example as a `uio_pdrv_genirq` node); a host without one polls PENDING instead. A CAUSE word's `[15:0]` are event
+bits, each raised by every occurrence of its event, and `[31:16]` read 0; the word is 0 when nothing is pending.
+**Reads change nothing**, in any size or burst. **A full 32-bit store clears each bit written as 1**; a bit raised
+in the store's own cycle stays set, and a partial-width store clears nothing.
 
 **Drain:** read CAUSE; store the value back; once that store's response has returned, read the block's level
 registers and serve what they show; after the last service, read the level again until it shows nothing; then
@@ -201,11 +251,12 @@ A shadow of `osd_buffer` in each `osd` instance (HDMI and VGA), written over the
 ### SYS block (kind 4): the status back-channel
 
 `hps_io`'s `0x29` back-channel without the poll: when the core raises `status_set`, the block captures
-`status_req` and raises STATUS on `f2h_irq[9]`. The SPI `0x29` arm still answers as before.
+`status_req` and raises STATUS on its entry's line (ordinal 2, `f2h_irq[9]`). The SPI `0x29` arm still answers as
+before.
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `0x00100001` while pending, else 0: bit 0 = STATUS, raised by every capture; a store of bit 0 clears it |
+| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = STATUS, raised by every capture; a store of bit 0 clears it |
 | `0x04` | STFLG | `{SEQ[15:0], 8'h00, 4'hA, flag[3:0]}`: the `0x29` head byte, plus a capture count |
 | `0x08`-`0x14` | STATUS[0..3] | the captured `status_req`, `[31:0]` first |
 | `0x1C` | ID | `0x31535453` ("STS1") |
@@ -225,16 +276,16 @@ The block serves one primary `hps_io` read slot and up to two save slots ("cards
 replays `hps_io`'s own handshake into the core: `sd_ack`, then two 16-bit `sd_buff_wr` strobes per 32-bit word,
 low half first.
 
-**Directory entry 1, words 4-12:**
+**Kind words** (the entry's CAUSE word gives the CAUSE register, LINE ordinal 1):
 
 | word | value |
 |---|---|
-| 4 | `{slot[31:24], 0, frame_words[9:0]}` |
-| 5 | the CAUSE word's absolute LW offset, `0x41000` (the `IRQ:BLK` token's) |
-| 6 | `{fifo_depth[31:16] = 512, strobe_gap[15:0] = 2}` |
-| 7, 9 | card 0 / card 1: `{0, slot[27:24], flags[23:16], frame_words[9:0]}`, flags bit 0 = RD, bit 1 = WR |
-| 8, 10 | card 0 / card 1: DDR image base (physical) |
-| 11, 12 | card 0 / card 1: image size in bytes |
+| K0 | `{slot[31:24], 0, frame_words[9:0]}` |
+| K1 | 0, reserved |
+| K2 | `{fifo_depth[31:16] = 512, strobe_gap[15:0] = 2}` |
+| K3, K5 | card 0 / card 1: `{0, slot[27:24], flags[23:16], frame_words[9:0]}`, flags bit 0 = RD, bit 1 = WR |
+| K4, K6 | card 0 / card 1: DDR image base (physical) |
+| K7, K8 | card 0 / card 1: image size in bytes |
 
 An undeclared card's words are 0.
 
@@ -242,7 +293,7 @@ An undeclared card's words are 0.
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `0x00010001` while pending, else 0: bit 0 = a request opened or re-opened; a store of bit 0 clears it |
+| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = a request opened or re-opened; a store of bit 0 clears it |
 | `0x04` | REQ | `{pending[31], 0, GET_SDSTAT word[15:0]}` of the highest-priority open request (primary, card 0, card 1) |
 | `0x08` | LBA | the primary's LBA, latched when its request rises |
 | `0x0C` | BEGIN | write the LBA: opens a primary frame |
@@ -260,7 +311,7 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], slot[3:0], wr, rd}`.
 
 **One frame:**
 1. The core raises `sd_rd[slot]`. While EN is set, `lw_blk_mux` hides the request from `hps_io`. CAUSE bit 0
-   sets, `f2h_irq[8]` rises and REQ shows the request.
+   sets, the entry's line (ordinal 1, `f2h_irq[8]`) rises and REQ shows the request.
 2. The host reads CAUSE, stores it back, then reads REQ and the slot's LBA.
 3. The host writes BEGIN with that LBA. A BEGIN whose LBA is not the core's current request is rejected, and the
    request re-opens.
@@ -294,15 +345,14 @@ request/reply mailbox for any opcode.
 
 Stores must be full words (all four byte enables). Every other offset reads 0.
 
-**Directory entry 4:**
+**Kind words** (the entry's CAUSE and LINE words are 0: the lane has no cause word and raises no line):
 
 | word | value |
 |---|---|
-| 4-11 | the UIO (sel 0) opcodes verified for write-only replay, PAD's bitmap shape: `0x01`, `0x1C`, `0x1D`, `0x1E`, `0x22`, `0x24`, `0x31`, `0x32`, `0x33`, `0x3B` |
-| 12 | first-word replies the lane stands in for, one byte per opcode: `[7:0]` = 3, the reply of `sys_top`'s `0x20` arm |
-| 13 | `{fifo_depth[31:16] = 1024, strobe_gap[15:0] = 4}` |
-| 14 | `{reply_depth[31:16] = 256, 0}` (minor 1) |
-| 15 | 0: the lane raises no line |
+| K0-K7 | the UIO (sel 0) opcodes verified for write-only replay, PAD's bitmap shape: `0x01`, `0x1C`, `0x1D`, `0x1E`, `0x22`, `0x24`, `0x31`, `0x32`, `0x33`, `0x3B` |
+| K8 | first-word replies the lane stands in for, one byte per opcode: `[7:0]` = 3, the reply of `sys_top`'s `0x20` arm |
+| K9 | `{fifo_depth[31:16] = 1024, strobe_gap[15:0] = 4}` |
+| K10 | `{reply_depth[31:16] = 256, 0}` (minor 1) |
 
 **Frames:**
 - A frame of *n* words needs *n* + 2 FIFO entries, so the longest frame is 1,022 words into an empty FIFO. A stock
@@ -420,7 +470,10 @@ It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image t
 
 The SECTOR arms use a reference CD-style configuration: a 588-word primary on slot 1, and 1 KB cards on slots 2
 and 3. They cover:
-- the directory word by word;
+- the directory word by word, a host's walk of it (and of altered copies: other majors, entries to skip, a shared
+  ordinal, a larger header and stride), and each entry's cause on its own PENDING bit and line;
+- the window's decode: every 4 KB page of the 2 MB reads its block or `0xDEADBEEF`, and a store outside every block
+  changes nothing;
 - every pad op, including stores while `clk_sys` is stopped;
 - the default responder and fixed latency;
 - frames that are lost, resent, out of order, aborted, rejected or reset mid-frame;
@@ -435,9 +488,11 @@ Re-run it after any `sys/` merge.
 - **Template base:** MiSTer-devel/Template_MiSTer `e901a9f` (2026-11-03). This branch applies the LW changes to
   that revision's own `sys/`; its `hps_io` (FFB, analog triggers) is newer than the one the framework was first
   built on.
-- **Register map:** identical to a build validated on a DE10-Nano on 2026-10-25, which covered pads, the OSD
-  shadow, SECTOR (CD and save slots) and the SYS status line. The testbench's reference configuration reproduces
-  that build's directory word for word.
+- **Register map:** the blocks' registers are those of a build validated on a DE10-Nano on 2026-10-25, which
+  covered pads, the OSD shadow, SECTOR (CD and save slots) and the SYS status line, except where this document
+  states otherwise: CAUSE words clear by write-one and carry no class tag, and a store is a single-beat write. The
+  directory is layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
+  directory here and stays on SPI.
 - **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and
   each block's registers, causes and lines. Nothing else about the host is assumed, and a host that never touches
   the window drives the core over SPI as before.

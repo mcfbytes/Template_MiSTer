@@ -24,9 +24,8 @@
 // XFRAME words with a strobe address; a save slot WRITE is answered by WACK_S (ack, no strobes): the HPS
 // takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1.
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
-// CAUSE: bit 0, raised by each request rise (and each re-open after a reject), under the read-only class tag
-// [23:16] while set; a full-word store with bit 0 set clears it, and a raise in the store's cycle wins. Reads
-// change nothing: the request word is REQ's.
+// CAUSE: bit 0, raised by each request rise (and each re-open after a reject); a full-word store with bit 0 set
+// clears it, and a raise in the store's cycle wins. Reads change nothing: the request word is REQ's.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
 // Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
 // (sys_lwx), each through lw_sync (lw_cdc.sv). The request LBAs are latched on clk_100m straight from the core's
@@ -277,7 +276,7 @@ wire ok = (exp_w == flen_w) & ~bfail;
 always @(*) begin
 	rdata = 32'd0;
 	if (rreg) case (raddr[6:2])
-		5'h00: rdata = pending ? 32'h0001_0001 : 32'd0;   // {class tag, the event bit}
+		5'h00: rdata = {31'd0, pending};                  // CAUSE: the event bit
 		5'h01: rdata = {any, 15'd0, pst};
 		5'h02: rdata = lba;
 		5'h04: begin

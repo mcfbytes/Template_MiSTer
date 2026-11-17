@@ -145,8 +145,9 @@ wire        lw_write, lw_wburst;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
 wire [48:0] lw_pad;
-wire        doorbell;
-wire        sys_irq;
+wire  [2:0] lines;           // line ordinal k = lines[k-1]
+wire        doorbell = lines[0];   // ordinal 1: SECTOR's entry
+wire        sys_irq  = lines[1];   // ordinal 2: SYS's entry
 wire [131:0] st_up;
 wire [34:0] blk_up;
 wire [18:0] blk_dn;
@@ -203,7 +204,7 @@ lw_sys_window #(
 	.clk(clk),
 	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be),
-	.doorbell(doorbell), .sys_irq(sys_irq),
+	.lines(lines),
 	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn), .card_up(card_up), .card_dn(card_dn),
 	.st_up(st_up),
 	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl),
@@ -996,6 +997,8 @@ task burst_vs_single(input string what, input [20:0] a, input [3:0] len, input [
 	end
 endtask
 
+localparam [20:0] DIRB = 21'h40000;           // the directory
+localparam [20:0] SCR  = DIRB + 21'h28;      // its SCRATCH word
 localparam [20:0] SEC = 21'h41000;
 reg [31:0] gen0, d0;
 integer n0, s0, overlap = 0;
@@ -1456,7 +1459,7 @@ endtask
 // ---- The firewall across an HPS reset ----
 // OSD CTRL is the store target (two readable bits, in every arm); the directory magic the read target.
 localparam [20:0] FW_CTRL  = OSD + 21'h1000;
-localparam [31:0] FW_MAGIC = 32'h31535953;
+localparam [31:0] FW_MAGIC = 32'h5244574C;   // the directory's MAGIC, "LWDR"
 
 // At negedges: until lw_hrst has been high for a full cycle (its rise is behind), or until the cycle it falls in.
 task fw_wait_high;
@@ -1814,6 +1817,388 @@ task fw_reset_cases;
 	end
 endtask
 
+// ---- The directory, layout 2 ----
+// dm[] is the directory page this build must read, word for word, built here from the register map; em_* lists
+// its entries as a host must find them. TB_LINE_K is the ordinal the bench raises nothing on: no entry names it.
+reg  [31:0] dm [0:1023];
+integer     em_n;
+reg  [15:0] em_kind  [0:31];
+reg  [31:0] em_ver   [0:31], em_off [0:31], em_size [0:31], em_cause [0:31], em_bits [0:31];
+reg   [7:0] em_line  [0:31];
+
+task dm_entry(input integer e, input [15:0] kind, input [31:0] ver, input [31:0] off, input [31:0] size,
+              input [31:0] cause, input [7:0] line, input [31:0] bits);
+	integer b;
+	begin
+		b = 16 + 32 * e;
+		dm[b] = {16'd0, kind}; dm[b + 1] = ver; dm[b + 2] = off; dm[b + 3] = size; dm[b + 4] = cause;
+		dm[b + 5] = {24'd0, line}; dm[b + 6] = bits; dm[b + 7] = 0;
+		em_kind[e] = kind; em_ver[e] = ver; em_off[e] = off; em_size[e] = size; em_cause[e] = cause;
+		em_line[e] = line; em_bits[e] = bits;
+	end
+endtask
+
+task dm_build;
+	integer i, e, b;
+	begin
+		for (i = 0; i < 1024; i = i + 1) dm[i] = 0;
+		e = 0;
+		dm_entry(e, 1, 32'h00010000, 32'h40000, 32'h40000, 0, 0, 0);               // PAD
+		dm[16 + 32 * e + 8] = 32'h040F000C; dm[16 + 32 * e + 9] = 32'h20000000;       // K0-K7: the opcode bitmap
+		e = e + 1;
+		if (TB_SEC) begin
+			dm_entry(e, 2, 32'h00010001, 32'h01000, 32'h02000, 32'h01000, 1, 1);       // SECTOR: line 1, cause bit 0
+			b = 16 + 32 * e + 8;
+			dm[b]     = {8'd1, 8'd0, 6'd0, TB_FRAME[9:0]};                             // K0 {slot, frame words}
+			dm[b + 2] = 32'h02000002;                                                  // K2 {FIFO depth, gap}
+			dm[b + 3] = 32'h02030100; dm[b + 4] = 32'h30100000;                       // K3-K8: the two cards
+			dm[b + 5] = 32'h03030100; dm[b + 6] = 32'h30200000;
+			dm[b + 7] = 32'h00020000; dm[b + 8] = 32'h00020000;
+			e = e + 1;
+		end
+		dm_entry(e, 3, 32'h00010000, 32'h04000, 32'h02000, 0, 0, 0);               // OSDBUF
+		dm[16 + 32 * e + 8] = 32'h00800100;                                            // K0 {height, width}
+		e = e + 1;
+		dm_entry(e, 4, 32'h00010000, 32'h03000, 32'h01000, 32'h03000, 2, 1);       // SYS: line 2, STATUS
+		e = e + 1;
+		if (TB_LANE) begin
+			dm_entry(e, 5, 32'h00010001, 32'h06000, 32'h01000, 0, 0, 0);           // LANE: no cause, no line
+			b = 16 + 32 * e + 8;
+			dm[b] = 32'h70000002; dm[b + 1] = 32'h080E0014;                            // K0-K7: the replay bitmap
+			dm[b + 8] = 32'h00000003; dm[b + 9] = 32'h04000004; dm[b + 10] = 32'h01000000;
+			e = e + 1;
+		end
+		em_n = e;
+		dm[0] = 32'h5244574C; dm[1] = 32'h00020000; dm[2] = 32'h00800040; dm[3] = e;
+		dm[4] = 32'h00040000; dm[5] = 32'h00080000; dm[7] = 32'h190186A0;
+	end
+endtask
+
+// A host's walk of the directory, by the guide's rules, from the bus (src 0) or the bench's copy syn[] (src 1):
+// refuse an unknown MAGIC or directory major, and a WIN_BASE or WIN_SIZE that is not the token's; walk COUNT entries
+// by the LAYOUT word's header length and stride; skip kind 0, an unknown kind or kind major, a private kind (this
+// host knows no TAG) and an entry whose OFFSET, SIZE or CAUSE is outside the window or its block; give no line to an
+// entry whose ordinal another listed entry names too, or that is out of its kind's range (1-15 framework, 16-31
+// private). The result: wk_n entries, each with its index in the table.
+reg  [31:0] syn [0:1023];
+integer     wk_n, wk_refused;
+string      wk_why;
+reg   [4:0] wk_idx   [0:31];
+reg  [15:0] wk_kind  [0:31];
+reg  [31:0] wk_ver   [0:31], wk_off [0:31], wk_size [0:31], wk_cause [0:31], wk_bits [0:31];
+reg   [7:0] wk_line  [0:31];
+
+task dir_word(input integer src, input [11:0] off, output [31:0] v);
+	reg [31:0] vl;
+	integer nb;
+	if (src == 0) axi_read(DIRB + {9'd0, off}, 0, v, vl, nb);
+	else v = syn[off[11:2]];
+endtask
+
+function integer kind_major(input [15:0] k);     // the kind majors this host knows; 0 = an unknown kind
+	kind_major = (k >= 16'd1 && k <= 16'd5) ? 1 : 0;
+endfunction
+
+task dir_walk(input integer src, input [31:0] tok_base, input [31:0] tok_size);
+	reg  [31:0] v, hl, st, cnt, b, kind, ver, off, size, cause, line, bits;
+	reg   [7:0] ord [0:31];
+	reg         ok;
+	integer     i, j, shared;
+	begin
+		wk_n = 0; wk_refused = 0; wk_why = "";
+		dir_word(src, 12'h000, v); if (v !== 32'h5244574C) begin wk_refused = 1; wk_why = "MAGIC"; end
+		dir_word(src, 12'h004, v); if (!wk_refused && v[31:16] !== 16'd2) begin wk_refused = 1; wk_why = "major"; end
+		dir_word(src, 12'h010, v); if (!wk_refused && v !== tok_base) begin wk_refused = 1; wk_why = "WIN_BASE"; end
+		dir_word(src, 12'h014, v); if (!wk_refused && v !== tok_size) begin wk_refused = 1; wk_why = "WIN_SIZE"; end
+		dir_word(src, 12'h008, v); hl = v[15:0]; st = v[31:16];
+		dir_word(src, 12'h00C, v); cnt = v[15:0];
+		if (!wk_refused && (hl < 32'h40 || st < 32'h80 || hl[1:0] != 0 || st[1:0] != 0 || cnt > 31 ||
+		                    hl + cnt * st > 32'h1000)) begin wk_refused = 1; wk_why = "LAYOUT"; end
+		if (!wk_refused) begin
+			for (i = 0; i < cnt; i = i + 1) begin
+				dir_word(src, hl + i * st, kind); dir_word(src, hl + i * st + 20, line);
+				ord[i] = (kind[15:0] == 0 || line[31:8] != 0) ? 8'd0 : line[7:0];
+			end
+			for (i = 0; i < cnt; i = i + 1) begin
+				b = hl + i * st;
+				dir_word(src, b,      kind);  dir_word(src, b + 4,  ver);   dir_word(src, b + 8,  off);
+				dir_word(src, b + 12, size);  dir_word(src, b + 16, cause); dir_word(src, b + 24, bits);
+				ok = kind[31:16] == 0 && kind[15:0] != 0 && kind[15:0] < 16'h8000 &&
+				     kind_major(kind[15:0]) != 0 && ver[31:16] == kind_major(kind[15:0]) &&
+				     size != 0 && off[1:0] == 0 && size[1:0] == 0 && off < tok_size && size <= tok_size - off &&
+				     (cause == 0 || (cause >= off && cause < off + size && cause[1:0] == 0));
+				if (ok) begin
+					shared = 0;
+					for (j = 0; j < cnt; j = j + 1) if (j != i && ord[j] == ord[i]) shared = 1;
+					wk_idx[wk_n] = i; wk_kind[wk_n] = kind[15:0]; wk_ver[wk_n] = ver; wk_off[wk_n] = off;
+					wk_size[wk_n] = size; wk_cause[wk_n] = cause; wk_bits[wk_n] = bits;
+					wk_line[wk_n] = (ord[i] >= 8'd1 && ord[i] <= 8'd15 && !shared) ? ord[i] : 8'd0;
+					wk_n = wk_n + 1;
+				end
+			end
+		end
+	end
+endtask
+
+// The walk against the expected entries, with an ordinal the case expects in place of one entry's (kind k_ln).
+task walk_check(input string what, input [15:0] k_ln, input [7:0] ln);
+	integer i, bad;
+	reg [7:0] el;
+	begin
+		check({what, ": not refused"}, wk_refused, 0);
+		check({what, ": entries found"}, wk_n, em_n);
+		bad = 0;
+		for (i = 0; i < em_n && i < wk_n; i = i + 1) begin
+			el = (em_kind[i] == k_ln) ? ln : em_line[i];
+			if (wk_idx[i] !== i || wk_kind[i] !== em_kind[i] || wk_ver[i] !== em_ver[i] || wk_off[i] !== em_off[i] ||
+			    wk_size[i] !== em_size[i] || wk_cause[i] !== em_cause[i] || wk_line[i] !== el ||
+			    wk_bits[i] !== em_bits[i]) begin
+				if (bad == 0) $display("     %s: entry %0d kind %0d found as index %0d kind %0d line %0d", what, i,
+				                       em_kind[i], wk_idx[i], wk_kind[i], wk_line[i]);
+				bad = bad + 1;
+			end
+		end
+		check({what, ": every entry as listed"}, bad, 0);
+	end
+endtask
+
+// Copy the directory page into syn[].
+task syn_copy;
+	integer i;
+	reg [31:0] v, vl;
+	integer nb;
+	for (i = 0; i < 1024; i = i + 1) begin axi_read(DIRB + {7'd0, i[9:0], 2'b00}, 0, v, vl, nb); syn[i] = v; end
+endtask
+
+// One entry appended to syn[] (index n, the default layout), COUNT raised to n + 1.
+task syn_add(input integer n, input [31:0] kind, input [31:0] ver, input [31:0] off, input [31:0] size,
+             input [31:0] cause, input [31:0] line, input [31:0] tag);
+	integer b, i;
+	begin
+		b = 16 + 32 * n;
+		for (i = 0; i < 32; i = i + 1) syn[b + i] = 32'hA5A5_0000 | i;     // kind words a host must not read
+		syn[b] = kind; syn[b + 1] = ver; syn[b + 2] = off; syn[b + 3] = size; syn[b + 4] = cause;
+		syn[b + 5] = line; syn[b + 6] = 32'h1; syn[b + 7] = tag;
+		syn[3] = n + 1;
+	end
+endtask
+
+// The token, the page word for word, a host's walk on the bus and on altered copies.
+task dir_cases;
+	integer i, n, bad, nl, tb_off, tb_size;
+	reg [31:0] v, vl;
+	reg  [7:0] seen [0:31];
+	integer    nb;
+	begin
+		$display("-- directory: the token's numbers are the window's and the header's");
+		// `SYS_LW_CAPS carries its own concatenation comma, so it is read inside {} with a closing ";"
+		caps = {`SYS_LW_CAPS ";"};
+		n = $sscanf(caps, "AXI:%h:%h:LW,;", tb_off, tb_size);
+		check("SYS_LW_CAPS parses as AXI:<offset>:<size>:LW", n, 2);
+		check("SYS_LW_CAPS is that token alone, in every block set",
+		      caps == $sformatf("AXI:%0h:%0h:LW,;", tb_off, tb_size), 1);
+		check("token offset = the window's WIN_OFF", tb_off, win.WIN_OFF);
+		check("token size = the window's WIN_SIZE", tb_size, win.WIN_SIZE);
+		rd("WIN_BASE = the token's offset", DIRB + 21'h10, tb_off);
+		rd("WIN_SIZE = the token's size", DIRB + 21'h14, tb_size);
+
+		$display("-- directory: the header, then the page word for word");
+		dm_build;
+		rd("MAGIC LWDR",                 DIRB + 21'h00, 32'h5244574C);
+		rd("VERSION 2.0",                DIRB + 21'h04, 32'h00020000);
+		rd("LAYOUT {stride 0x80, header 0x40}", DIRB + 21'h08, 32'h00800040);
+		rd("COUNT: one entry per block built", DIRB + 21'h0C, em_n);
+		rd("LEASE: none held",           DIRB + 21'h18, 32'd0);
+		rd("TIMEBASE",                   DIRB + 21'h1C, 32'h190186A0);
+		rd("PENDING: no cause",          DIRB + 21'h20, 32'd0);
+		rd("OWNED: nothing",             DIRB + 21'h24, 32'd0);
+		rd("SCRATCH reset",              SCR,           32'd0);
+		rd("OPEN reads 0",               DIRB + 21'h2C, 32'd0);
+		rd("LINE_EN reads 0",            DIRB + 21'h30, 32'd0);
+		rd("RESETS reads 0",             DIRB + 21'h34, 32'd0);
+		bad = 0;
+		for (i = 0; i < 1024; i = i + 1) begin
+			axi_read(DIRB + {7'd0, i[9:0], 2'b00}, 0, v, vl, nb);
+			if (v !== dm[i]) begin
+				if (bad < 4) $display("     directory word %03h: %08h, expected %08h", 4 * i, v, dm[i]);
+				bad = bad + 1;
+			end
+		end
+		check("the directory page, 1,024 words, word for word", bad, 0);
+
+		$display("-- directory: a host's walk finds every entry; one ordinal per entry, framework ordinals 1-15");
+		dir_walk(0, tb_off, tb_size);
+		walk_check("walk on the bus", 0, 0);
+		nl = 0; bad = 0;
+		for (i = 0; i < em_n; i = i + 1) begin
+			axi_read(DIRB + 21'h40 + 21'h80 * i + 21'h14, 0, v, vl, nb);
+			if (v != 0) begin
+				if (v > 15) bad = bad + 1;
+				for (n = 0; n < nl; n = n + 1) if (seen[n] == v[7:0]) bad = bad + 1;
+				seen[nl] = v[7:0]; nl = nl + 1;
+			end
+		end
+		check("LINE words: each non-zero ordinal named once, each in 1-15", bad, 0);
+		check("entries with a line", nl, TB_SEC ? 2 : 1);
+		for (i = 0; i < wk_n; i = i + 1) if (wk_cause[i] != 0) begin
+			axi_read(DIRB + wk_cause[i], 0, v, vl, nb);
+			check($sformatf("kind %0d: its CAUSE word reads as an idle cause", wk_kind[i]), v, 0);
+			check($sformatf("kind %0d: CAUSE_BITS within [15:0]", wk_kind[i]), wk_bits[i][31:16], 0);
+		end
+
+		$display("-- directory: the walk refuses majors 1 and 3, the layout-1 magic and a window not the token's");
+		syn_copy;
+		dir_walk(1, tb_off, tb_size); walk_check("the copy", 0, 0);
+		syn[1] = 32'h00010000; dir_walk(1, tb_off, tb_size); check("major 1 refused", wk_refused, 1);
+		syn[1] = 32'h00030000; dir_walk(1, tb_off, tb_size); check("major 3 refused", wk_refused, 1);
+		syn[1] = 32'h00020007; dir_walk(1, tb_off, tb_size); walk_check("minor 7: walked", 0, 0);
+		syn[1] = 32'h00020000;
+		syn[0] = 32'h31535953; dir_walk(1, tb_off, tb_size); check("the layout-1 magic refused", wk_refused, 1);
+		syn[0] = 32'h5244574C;
+		syn[4] = 32'h00041000; dir_walk(1, tb_off, tb_size); check("WIN_BASE not the token's: refused", wk_refused, 1);
+		syn[4] = tb_off;
+		syn[5] = 32'h00040000; dir_walk(1, tb_off, tb_size); check("WIN_SIZE not the token's: refused", wk_refused, 1);
+		syn[5] = tb_size;
+
+		$display("-- directory: the walk skips kind 0, an unknown kind or major, a private kind and a block outside");
+		n = em_n;
+		syn_add(n,     32'h0000, 32'h00010000, 32'hFFFFF000, 32'h1000, 0, 32'd1, 0);             // kind 0
+		syn_add(n + 1, 32'h0077, 32'h00010000, 32'h07000, 32'h1000, 0, 32'd4, 0);                // unknown kind
+		syn_add(n + 2, 32'h0001, 32'h00090000, 32'h40000, 32'h40000, 0, 32'd0, 0);               // PAD, major 9
+		syn_add(n + 3, 32'h8001, 32'h00010000, 32'h20000, 32'h1000, 32'h20000, 32'd16, 32'h54534554);  // private
+		syn_add(n + 4, 32'h0003, 32'h00010000, 32'h7F000, 32'h2000, 0, 32'd0, 0);                // OSD, past the end
+		syn_add(n + 5, 32'h0004, 32'h00010000, 32'h03000, 32'h1000, 32'h05000, 32'd0, 0);        // SYS, CAUSE outside
+		dir_walk(1, tb_off, tb_size); walk_check("six entries to skip", 0, 0);
+		syn[16 + 32 * (n + 1) + 5] = 32'd2;                         // the unknown kind names the SYS entry's ordinal
+		dir_walk(1, tb_off, tb_size); walk_check("an ordinal two entries name: no line for either", 4, 0);
+		syn[16 + 32 * (n + 1) + 5] = 32'd4;
+		syn[16 + 5] = 32'd20;                                      // PAD names a private ordinal
+		dir_walk(1, tb_off, tb_size); walk_check("a framework ordinal out of 1-15: no line", 1, 0);
+
+		$display("-- directory: the walk follows LAYOUT, not constants (header 0x80, stride 0x100)");
+		syn_copy;
+		for (i = 1023; i >= 0; i = i - 1)
+			if (i >= 32) syn[i] = ((i - 32) % 64 < 32 && (i - 32) / 64 < em_n) ? syn[16 + 32 * ((i - 32) / 64) + (i - 32) % 64] : 0;
+			else if (i >= 16) syn[i] = 0;
+		syn[1] = 32'h00020001; syn[2] = 32'h01000080;
+		dir_walk(1, tb_off, tb_size); walk_check("a larger header and stride", 0, 0);
+	end
+endtask
+
+// The block selects are exclusive: in every clk_100m cycle exactly one read select (the default's included) is high,
+// and at most one store select.
+integer sel_cycles = 0, sel_bad = 0;
+always @(posedge clk) begin
+	sel_cycles = sel_cycles + 1;
+	if (win.r_dir + win.r_sec + win.r_sys + win.r_osd + win.r_lane + win.r_pad + win.r_none != 1 ||
+	    win.w_dir + win.w_sec + win.w_sys + win.w_osd + win.w_lane + win.w_pad > 1) sel_bad = sel_bad + 1;
+end
+
+// The causes the entries declare: each raise sets exactly its entry's PENDING bit and its LINE's bit of the lines,
+// and a store of the value read, at the CAUSE offset the entry gives, clears both.
+integer line3_high = 0;
+always @(posedge clk) if (lines[2] !== 1'b0) line3_high = line3_high + 1;
+
+task dir_causes;
+	integer i, j, n, nb, tb_off, tb_size;
+	reg [31:0] v, vl;
+	begin
+		$display("-- directory: each entry's cause sets exactly its PENDING bit and its own line, and clears at its CAUSE");
+		n = $sscanf({`SYS_LW_CAPS ";"}, "AXI:%h:%h:LW,;", tb_off, tb_size);
+		dir_walk(0, tb_off, tb_size);
+		if (TB_SEC) begin sec_wr(21'h10, 32'h0); settle; end
+		for (i = 0; i < wk_n; i = i + 1) if (wk_cause[i] != 0) begin
+			for (j = 0; j < wk_n; j = j + 1) if (wk_cause[j] != 0) cause_drain(DIRB + wk_cause[j]);
+			rd($sformatf("kind %0d: PENDING clear before", wk_kind[i]), DIRB + 21'h20, 32'd0);
+			check($sformatf("kind %0d: lines low before", wk_kind[i]), lines, 0);
+			if (wk_kind[i] == 2) cd_request(32'h00007700);
+			else st_req(st_pat(700));
+			settle;
+			rd($sformatf("kind %0d: PENDING has its bit alone", wk_kind[i]), DIRB + 21'h20, 32'd1 << wk_idx[i]);
+			check($sformatf("kind %0d: its line alone (ordinal %0d)", wk_kind[i], wk_line[i]), lines,
+			      (wk_line[i] >= 1 && wk_line[i] <= 3) ? 3'd1 << (wk_line[i] - 1) : 3'd0);
+			axi_read(DIRB + wk_cause[i], 0, v, vl, nb);
+			check($sformatf("kind %0d: CAUSE set", wk_kind[i]), v != 0, 1);
+			check($sformatf("kind %0d: CAUSE within its CAUSE_BITS", wk_kind[i]), v & ~wk_bits[i], 0);
+			axi_write(DIRB + wk_cause[i], v, 4'hF);
+			rd($sformatf("kind %0d: PENDING clear after the store-back", wk_kind[i]), DIRB + 21'h20, 32'd0);
+			check($sformatf("kind %0d: lines low after the store-back", wk_kind[i]), lines, 0);
+			if (wk_kind[i] == 2) begin
+				@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
+				if (doorbell) cause_drain(SEC);
+			end
+		end
+		check("no entry names ordinal 3: its line never rose", line3_high, 0);
+		$display("     %0d cycles with the block selects compared", sel_cycles);
+		check("cycles with no read select, two read selects or two store selects", sel_bad, 0);
+	end
+endtask
+
+// Every 4 KB page of the 2 MB against the window's map: a block's page reads that block (never the default), every
+// other page reads 0xDEADBEEF at its first, middle and last word and drops a store; each block's ID word is at its
+// offset.
+function integer blk_at(input [20:0] a);
+	if (a >= 21'h40000 && a < 21'h41000) blk_at = 1;                    // the directory
+	else if (TB_SEC && a >= 21'h41000 && a < 21'h43000) blk_at = 2;     // SECTOR
+	else if (a >= 21'h43000 && a < 21'h44000) blk_at = 3;               // SYS
+	else if (a >= 21'h44000 && a < 21'h46000) blk_at = 4;               // OSDBUF
+	else if (TB_LANE && a >= 21'h46000 && a < 21'h47000) blk_at = 5;    // LANE
+	else if (a >= 21'h80000 && a < 21'hC0000) blk_at = 6;               // PAD
+	else blk_at = 0;
+endfunction
+
+task decode_sweep;
+	reg [511:0] sw0, ss0;
+	reg [255:0] sl0;
+	reg  [20:0] a;
+	integer p, k, b, nblk, nnone, bad, nbad;
+	begin
+		$display("-- decode: every block's pages read the block, every other page 0xDEADBEEF, in the 2 MB");
+		nblk = 0; nnone = 0; bad = 0;
+		for (p = 0; p < 512; p = p + 1) begin
+			b = blk_at({p[8:0], 12'h000});
+			if (b != 0) nblk = nblk + 1; else nnone = nnone + 1;
+			for (k = 0; k < 3; k = k + 1) begin
+				a = {p[8:0], 12'h000} + ((k == 0) ? 21'h000 : (k == 1) ? 21'h7FC : 21'hFFC);
+				axi_read(a, 0, d, dl, beats);
+				if ((b == 0) != (d === 32'hDEADBEEF)) begin
+					if (bad < 4) $display("     %06h (block %0d) reads %08h", a, b, d);
+					bad = bad + 1;
+				end
+			end
+		end
+		$display("     %0d pages in blocks, %0d outside", nblk, nnone);
+		check("pages in blocks", nblk, 1 + 2 * TB_SEC + 1 + 2 + TB_LANE + 64);
+		check("every page reads as the map says", bad, 0);
+		rd("the directory's MAGIC at its offset", DIRB, FW_MAGIC);
+		if (TB_SEC) rd("SECTOR's ID at its offset", SEC + 21'h38, 32'h32434553);
+		rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h31535453);
+		rd("OSDBUF's ID at its offset", OSD + 21'h1004, 32'h3144534F);
+		if (TB_LANE) rd("LANE's ID at its offset", 21'h46018, 32'h314E414C);
+		rd("PAD reads 0", pad_addr(8'h02, 0), 32'd0);
+		rd("the directory page past the entries reads 0", DIRB + 21'h40 + 21'h80 * em_n, 32'd0);
+		rd("the directory page's last word reads 0", DIRB + 21'hFFC, 32'd0);
+
+		$display("-- decode: a store outside every block changes nothing");
+		sys_run = 0;
+		repeat (50) @(negedge clk);
+		sw0 = pure_win(); ss0 = pure_sec(); sl0 = pure_lane();
+		pure_view(0, nbad);
+		for (p = 0; p < 512; p = p + 1)
+			if (blk_at({p[8:0], 12'h000}) == 0) begin
+				axi_write({p[8:0], 12'h000}, 32'hFFFFFFFF, 4'hF);
+				axi_write({p[8:0], 12'hFFC}, 32'hFFFFFFFF, 4'hF);
+			end
+		pure_view(1, nbad);
+		check("stores outside: the readable view is unchanged", nbad, 0);
+		check("stores outside: the window's, PAD's and SYS's state is unchanged", pure_win() === sw0, 1);
+		check("stores outside: SECTOR's state is unchanged", pure_sec() === ss0, 1);
+		check("stores outside: the lane's state is unchanged", pure_lane() === sl0, 1);
+		sys_run = 1;
+		settle;
+	end
+endtask
+
 `ifdef MENU_CORE
 integer f;
 initial begin
@@ -1843,8 +2228,8 @@ initial begin
 	sys_rate;
 	cdc_cells;
 	$display("-- default geometry: a %0d-word primary, 256-word save slots", TB_FRAME);
-	rd("e1 slot/frame 128", 21'h40060, 32'h01000080);
-	rd("e1 w7 card 1 slot/flags/frame 256", 21'h4006C, 32'h02030100);
+	rd("SECTOR K0 slot/frame 128", 21'h400E0, 32'h01000080);
+	rd("SECTOR K3 card 1 slot/flags/frame 256", 21'h400EC, 32'h02030100);
 	sec_wr(21'h10, 32'hC1); settle;
 
 	$display("-- a 128-word primary frame");
@@ -1896,80 +2281,13 @@ initial begin
 	sys_rate;
 	cdc_cells;
 
-	// `SYS_LW_CAPS carries its own concatenation comma, so it is read inside {} with a closing ";"
-	checks = checks + 1;
-	caps = {`SYS_LW_CAPS ";"};
-	if (TB_SEC ? (caps != $sformatf("AXI:%0h:%0h:LW,IRQ:BLK=1:%0h,;", win.WIN_OFF, win.WIN_SIZE, win.WIN_OFF + win.SEC_OFF))
-	           : (caps != $sformatf("AXI:%0h:%0h:LW,;", win.WIN_OFF, win.WIN_SIZE))) begin
-		fails = fails + 1; $display("FAIL SYS_LW_CAPS %s does not match the decoded window", caps);
-	end
-	else $display("pass SYS_LW_CAPS = %s", caps);
-
-	$display("-- directory");
-	rd("magic",        21'h40000, 32'h31535953);
-	rd("dir version",  21'h40004, 32'h00010000);
-	rd("count",        21'h40008, TB_LANE ? 32'd5 : 32'd4);
-	rd("scratch reset",21'h4000C, 32'd0);
-	rd("e0 kind",      21'h40010, 32'd1);
-	rd("e0 version",   21'h40014, 32'h00010000);
-	rd("e0 offset",    21'h40018, 32'h00040000);
-	rd("e0 size",      21'h4001C, 32'h00040000);
-	rd("e0 bitmap w0", 21'h40020, 32'h040F000C);
-	rd("e0 bitmap w1", 21'h40024, 32'h20000000);
-	for (i = 2; i < 8; i = i + 1) rd("e0 bitmap wN", 21'h40020 + 4*i, 32'd0);
-	for (i = 0; i < 4; i = i + 1) rd("e0 reserved", 21'h40040 + 4*i, 32'd0);
-`ifndef MISTER_LW_SECTOR_SLOT
-	for (i = 0; i < 16; i = i + 1) rd("e1 empty (no SECTOR)", 21'h40050 + 4*i, 32'd0);
-`else
-	rd("e1 kind SECTOR", 21'h40050, 32'd2);
-	rd("e1 version 1.1", 21'h40054, 32'h00010001);
-	rd("e1 offset",      21'h40058, 32'h00001000);
-	rd("e1 size",        21'h4005C, 32'h00002000);
-	rd("e1 slot/frame",  21'h40060, 32'h0100024C);
-	rd("e1 cause (abs)", 21'h40064, 32'h00041000);
-	rd("e1 depth/gap",   21'h40068, 32'h02000002);
-	rd("e1 w7 card 1 slot/flags/frame", 21'h4006C, 32'h02030100);
-	rd("e1 w8 card 1 wsrc",             21'h40070, 32'h30100000);
-	rd("e1 w9 card 2 slot/flags/frame", 21'h40074, 32'h03030100);
-	rd("e1 w10 card 2 wsrc",            21'h40078, 32'h30200000);
-	rd("e1 w11 card 1 extent",          21'h4007C, 32'h00020000);
-	rd("e1 w12 card 2 extent",          21'h40080, 32'h00020000);
-	for (i = 13; i < 16; i = i + 1) rd("e1 reserved", 21'h40050 + 4*i, 32'd0);
-`endif
-	rd("e2 kind OSDBUF", 21'h40090, 32'd3);
-	rd("e2 version",     21'h40094, 32'h00010000);
-	rd("e2 offset",      21'h40098, 32'h00004000);
-	rd("e2 size",        21'h4009C, 32'h00002000);
-	rd("e2 geometry",    21'h400A0, 32'h00800100);
-	for (i = 5; i < 16; i = i + 1) rd("e2 reserved", 21'h40090 + 4*i, 32'd0);
-	rd("e3 kind SYS",    21'h400D0, 32'd4);
-	rd("e3 version",     21'h400D4, 32'h00010000);
-	rd("e3 offset",      21'h400D8, 32'h00003000);
-	rd("e3 size",        21'h400DC, 32'h00001000);
-	rd("e3 line ordinal 2 (f2h_irq[9])", 21'h400E0, 32'd2);
-	rd("e3 cause (abs)", 21'h400E4, 32'h00043000);
-	rd("e3 class tag SYS", 21'h400E8, 32'h00100000);
-	rd("e3 causes: STATUS", 21'h400EC, 32'h00000001);
-	for (i = 8; i < 16; i = i + 1) rd("e3 reserved", 21'h400D0 + 4*i, 32'd0);
-`ifdef MISTER_LW_LANE
-	rd("e4 kind LANE",   21'h40110, 32'd5);
-	rd("e4 version 1.1", 21'h40114, 32'h00010001);
-	rd("e4 offset",      21'h40118, 32'h00006000);
-	rd("e4 size",        21'h4011C, 32'h00001000);
-	rd("e4 UIO bitmap w0: 01 1C 1D 1E", 21'h40120, 32'h70000002);
-	rd("e4 UIO bitmap w1: 22 24 31 32 33 3B", 21'h40124, 32'h080E0014);
-	for (i = 6; i < 12; i = i + 1) rd("e4 bitmap wN", 21'h40110 + 4*i, 32'd0);
-	rd("e4 w12 0x20 reply 'b11", 21'h40140, 32'h00000003);
-	rd("e4 w13 depth/gap", 21'h40144, 32'h04000004);
-	rd("e4 w14 reply depth", 21'h40148, 32'h01000000);
-	rd("e4 w15 no line", 21'h4014C, 32'd0);
-`endif
+	dir_cases;
 
 	$display("-- scratch");
-	axi_write(21'h4000C, 32'hA5A55A5A, 4'hF);
-	rd("scratch", 21'h4000C, dg(32'hA5A55A5A));
-	axi_write(21'h4000C, 32'h00C30000, 4'h4);
-	rd("scratch byte lane", 21'h4000C, dg(32'hA5C35A5A));
+	axi_write(SCR, 32'hA5A55A5A, 4'hF);
+	rd("scratch", SCR, dg(32'hA5A55A5A));
+	axi_write(SCR, 32'h00C30000, 4'h4);
+	rd("scratch byte lane", SCR, dg(32'hA5C35A5A));
 
 	$display("-- pads");
 	axi_write(pad_addr(8'h02, 0), 32'h8001F00F, 4'hF); settle;
@@ -2010,8 +2328,8 @@ initial begin
 	$display("-- default responder");
 	rd("LW 0x000000", 21'h000000, 32'hDEADBEEF);
 	rd("below window", 21'h03FFFC, 32'hDEADBEEF);
-	rd("directory hole", TB_LANE ? 21'h040150 : 21'h040110, 32'hDEADBEEF);
-	rd("below SECTOR", 21'h040FFC, 32'hDEADBEEF);
+	rd("directory page past the entries", DIRB + 21'h40 + 21'h80 * em_n, 32'd0);
+	rd("directory page end, below SECTOR", 21'h040FFC, 32'd0);
 	rd("above SECTOR: SYS CAUSE idle", 21'h043000, 32'd0);
 	rd("SYS block end", 21'h043FFC, 32'd0);
 	if (TB_LANE) rd("above LANE", 21'h047000, 32'hDEADBEEF);
@@ -2019,9 +2337,11 @@ initial begin
 	rd("above window", 21'h0C0000, 32'hDEADBEEF);
 	rd("LW 0x1FFFFC", 21'h1FFFFC, 32'hDEADBEEF);
 	axi_write(21'h000100, 32'h0, 4'hF);
-	axi_read(21'h40000, 4'd3, d, dl, beats);
+	axi_read(DIRB + 21'h1C, 4'd3, d, dl, beats);
 	check("burst beats", beats, 4);
 	check("burst last (scratch)", dl, dg(32'hA5C35A5A));
+
+	decode_sweep;
 
 	$display("-- firewall: read bursts of every type step their words on 12 bits; a size above a word steps a word");
 	for (i = 0; i < 64; i = i + 1) begin axi_read(21'h40000 + {13'd0, i[5:0], 2'b00}, 0, d, dl, beats); wref[i] = d; end
@@ -2097,7 +2417,7 @@ initial begin
 				7:  a = OSD;                           // IMAGE
 				8:  a = OSD + 21'h1000;                // OSD CTRL
 				9:  a = SYSB;                          // SYS CAUSE
-				10: a = 21'h4000C;                     // SCRATCH
+				10: a = SCR;                     // SCRATCH
 				11: a = 21'h46000;                     // LANE BEGIN, WORD, END, RPOP
 				default: a = 21'h4600C;
 			endcase
@@ -2130,8 +2450,8 @@ initial begin
 			awburst = t[1:0];
 			axi_write(OSD + 21'h1000, {30'd0, ~t[1:0]}, 4'hF);
 			rd($sformatf("single store, burst type %0d: OSD CTRL", t), OSD + 21'h1000, {30'd0, ~t[1:0]});
-			axi_write(21'h4000C, 32'h5C000000 | t, 4'hF);
-			rd($sformatf("single store, burst type %0d: SCRATCH", t), 21'h4000C, dg(32'h5C000000 | t));
+			axi_write(SCR, 32'h5C000000 | t, 4'hF);
+			rd($sformatf("single store, burst type %0d: SCRATCH", t), SCR, dg(32'h5C000000 | t));
 		end
 		awburst = 2'b01;
 		check("single stores: one bus pulse each", n_lwwr - nw0, 8);
@@ -2142,9 +2462,9 @@ initial begin
 
 	$display("-- clk_sys stopped (core held in reset)");
 	sys_run = 0;
-	rd("magic, clk_sys stopped", 21'h40000, 32'h31535953);
-	axi_write(21'h4000C, 32'h0BADF00D, 4'hF);
-	rd("scratch, clk_sys stopped", 21'h4000C, dg(32'h0BADF00D));
+	rd("magic, clk_sys stopped", 21'h40000, FW_MAGIC);
+	axi_write(SCR, 32'h0BADF00D, 4'hF);
+	rd("scratch, clk_sys stopped", SCR, dg(32'h0BADF00D));
 	for (i = 1; i <= 5; i = i + 1) axi_write(pad_addr(8'h02, 0), i, 4'hF);
 	axi_write(pad_addr(8'h03, 0), 32'h00000077, 4'hF);
 	axi_write(pad_addr(8'h03, 0), 32'h00000000, 4'hF);
@@ -2160,14 +2480,14 @@ initial begin
 	check("right analog_0 last queued lands on restart", {16'd0, rana0}, 32'h00000010);
 
 `ifndef MISTER_LW_SECTOR_SLOT
-	$display("-- no SECTOR block: its addresses read 0, stores are ignored, no doorbell");
-	rd("SECTOR CAUSE reads 0", 21'h041000, 32'd0);
-	rd("SECTOR ID reads 0", 21'h041038, 32'd0);
+	$display("-- no SECTOR block: its addresses read 0xDEADBEEF, stores are ignored, no doorbell");
+	rd("SECTOR CAUSE reads the default", 21'h041000, 32'hDEADBEEF);
+	rd("SECTOR ID reads the default", 21'h041038, 32'hDEADBEEF);
 	axi_write(21'h041010, 32'h1, 4'hF);
 	axi_write(21'h04100C, 32'h0, 4'hF);
-	rd("SECTOR CTRL still 0", 21'h041010, 32'd0);
-	rd("SECTOR DATA reads 0", 21'h042000, 32'd0);
-	rd("SECTOR end reads 0", 21'h042FFC, 32'd0);
+	rd("SECTOR CTRL still the default", 21'h041010, 32'hDEADBEEF);
+	rd("SECTOR DATA reads the default", 21'h042000, 32'hDEADBEEF);
+	rd("SECTOR end reads the default", 21'h042FFC, 32'hDEADBEEF);
 	check("no doorbell", doorbell, 0);
 	check("blk_dn idle", blk_dn, 0);
 	check("card_dn idle", card_dn, 0);
@@ -2196,18 +2516,18 @@ initial begin
 	rd("REQ hides a request whose EN is 0", SEC + 21'h04, 32'd0);
 	rd("LBA captured", SEC + 21'h08, 32'h00001234);
 	rd("GEN +1", SEC + 21'h24, dg(gen0 + 1));
-	rsize = 0; rd("CAUSE byte read: data", SEC + 21'h00, 32'h00010001); rsize = 2;
+	rsize = 0; rd("CAUSE byte read: data", SEC + 21'h00, 32'h00000001); rsize = 2;
 	check("byte read does not clear", doorbell, 1);
-	rd("CAUSE word read: BLK tag + bit 0", SEC + 21'h00, 32'h00010001);
+	rd("CAUSE word read: bit 0", SEC + 21'h00, 32'h00000001);
 	check("word read does not clear", doorbell, 1);
 	arburst = 2'b00; axi_read(SEC + 21'h00, 4'd15, d, dl, beats); arburst = 2'b01;
-	check("a 16-beat FIXED burst on CAUSE: every beat the cause", {d, dl}, {32'h00010001, 32'h00010001});
+	check("a 16-beat FIXED burst on CAUSE: every beat the cause", {d, dl}, {32'h00000001, 32'h00000001});
 	check("burst read does not clear", doorbell, 1);
 	axi_write(SEC + 21'h00, 32'hFFFFFFFE, 4'hF);
 	check("a store with bit 0 clear clears nothing", doorbell, 1);
 	axi_write(SEC + 21'h00, 32'h00000001, 4'h7);
 	check("a partial-width store clears nothing", doorbell, 1);
-	rd("CAUSE kept", SEC + 21'h00, 32'h00010001);
+	rd("CAUSE kept", SEC + 21'h00, 32'h00000001);
 	axi_write(SEC + 21'h00, 32'h00000001, 4'hF);
 	check("a store of bit 0 clears the line", doorbell, 0);
 	rd("CAUSE zero iff idle", SEC + 21'h00, 32'd0);
@@ -2285,7 +2605,7 @@ initial begin
 	rd("DROPS 76", SEC + 21'h1C, dg(32'd76));
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("STATUS high-water saturates at 255", d[15:8], dg(255));
-	rd("CAUSE pending, clk_sys stopped", SEC + 21'h00, 32'h00010001);
+	rd("CAUSE pending, clk_sys stopped", SEC + 21'h00, 32'h00000001);
 	check("CAUSE read keeps the line with clk_sys stopped", doorbell, 1);
 	axi_write(SEC + 21'h00, 32'h00000001, 4'hF);
 	check("CAUSE store clears with clk_sys stopped", doorbell, 0);
@@ -2466,7 +2786,7 @@ initial begin
 	mc1.go(0, 7'h12); settle;
 	check("card 1 hidden from hps_io", sd_rd[2], 0);
 	check("card rd rings", doorbell, 1);
-	rd("CAUSE: the event bit", SEC + 21'h00, 32'h00010001);
+	rd("CAUSE: the event bit", SEC + 21'h00, 32'h00000001);
 	cause_drain(SEC);
 	rd("REQ card 1 read", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2]", SEC + 21'h68, 32'h00000012);
@@ -2487,7 +2807,7 @@ initial begin
 	n0 = mc2.done; s0 = mc2.strobes; r = mc1.strobes;
 	mc2.go(1, 7'h7F); settle;
 	check("card 2 wr hidden from hps_io", sd_wr[3], 0);
-	rd("CAUSE: the event bit again", SEC + 21'h00, 32'h00010001);
+	rd("CAUSE: the event bit again", SEC + 21'h00, 32'h00000001);
 	cause_drain(SEC);
 	rd("REQ card 2 write", SEC + 21'h04, 32'h800080CE);
 	rd("LBA_S[3]", SEC + 21'h6C, 32'h0000007F);
@@ -2507,7 +2827,7 @@ initial begin
 	join
 	settle;
 	rd("REQ: the CD first", SEC + 21'h04, 32'h800080C5);
-	rd("CAUSE: one event bit for both", SEC + 21'h00, 32'h00010001);
+	rd("CAUSE: one event bit for both", SEC + 21'h00, 32'h00000001);
 	cause_drain(SEC);
 	sec_wr(21'h44, 32'h00003000);                          // BEGIN_S[1] aliases BEGIN
 	rd("REQ: answered CD hidden, card 1 next", SEC + 21'h04, 32'h800080C9);
@@ -2709,9 +3029,9 @@ initial begin
 	check("SYS line raised by status_set", sys_irq, 1);
 	check("SECTOR line untouched", doorbell, 0);
 	rsize = 0; axi_read(SYSB, 0, d, dl, beats); rsize = 2;
-	check("SYS byte read returns the cause", d, 32'h00100001);
+	check("SYS byte read returns the cause", d, 32'h00000001);
 	check("SYS byte read does not clear", sys_irq, 1);
-	rd("SYS CAUSE: tag SYS (bit 20), bit 0 STATUS", SYSB, 32'h00100001);
+	rd("SYS CAUSE: bit 0 STATUS", SYSB, 32'h00000001);
 	check("SYS word read does not clear", sys_irq, 1);
 	arburst = 2'b10; axi_read(SYSB, 4'd3, d, dl, beats); arburst = 2'b01;
 	check("SYS WRAP burst over CAUSE does not clear", sys_irq, 1);
@@ -2719,7 +3039,7 @@ initial begin
 	check("SYS store with bit 0 clear clears nothing", sys_irq, 1);
 	axi_write(SYSB, 32'h00000001, 4'h1);
 	check("SYS partial-width store clears nothing", sys_irq, 1);
-	rd("SYS CAUSE kept", SYSB, 32'h00100001);
+	rd("SYS CAUSE kept", SYSB, 32'h00000001);
 	axi_write(SYSB, 32'h00000001, 4'hF);
 	check("SYS store of bit 0 clears the line", sys_irq, 0);
 	rd("SYS CAUSE idle after the store", SYSB, 32'd0);
@@ -2755,7 +3075,7 @@ initial begin
 	for (i = 2; i < 6; i = i + 1) st_req(st_pat(i));
 	settle;
 	check("SYS line raised once for the burst", sys_irq, 1);
-	rd("SYS CAUSE", SYSB, 32'h00100001);
+	rd("SYS CAUSE", SYSB, 32'h00000001);
 	axi_write(SYSB, 32'h00000001, 4'hF);
 	check("cleared by one store", sys_irq, 0);
 	st_read(stf0, stf1, stw);
@@ -2809,7 +3129,7 @@ initial begin
 	settle;
 	axi_read(SYSB + 21'h04, 0, stf1, dl, beats);
 	check("STFLG moved across the capture", stf0 != stf1, 1);
-	rd("SYS CAUSE", SYSB, 32'h00100001);
+	rd("SYS CAUSE", SYSB, 32'h00000001);
 
 	$display("-- OSDBUF: registers");
 	rd("OSD ID OSD1", OSD + 21'h1004, 32'h3144534F);
@@ -3266,7 +3586,7 @@ initial begin
 		check("order: SYS cause pending", sys_irq, 1);
 		store_read(SYSB, 32'h1, SYSB, v);
 		check("order: a W1C store on SYS CAUSE, then CAUSE reads clear", v, 32'd0);
-		store_read(21'h4000C, 32'h0D15EA5E, 21'h4000C, v);
+		store_read(SCR, 32'h0D15EA5E, SCR, v);
 		check("order: a store to SCRATCH, then SCRATCH", v, dg(32'h0D15EA5E));
 		axi_read(OSD + 21'h1000, 0, oc, dl, beats);
 		store_read(OSD + 21'h1000, 32'h2, OSD + 21'h1000, v);
@@ -3277,7 +3597,7 @@ initial begin
 			st_req(st_pat(610 + k)); settle;
 			race_store_read(SYSB, 32'h1, SYSB, k, v);
 			check($sformatf("order: CAUSE read accepted %0d cycles from the W1C's data beat", k), v,
-			      k < 0 ? 32'h00100001 : 32'd0);
+			      k < 0 ? 32'h00000001 : 32'd0);
 			check("order: the W1C cleared it either way", sys_irq, 0);
 		end
 		if (TB_SEC) begin
@@ -3423,16 +3743,19 @@ initial begin
 `endif
 	end
 
+	dir_causes;
 	fw_reset_cases;
 
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");
-		rd("lean SCRATCH", 21'h4000C, 32'd0);
+		rd("lean SCRATCH", SCR, 32'd0);
 		rd("lean analog drops", pad_addr(8'h1A, 0), 32'd0);
-		axi_read(SEC + 21'h14, 0, d, dl, beats);
-		check("lean STATUS[31:4]", d[31:4], 0);
-		for (i = 7; i < 14; i = i + 1) rd("lean SECTOR reg", SEC + 4*i, 32'd0);
-		if (TB_SEC) rd("lean ID kept", SEC + 21'h38, 32'h32434553);
+		if (TB_SEC) begin
+			axi_read(SEC + 21'h14, 0, d, dl, beats);
+			check("lean STATUS[31:4]", d[31:4], 0);
+			for (i = 7; i < 14; i = i + 1) rd("lean SECTOR reg", SEC + 4*i, 32'd0);
+			rd("lean ID kept", SEC + 21'h38, 32'h32434553);
+		end
 	end
 
 `ifdef LW_TB_CDC
