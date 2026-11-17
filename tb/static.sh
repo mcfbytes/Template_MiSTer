@@ -11,13 +11,14 @@
 # such as the link nets the lane takes over), and every port of osd, hps_io and emu that the configuration
 # declares differently from off, at each of their instances. Arm E fails if one of them reads z.
 # The checks, each in every configuration, on sys_top.v as Icarus preprocesses it:
-#   1. The LW terms of GPI and the two LW instances come together or not at all: gp_in[25] is the net lw_present
-#      and gp_in[24] the net lw_idle in exactly the configurations that instantiate both hps_lw_bridge and
-#      lw_sys_window, and those are exactly the ones with MISTER_LW; each net is declared with no value, assigned
-#      nowhere, and connected to the firewall's output of its name (present, idle). Every other bit of
-#      gp_in[27:21] is a constant 0 (both bits too, without MISTER_LW), and gp_in is 32 bits wide. Once, in
-#      hps_lw_bridge.sv: present is assigned the constant 1 and nothing else, and idle is lw_axi_regbus's idle_q,
-#      a register assigned only on posedge clk.
+#   1. The LW terms of GPI and the two LW instances come together or not at all: gp_in[25] is the net lw_present,
+#      gp_in[24] the net lw_idle and gp_in[22] the net lw_held in exactly the configurations that instantiate both
+#      hps_lw_bridge and lw_sys_window, and those are exactly the ones with MISTER_LW; each net is declared with no
+#      value, assigned nowhere, and connected to its instance's output of its name (the firewall's present and
+#      idle, the window's held). Every other bit of gp_in[27:21] is a constant 0 (all of them without MISTER_LW),
+#      and gp_in is 32 bits wide. Once, in hps_lw_bridge.sv: present is assigned the constant 1 and nothing else,
+#      and idle is lw_axi_regbus's idle_q, a register assigned only on posedge clk. Once, in lw_sys_window.sv
+#      (check 8): held is live_q alone, a register assigned only on posedge clk.
 #   2. f2h_irq: bits 1:0 are upstream's; bits 10:8 are the 3-bit net lw_sys_window's lines output drives, line
 #      ordinal k at bit 7+k, declared with no value and assigned nowhere else; every other bit is a constant 0.
 #   3. Every LW configuration has LW nets to check; the off configuration has none.
@@ -37,9 +38,11 @@
 # Then, once, the directory's lines, in sys/lw_sys_window.sv with every tier:
 #   8. Every entry is one ent() call whose kind and LINE word are the localparams <B>_KIND and <B>_LINE of one
 #      block B, each localparam in one call. The LINE words name each non-zero ordinal once, a framework kind's
-#      ordinal (kind below 0x8000) in 1-15 and a private kind's in 16-31. lines is one OR of terms
-#      {3{<b>_lvl}} & line_bit(<B>_LINE), one per non-zero ordinal, and line_bit(k) is bit k-1; PENDING's terms
-#      put the same <b>_lvl on its entry's bit E_<B>.
+#      ordinal (kind below 0x8000) in 1-15 and a private kind's in 16-31. line_d is one OR of terms
+#      {3{<b>_lvl & line_en[E_<B>]}} & line_bit(<B>_LINE), one per non-zero ordinal, and line_bit(k) is bit k-1;
+#      PENDING's terms put the same <b>_lvl on its entry's bit E_<B>. The lines and the lease are registers:
+#      lines is line_q alone, line_q is assigned once, on posedge clk, as {3{live_q}} & line_d, and held is
+#      live_q alone, a register assigned only on posedge clk.
 # Needs Icarus Verilog (for its preprocessor) and python3.
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}/static; mkdir -p "$O" || exit 2
@@ -56,8 +59,9 @@ UPSTREAM = {'MISTER_DEBUG_NOHDMI', 'MISTER_DUAL_SDRAM'}
 CONFIGS = [(t + v, td + vd) for v, vd in VARIANTS for t, td in TIERS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
 LINES_LO, LINES_W, LINES_PORT = 8, 3, 'lines'
-# gp_in bit -> (the net, the hps_lw_bridge output that must drive it); the rest of gp_in[27:21] is 0
-GPI = {25: ('lw_present', 'present'), 24: ('lw_idle', 'idle')}
+# gp_in bit -> (the net, the instance and its output that must drive it); the rest of gp_in[27:21] is 0
+GPI = {25: ('lw_present', 'hps_lw_bridge', 'present'), 24: ('lw_idle', 'hps_lw_bridge', 'idle'),
+       22: ('lw_held', 'lw_sys_window', 'held')}
 
 if args[:1] == ['--configs']:
     for n, d in CONFIGS:
@@ -306,25 +310,25 @@ for name, defs in CONFIGS:
     fw, win = len(inst['hps_lw_bridge']) == 1, len(inst['lw_sys_window']) == 1
     gp = bitmap(D.get('gp_in', (0, 0, None))[2], W)
     if check(gp is not None and len(gp) == 32, '%s: gp_in is not a 32-bit concatenation of sized terms' % name):
-        fwc = inst['hps_lw_bridge'][0][1] if fw else {}
         terms = []
-        for b, (net, port) in sorted(GPI.items(), reverse=True):
+        for b, (net, mod, port) in sorted(GPI.items(), reverse=True):
             t = gp[b][0]
             terms.append(t == [net])
+            conn = inst[mod][0][1] if len(inst[mod]) == 1 else {}
             if t == [net]:
-                ok = W.get(net) == 1 and D.get(net, (0, 0, 0))[2] is None and fwc.get(port) == [net] and \
+                ok = W.get(net) == 1 and D.get(net, (0, 0, 0))[2] is None and conn.get(port) == [net] and \
                      not any(s[:1] == ['assign'] and net in s[1:s.index('=')] for s in statements(top) if '=' in s)
-                check(ok, '%s: gp_in[%d] is %s, not a 1-bit net driven by hps_lw_bridge.%s alone'
-                      % (name, b, net, port))
+                check(ok, '%s: gp_in[%d] is %s, not a 1-bit net driven by %s.%s alone'
+                      % (name, b, net, mod, port))
             else:
                 check(len(t) == 1 and lit_value(t[0]) == 0, '%s: gp_in[%d] is %s, neither %s nor 0'
                       % (name, b, ' '.join(t), net))
         both = all(terms)
         check(both == any(terms) and both == fw == win == lw,
-              "%s: gp_in[25] lw_present %s, gp_in[24] lw_idle %s, hps_lw_bridge %s, lw_sys_window %s, MISTER_LW %s"
-              % (name, terms[0], terms[1], fw, win, lw))
+              "%s: gp_in[25] lw_present %s, gp_in[24] lw_idle %s, gp_in[22] lw_held %s, hps_lw_bridge %s, "
+              "lw_sys_window %s, MISTER_LW %s" % (name, terms[0], terms[1], terms[2], fw, win, lw))
         zero = all(lit_value(gp[b][0][0]) == 0 and len(gp[b][0]) == 1 for b in range(21, 28) if b not in GPI)
-        check(zero, '%s: gp_in[27:26] or gp_in[23:21] is not constant 0' % name)
+        check(zero, '%s: gp_in[27:26], gp_in[23] or gp_in[21] is not constant 0' % name)
     irq = bitmap(D.get('f2h_irq', (0, 0, None))[2], W)
     if check(irq is not None and len(irq) <= 64, '%s: f2h_irq is not a concatenation of sized terms' % name):
         irq += [(["1'b0"], 0)] * (64 - len(irq))
@@ -795,14 +799,29 @@ for b, o in sorted(ORDS.items()):
     if o:
         lo, hi = (1, 15) if KINDS.get(b, 0) < 0x8000 else (16, 31)
         check(lo <= o <= hi, 'lw_sys_window: %s_LINE = %d, outside %d-%d for kind %s' % (b, o, lo, hi, KINDS.get(b)))
-m = re.search(r'assign lines = (.*?) ;', wtxt)
-terms = re.findall(r"\( \{ 3 \{ (\w+)_lvl \} \} & line_bit \( (\w+)_LINE \) \)", m.group(1)) if m else []
-rest = re.sub(r"\( \{ 3 \{ \w+_lvl \} \} & line_bit \( \w+_LINE \) \)", '', m.group(1)).replace('|', '').strip() \
-       if m else 'none'
+m = re.search(r'wire \[ 2 : 0 \] line_d = (.*?) ;', wtxt)
+LT = r"\( \{ 3 \{ (\w+)_lvl & line_en \[ E_(\w+) \] \} \} & line_bit \( (\w+)_LINE \) \)"
+terms3 = re.findall(LT, m.group(1)) if m else []
+terms = [(l, b) for l, e, b in terms3]
+rest = re.sub(LT, '', m.group(1)).replace('|', '').strip() if m else 'none'
 check(m is not None and not rest and len(terms) == len(set(t for _, t in terms)) and
-      all(l.upper() == b for l, b in terms) and sorted(b for _, b in terms) == sorted(b for b in ORDS if ORDS[b]),
-      'lw_sys_window: lines is not one term {3{<b>_lvl}} & line_bit(<B>_LINE) per non-zero ordinal: %s %s' %
-      (terms, rest))
+      all(l.upper() == e == b for l, e, b in terms3) and
+      sorted(b for _, b in terms) == sorted(b for b in ORDS if ORDS[b]),
+      'lw_sys_window: line_d is not one term {3{<b>_lvl & line_en[E_<B>]}} & line_bit(<B>_LINE) per non-zero '
+      'ordinal: %s %s' % (terms3, rest))
+WM = modules_of('sys/lw_sys_window.sv', LWALL)['lw_sys_window']
+def asg(M, r):
+    return [(clk, ' '.join(rhs)) for clk, out in M['blocks'] for lhs, rhs, _, _ in out if lhs_names(lhs)[0] == [r]]
+check(re.search(r'assign lines = line_q ;', wtxt) is not None and len(re.findall(r'assign lines =', wtxt)) == 1,
+      'lw_sys_window: lines is not line_q alone')
+check(asg(WM, 'line_q') == [('clk', '{ 3 { live_q } } & line_d')] and 'line_q' in WM['regs'] and
+      'line_q' not in WM['comb'], 'lw_sys_window: line_q is not assigned once, on posedge clk, as {3{live_q}} & line_d: '
+      '%s' % asg(WM, 'line_q'))
+check(re.search(r'assign held = live_q ;', wtxt) is not None and len(re.findall(r'assign held =', wtxt)) == 1,
+      'lw_sys_window: held is not live_q alone')
+lq = asg(WM, 'live_q')
+check(lq and all(c == 'clk' for c, _ in lq) and 'live_q' in WM['regs'] and 'live_q' not in WM['comb'],
+      'lw_sys_window: live_q is not a register assigned only on posedge clk: %s' % lq)
 check(re.search(r"line_bit = \( ord >= 8'd1 && ord <= 8'd3 \) \? \( 3'd1 << \( ord - 8'd1 \) \) : 3'd0 ;",
                 wtxt) is not None, 'lw_sys_window: line_bit(k) is not bit k-1 of the 3 lines')
 pm = re.search(r'wire \[ 31 : 0 \] pending = (.*?) ;', wtxt)

@@ -57,7 +57,7 @@ A core that instantiates its own modules on `HPS_BUS` must widen those ports to 
 
 | macro | default | effect |
 |---|---|---|
-| `MISTER_LW` | off | builds the bridge, the window, the `hps_io` LW path, the OSD shadow and GPI bits 25 and 24 |
+| `MISTER_LW` | off | builds the bridge, the window, the `hps_io` LW path, the OSD shadow and GPI bits 25, 24 and 22 |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH, the analog-drop count and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
@@ -80,10 +80,12 @@ window exists before it touches it:
   so no bitstream without it can show 1. Stock bitstreams leave it 0, and the stock Main never reads bits 21-27.
 - **GPI bit 24** is the firewall's idle state, a register: 1 while it holds no transaction on either channel. It
   toggles with every access, so it means something only to a host that knows it has none of its own in flight.
+- **GPI bit 22** is the window's lease register (below): 1 while a host holds the lease. Reading it changes nothing
+  and can hang nothing, so a program looks here before it takes the link (see "The lease").
 - **The directory** at the window's first word: MAGIC `LWDR`, a directory major the host knows (2), and WIN_BASE
   and WIN_SIZE equal to the token's two numbers; then the entries.
 
-In the ID view (`gp_out[31] = 0`) GPI carries the core magic, which has bits 25 and 24 clear, and an unconfigured
+In the ID view (`gp_out[31] = 0`) GPI carries the core magic, which has bits 25, 24 and 22 clear, and an unconfigured
 FPGA reads all ones, so the bits count only in a sample that also shows bit 31 = 0. Before its first LW access,
 and again after every core load and every bridge or HPS reset (with every cached directory value discarded), a
 host takes **one** GPI sample in the I/O view that shows bit 31 = 0, bit 25 = 1 and bit 24 = 1. Bit 24 = 0 at that
@@ -144,12 +146,15 @@ inside the window or outside it, and an unassigned offset inside a block reads 0
 | `0x0C` | COUNT | entries present, one per block built, at most 31 |
 | `0x10` | WIN_BASE | `0x00040000`: the window's absolute LW offset; equals the token's |
 | `0x14` | WIN_SIZE | `0x00080000`; equals the token's |
-| `0x18` | - | 0 in this revision |
+| `0x18` | LEASE | read/write: the lease (below) |
 | `0x1C` | TIMEBASE | `0x190186A0`: `[23:0]` the bridge clock in kHz (100,000); `[31:24]` = 25, the log2 of a time unit in bridge clocks (2^25 cycles, about 0.34 s) |
-| `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero |
-| `0x24` | - | 0 in this revision |
-| `0x28` | SCRATCH | read/write with `LW_DIAG=1`; 0 otherwise |
-| `0x2C`-`0x3C` | - | 0, reserved |
+| `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero, with or without a lease |
+| `0x24` | OWNED | bit *i* = entry *i*'s block still holds work of an ended lease; 0 in this revision |
+| `0x28` | SCRATCH | read/write with `LW_DIAG=1` (under the lease, like every store); 0 otherwise |
+| `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now; in this revision every listed entry's bit is the lease |
+| `0x30` | LINE_EN | read/write under the lease: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever no lease is held |
+| `0x34` | RESETS | `{freed[15:8], hrst[7:0]}`: the firewall's state machines freed at a reset's release, and the HPS resets the fabric saw; each counts from configuration and stops at 255 |
+| `0x38`-`0x3C` | - | 0, reserved |
 
 **Entries.** Entry *i* is at `header_len + i x entry_stride`, `0x40 + 0x80 x i` in this revision: 8 common words,
 then the kind's own words K0-K23. The table is compact and in ascending kind order, listing only the blocks this
@@ -190,6 +195,70 @@ A minor revision only adds: reserved words that read 0 today, a larger header or
 never reused; a kind's major changes only if one of its registers changes meaning. Reserved bits read 0 and are
 written 0.
 
+### The lease
+
+**No store has effect without the lease, except a store to LEASE itself.** Every other store, to any block or
+header word, is answered and dropped, and LEASE's `stale` bit records it. One program holds the lease at a time,
+and with it the window and the link.
+
+A store to LEASE is a single full-word store `{0x4C57[31:16], id[15:6], verb[5:4], ttl[3:0]}`; any other store to
+it is ignored. `id` is the storing program's own 10-bit lease id; `ttl` 1-15 holds the lease for `ttl` time units
+(TIMEBASE: 2^25 bridge clocks, 0.34 s each, so 0.34 s to 5.03 s); `ttl` 0 or `verb` 0 makes the store ignored.
+
+| verb | effect |
+|---|---|
+| 1 CLAIM | taken only while no lease is held, no HPS reset is seen and GPO bit 31 is 1: `owner` = `id`, `epoch` + 1, the count starts, `stale` and `burst` clear, LINE_EN reads 0 |
+| 2 RENEW | restarts the count, only if the lease is held by `id` |
+| 3 RELEASE | ends the lease now, only if it is held by `id`; `ttl` is ignored |
+
+For id `0x155`: claim for 1 s `0x4C575553`, renew `0x4C575563`, release `0x4C575570`.
+
+A read returns `{held[31], quiet[30], stale[29], burst[28], left[27:24], epoch[23:16], hrst[15], 0, end[13:12],
+idv[11], 0, owner[9:0]}`:
+
+| field | meaning |
+|---|---|
+| `held` | a lease is held; GPI bit 22 shows the same register |
+| `quiet` | a CLAIM may be taken; always 1 in this revision |
+| `stale` | a store other than to LEASE was dropped since the last CLAIM taken |
+| `burst` | a beat of a burst write was dropped since the last CLAIM taken |
+| `left` | the count's top four bits: whole time units left |
+| `epoch` | CLAIMs taken since configuration, modulo 256 |
+| `hrst` | the fabric sees the HPS reset now; no CLAIM is taken while it is 1 |
+| `end` | why the last lease ended: 0 none yet, or a RELEASE; 1 the count ran out; 2 an HPS reset; 3 GPO bit 31 was seen 0 |
+| `idv` | GPO bit 31 reads 0 now (the ID view, or the core reset through GPO); no CLAIM is taken while it is 1 |
+| `owner` | the id of the last CLAIM taken |
+
+The count runs out `ttl` units and one bridge clock after the CLAIM or RENEW that set it; a RENEW in the last cycle
+wins. **When the lease ends**, however it ends, every line falls, LINE_EN and OSDBUF CTRL read 0, the SECTOR block's
+EN bits clear (a primary frame in flight completes, zero-filled from the first word the host did not store, and each
+slot returns to SPI once its frame is done; in this revision a save-slot frame in flight is not filled and waits for
+its remaining words), the open LANE frame is abandoned, queued LANE frames are discarded
+unplayed (one already playing finishes), and reply words still to come are discarded.
+
+**The lease needs the link's I/O view.** GPO bit 31 = 0 ends it and refuses a CLAIM (`end` 3): the identification
+of the core in the ID view does it, and so does the core reset through GPO, whoever performs them. So a dead
+program's lease ends when the next program starts, and a host that holds the lease identifies the core before it
+claims, never leaves the I/O view while it holds it, releases before a core reset through GPO and claims again
+after it.
+
+**A host's procedures:**
+- **Start.** (1) Before its first GPO store and its first link word, read the FPGA manager's GPO register itself
+  (not a software copy: the usual first act, storing GPO = 0, ends a live lease). If bit 31 reads 1, take one GPI
+  sample: bit 31 = 0, bit 25 = 1 and bit 22 = 1 mean another program holds the lease. Then store nothing to GPO and
+  send no link word; stop, or sample until bit 22 reads 0 (at most the longest TTL, 5.1 s), or, if this program is
+  configured as the machine's one LW program, go on and take over by identifying. (2) Identify the core and run
+  discovery. (3) Read LEASE: `held` means another program claimed meanwhile: stop. (4) Store CLAIM with the host's
+  own id, read LEASE, and require `held` and `owner` = its id; remember `epoch`. (5) Read OPEN until the bits of the
+  entries it serves are set. (6) Store LINE_EN with those entries' bits, and re-store every pad level.
+- **Refresh** every quarter of the TTL, from a thread that may be late (never the real-time one): sample GPI (bit
+  31 = 0, bit 25 = 1), store RENEW, read LEASE, and require `held`, `owner` = its id and the remembered `epoch`.
+  Otherwise the lease has ended and `end` says why: every thread stops storing at once and the host starts over. It
+  never releases a lease it no longer holds.
+- **Exit:** store RELEASE with its id. Before a core load or a bridge reset, release at once.
+- A second program that takes the lease by RELEASE with the `owner` it read, then CLAIM, takes it on purpose. The id
+  is an accident guard, not a secret; one program owns the window and core loading, or the two coordinate.
+
 ### Interrupt lines
 
 A line is declared in one place: the LINE word of the entry it serves. Ordinal *k* is `f2h_irq[7 + k]`, the GIC's
@@ -202,8 +271,10 @@ shared interrupt 47 + *k*, and no two entries name the same ordinal.
 | 3-15 | `f2h_irq[10]`-`[22]` | 50-62 | framework kinds to come |
 | 16-31 | `f2h_irq[23]`-`[38]` | 63-78 | a core's own kinds |
 
-A line is high while its entry's CAUSE word is non-zero: configure it level-sensitive, active high, at the
-interrupt controller (`IRQ_TYPE_LEVEL_HIGH` in a Linux device tree). The HPS kernel must expose it to userspace (for
+A line is a register, high while the lease is held, its entry's LINE_EN bit is set and its CAUSE word is non-zero;
+it falls only when one of the three stops being true, and never pulses per event. Configure it level-sensitive,
+active high, at the interrupt controller (`IRQ_TYPE_LEVEL_HIGH` in a Linux device tree): a raise in the cycle of a
+store-back keeps the line high, so an edge-triggered input would see no new edge after it. The HPS kernel must expose it to userspace (for
 example as a `uio_pdrv_genirq` node); a host without one polls PENDING instead. A CAUSE word's `[15:0]` are event
 bits, each raised by every occurrence of its event, and `[31:16]` read 0; the word is 0 when nothing is pending.
 **Reads change nothing**, in any size or burst. **A full 32-bit store clears each bit written as 1**; a bit raised
@@ -240,7 +311,7 @@ A shadow of `osd_buffer` in each `osd` instance (HDMI and VGA), written over the
 | offset | register | |
 |---|---|---|
 | `0x0000`-`0x0FFF` | IMAGE | byte at `row * 256 + column` (row 0-15), `osd_buffer`'s layout: one byte = 8 vertical pixels. Byte enables honoured |
-| `0x1000` | CTRL | `[0]` LWSEL: video reads the shadow instead of `osd_buffer`. `[1]` HR: with LWSEL, the 16-row (highres) size |
+| `0x1000` | CTRL | `[0]` LWSEL: video reads the shadow instead of `osd_buffer`. `[1]` HR: with LWSEL, the 16-row (highres) size. Reads 0 whenever no lease is held |
 | `0x1004` | ID | `0x3144534F` ("OSD1") |
 
 - **Still on SPI:** enable/disable, the info box, rotation and `osd_status`.
@@ -470,6 +541,13 @@ It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image t
 
 The SECTOR arms use a reference CD-style configuration: a 588-word primary on slot 1, and 1 KB cards on slots 2
 and 3. They cover:
+- the lease: every store dropped without it, each verb's refusals, the expiry at 1, 2 and 15 units to the cycle,
+  a RENEW swept across the last live cycle, each way a lease ends with its code, two programs with different ids,
+  the look at GPO and GPI bit 22 before identifying, a takeover, a stock start beside a live host, the SECTOR and
+  LANE blocks in every state when a lease runs out (with `clk_sys` running and stopped), and RESETS against a model
+  of the firewall;
+- the lines as levels, compared every cycle with `lease & LINE_EN & cause`: a raise in the cycle of a store-back
+  keeps the line high, and a host woken only by the level serves every event across 10,000 random interleavings;
 - the directory word by word, a host's walk of it (and of altered copies: other majors, entries to skip, a shared
   ordinal, a larger header and stride), and each entry's cause on its own PENDING bit and line;
 - the window's decode: every 4 KB page of the 2 MB reads its block or `0xDEADBEEF`, and a store outside every block
