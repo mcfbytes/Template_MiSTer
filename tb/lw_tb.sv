@@ -102,9 +102,29 @@ function [31:0] dg(input [31:0] v); dg = DIAG ? v : 32'd0; endfunction
 reg clk = 0;            // clk_100m
 always #5 clk = ~clk;
 
-reg sys_run = 1;        // 0 = core held in reset with clk_sys stopped
-reg clk_sys = 0;        // 33.8688 MHz: inside the reject path's clock-ratio bound (docs/LW_BRIDGE.md)
-always #14.7625 if (sys_run) clk_sys = ~clk_sys;
+// clk_sys: half period LW_TB_SYS_HP_PS (default 33.8688 MHz), stretched by 50 ppm so its phase against clk_100m
+// sweeps at every rate, 100 MHz included. Edges are placed from an accumulated real time, so the 1 ps
+// precision does not round the offset away.
+`ifndef LW_TB_SYS_HP_PS
+`define LW_TB_SYS_HP_PS 14762
+`endif
+localparam real SYS_HP_NS = `LW_TB_SYS_HP_PS * 1.00005 / 1000.0;
+localparam real SYS_MHZ   = 500.0 / SYS_HP_NS;
+// A wait for clk_sys progress written in clk_100m cycles spans as many clk_sys cycles at a slower rate as at the
+// default one: slow(n) stretches it by the ratio, and returns n unchanged at the default rate and above.
+localparam real SYS_SLOW  = `LW_TB_SYS_HP_PS > 14762 ? `LW_TB_SYS_HP_PS / 14762.0 : 1.0;
+function integer slow(input integer n); slow = SYS_SLOW > 1.0 ? $rtoi($itor(n) * SYS_SLOW + 0.999) : n; endfunction
+reg      sys_run = 1;   // 0 = core held in reset with clk_sys stopped
+reg      clk_sys = 0;
+realtime sys_t;
+initial begin
+	sys_t = 0;
+	forever begin
+		sys_t = sys_t + SYS_HP_NS;
+		#(sys_t - $realtime);
+		if (sys_run) clk_sys = ~clk_sys;
+	end
+end
 
 // AXI3 master side, read by the stub atom
 reg [11:0] awid = 0, arid = 0;
@@ -112,6 +132,7 @@ reg [20:0] awaddr = 0, araddr = 0;
 reg  [3:0] awlen = 0, arlen = 0;
 reg  [2:0] awsize = 2, arsize = 2;
 reg  [2:0] rsize = 2;   // ARSIZE used by axi_read
+reg  [1:0] arburst = 2'b01, awburst = 2'b01;   // INCR unless a case sets another type
 reg        awvalid = 0, wvalid = 0, wlast = 1, bready = 1, arvalid = 0, rready = 1;
 reg [31:0] wdata = 0;
 reg  [3:0] wstrb = 4'hF;
@@ -244,6 +265,8 @@ wire arready = bridge.hps2fpga_light_weight.arready;
 wire rvalid  = bridge.hps2fpga_light_weight.rvalid;
 wire rlast   = bridge.hps2fpga_light_weight.rlast;
 wire [31:0] rdata = bridge.hps2fpga_light_weight.rdata;
+wire [11:0] rid   = bridge.hps2fpga_light_weight.rid;
+wire [11:0] bid   = bridge.hps2fpga_light_weight.bid;
 
 // HPS_BUS as sys_top wires it: {st_up, card_up/dn, blk_up, blk_dn, lw_pad, ...}; the SPI side is driven by the tb (io_*)
 reg         io_enable = 0, io_strobe = 0;
@@ -454,6 +477,10 @@ task axi_write(input [20:0] a, input [31:0] d, input [3:0] s);
 	end
 endtask
 
+// Every beat of the last read: its data and its ID (ARBURST is the arburst register's).
+reg [31:0] rb_d  [0:15];
+reg [11:0] rb_id [0:15];
+
 task axi_read(input [20:0] a, input [3:0] len, output [31:0] d0, output [31:0] dl, output integer beats);
 	integer n;
 	reg ar_hs, done;
@@ -473,11 +500,40 @@ task axi_read(input [20:0] a, input [3:0] len, output [31:0] d0, output [31:0] d
 		done = !rvalid;
 		while (!done) begin
 			if (rvalid) begin
+				if (beats < 16) begin rb_d[beats] = rdata; rb_id[beats] = rid; end
 				beats = beats + 1; dl = rdata;
 				done = rlast;
 			end
 			@(negedge clk);
 		end
+	end
+endtask
+
+// A write burst of len + 1 beats and type bt (data a pattern, all strobes): AW and the first W together, one
+// beat per W handshake, WLAST on the last. nb counts the write responses until 16 cycles after the first.
+task axi_wburst(input [20:0] a, input [3:0] len, input [1:0] bt, output integer nb);
+	integer n, q;
+	reg [3:0] k;
+	reg aw_hs, w_hs;
+	begin
+		@(negedge clk);
+		awaddr = a; awlen = len; awsize = 2; awburst = bt; awvalid = 1;
+		k = 0; wdata = 32'hB0057000; wstrb = 4'hF; wlast = (len == 4'd0); wvalid = 1;
+		n = 0; nb = 0; q = -1;
+		while (n <= 64 && (q < 0 || n < q + 16)) begin
+			aw_hs = awvalid & awready; w_hs = wvalid & wready;
+			if (bvalid) begin nb = nb + 1; if (q < 0) q = n; end
+			@(negedge clk); n = n + 1;
+			if (aw_hs) awvalid = 0;
+			if (w_hs) begin
+				if (k == len) wvalid = 0;
+				else begin k = k + 4'd1; wdata = {28'hB005700, k}; wlast = (k == len); end
+			end
+		end
+		awvalid = 0; wvalid = 0; awlen = 0; awburst = 2'b01; wlast = 1;
+		checks = checks + 1;
+		if (k != len) begin fails = fails + 1; $display("FAIL write burst %06h: %0d of %0d beats taken", a, k + 1, len + 1); end
+		@(negedge clk);
 	end
 endtask
 
@@ -492,7 +548,50 @@ task rd(input string what, input [20:0] a, input [31:0] exp);
 	begin axi_read(a, 0, d, dl, beats); check(what, d, exp); end
 endtask
 
-task settle; repeat (100) @(negedge clk); endtask
+task settle; repeat (slow(100)) @(negedge clk); endtask
+
+// The word a beat of a read burst must carry: wref[] holds the single-read words of 0x40000 .. 0x400FC.
+reg [31:0] wref [0:63];
+function [20:0] beat_addr(input [20:0] a, input [3:0] len, input [1:0] bt, input [3:0] j);
+	reg [20:0] sz, lo;
+	begin
+		sz = {13'd0, {2'b00, len} + 6'd1, 2'b00};
+		lo = a & ~(sz - 21'd1);
+		case (bt)
+			2'b00:   beat_addr = a;
+			2'b10:   beat_addr = lo + ((a - lo + {15'd0, j, 2'b00}) % sz);
+			default: beat_addr = a + {15'd0, j, 2'b00};
+		endcase
+	end
+endfunction
+
+// One read burst against wref[]: the beat count (so RLAST came on the last beat), every beat's word and ID.
+task burst_vs_ref(input string what, input [20:0] a, input [3:0] len, input [1:0] bt);
+	integer j, nb, nbad, nbad_id;
+	reg [20:0] ba;
+	reg  [5:0] wi;
+	begin
+		arburst = bt; arid = {8'h5A, len};
+		axi_read(a, len, d, dl, beats);
+		arburst = 2'b01; arid = 0;
+		nb = len;
+		nb = nb + 1;
+		check({what, ": beats"}, beats, nb);
+		if (beats < nb) nb = beats;
+		nbad = 0; nbad_id = 0;
+		for (j = 0; j < nb; j = j + 1) begin
+			ba = beat_addr(a, len, bt, j[3:0]);
+			wi = ba[7:2];
+			if (rb_d[j] !== wref[wi]) begin
+				if (nbad == 0) $display("     %s: beat %0d at %06h got %08h exp %08h", what, j, ba, rb_d[j], wref[wi]);
+				nbad = nbad + 1;
+			end
+			if (rb_id[j] !== {8'h5A, len}) nbad_id = nbad_id + 1;
+		end
+		check({what, ": stepped words"}, nbad, 0);
+		check({what, ": ID echoed on every beat"}, nbad_id, 0);
+	end
+endtask
 
 
 localparam [20:0] SEC = 21'h41000;
@@ -521,9 +620,14 @@ endfunction
 task sec_wr(input [20:0] off, input [31:0] v); axi_write(SEC + off, v, 4'hF); endtask
 task sec_data(input integer i, input [31:0] v); axi_write(SEC + 21'h1000 + 4*i, v, 4'hF); endtask
 
+// Below the default clk_sys rate the host model paces its DATA stores by the rate ratio, so a frame fills the
+// FIFO no further than it does at the default rate; drops and resends have their own cases.
 task frame_data(input [31:0] lba, input integer from, input integer to);
 	integer m;
-	for (m = from; m < to; m = m + 1) sec_data(m, pat(lba, m));
+	for (m = from; m < to; m = m + 1) begin
+		sec_data(m, pat(lba, m));
+		repeat (slow(5) - 5) @(negedge clk);
+	end
 endtask
 
 task cd_request(input [31:0] lba);
@@ -937,10 +1041,24 @@ task lane_pop(output [15:0] w);
 endtask
 `endif
 
+// The arm's clk_sys rate, measured over 1000 periods.
+task sys_rate;
+	realtime t0;
+	begin
+		@(posedge clk_sys) t0 = $realtime;
+		repeat (1000) @(posedge clk_sys);
+		$display("-- clk_sys %0.4f MHz (half period %0d ps + 50 ppm), measured %0.4f", SYS_MHZ, `LW_TB_SYS_HP_PS,
+		         1000.0 * 1000.0 / ($realtime - t0));
+		t0 = ($realtime - t0) * 1000.0 - 2000.0 * `LW_TB_SYS_HP_PS * 1.00005;
+		check("clk_sys: 1000 periods within 1 ps of 2 x LW_TB_SYS_HP_PS x 1.00005", {31'd0, t0 < -1.0 || t0 > 1.0}, 0);
+	end
+endtask
+
 `ifdef MENU_CORE
 integer f;
 initial begin
 	repeat (4) @(negedge clk);
+	sys_rate;
 	$display("-- MENU_CORE: the header rows never read the shadow");
 	for (r = 0; r < 19; r = r + 1) spi_osd_row(r, 3);
 	for (r = 0; r < 16; r = r + 1) lw_row(r, 3);
@@ -961,6 +1079,7 @@ end
 // than the primary's completes, and the shared feeder still serves the primary after it.
 initial begin
 	repeat (4) @(negedge clk);
+	sys_rate;
 	$display("-- default geometry: a %0d-word primary, 256-word save slots", TB_FRAME);
 	rd("e1 slot/frame 128", 21'h40060, 32'h01000080);
 	rd("e1 w7 card 1 slot/flags/frame 256", 21'h4006C, 32'h02030100);
@@ -1012,6 +1131,7 @@ end
 `else
 initial begin
 	repeat (4) @(negedge clk);
+	sys_rate;
 
 	// `SYS_LW_CAPS carries its own concatenation comma, so it is read inside {} with a closing ";"
 	checks = checks + 1;
@@ -1140,6 +1260,47 @@ initial begin
 	check("burst beats", beats, 4);
 	check("burst last (scratch)", dl, dg(32'hA5C35A5A));
 
+	$display("-- firewall: read bursts of every type step their words; a burst across 4 KB is answered");
+	for (i = 0; i < 64; i = i + 1) begin axi_read(21'h40000 + {13'd0, i[5:0], 2'b00}, 0, d, dl, beats); wref[i] = d; end
+	burst_vs_ref("INCR 2",  21'h40008, 4'd1,  2'b01);
+	burst_vs_ref("INCR 4",  21'h40010, 4'd3,  2'b01);
+	burst_vs_ref("INCR 8",  21'h40024, 4'd7,  2'b01);
+	burst_vs_ref("INCR 16", 21'h40040, 4'd15, 2'b01);
+	burst_vs_ref("FIXED 4",  21'h40014, 4'd3,  2'b00);
+	burst_vs_ref("FIXED 16", 21'h40000, 4'd15, 2'b00);
+	burst_vs_ref("WRAP 2 from the second word",  21'h40054, 4'd1,  2'b10);
+	burst_vs_ref("WRAP 4 from the third word",   21'h40018, 4'd3,  2'b10);
+	burst_vs_ref("WRAP 8 from the eighth word",  21'h4005C, 4'd7,  2'b10);
+	burst_vs_ref("WRAP 16 from the sixth word",  21'h40094, 4'd15, 2'b10);
+	burst_vs_ref("WRAP 16 from its first word",  21'h400C0, 4'd15, 2'b10);
+	burst_vs_ref("reserved burst type 3, 4 beats", 21'h40030, 4'd3, 2'b11);
+	arburst = 2'b10; axi_read(21'h40004, 4'd2, d, dl, beats); arburst = 2'b01;
+	check("WRAP of an illegal length (3 beats) answered", beats, 3);
+	axi_read(21'h40FF8, 4'd3, d, dl, beats);
+	check("INCR across a 4 KB boundary inside the window answered", beats, 4);
+	axi_read(21'h3FFF8, 4'd15, d, dl, beats);
+	check("INCR 16 across the window's first 4 KB boundary answered", beats, 16);
+	check("... its first beat is the default responder's", rb_d[0], 32'hDEADBEEF);
+	axi_read(21'h1FFFF8, 4'd3, d, dl, beats);
+	check("INCR across the top of the 2 MB answered", beats, 4);
+	arburst = 2'b00; axi_read(21'h1FFFFC, 4'd15, d, dl, beats); arburst = 2'b01;
+	check("FIXED 16 at the last word answered", beats, 16);
+	for (i = 0; i < 4; i = i + 1) begin
+		awid = {10'h0F0, i[1:0]};
+		axi_wburst(21'h000100, 4'd3, i[1:0], beats);
+		check($sformatf("undecoded write burst, type %0d: one response", i), beats, 1);
+		check($sformatf("undecoded write burst, type %0d: BID echoed", i), {20'd0, bid}, {22'd0, 8'hF0, i[1:0]});
+	end
+	axi_wburst(21'h1FFFF8, 4'd15, 2'b01, beats);
+	check("write burst across the top of the 2 MB: one response", beats, 1);
+	awid = 0;
+	bad = 0;
+	for (i = 0; i < 64; i = i + 1) begin
+		axi_read(21'h40000 + {13'd0, i[5:0], 2'b00}, 0, d, dl, beats);
+		if (d !== wref[i]) bad = bad + 1;
+	end
+	check("the directory reads the same after every burst", bad, 0);
+
 	$display("-- clk_sys stopped (core held in reset)");
 	sys_run = 0;
 	rd("magic, clk_sys stopped", 21'h40000, 32'h31535953);
@@ -1153,7 +1314,7 @@ initial begin
 	rd("undecoded, clk_sys stopped", 21'h1FFFFC, 32'hDEADBEEF);
 	check("joystick_0 unchanged while stopped", joy0, 32'h0000A0A0);
 	rd("analog drops (16 queued of 20, a pad store in flight)", pad_addr(8'h1A, 0), dg(32'd4));
-	sys_run = 1; repeat (300) @(negedge clk);
+	sys_run = 1; repeat (slow(300)) @(negedge clk);
 	check("joystick_0 last of 5 lands on restart", joy0, 32'h00000005);
 	check("joystick_1 release (last) lands on restart", joy1, 32'h00000000);
 	check("analog_0 last left queued lands on restart", {16'd0, ana0}, 32'h0000000A);
@@ -1257,7 +1418,7 @@ initial begin
 	frame_data(32'h00001236, 0, 100);
 	frame_data(32'h00001236, 101, 588);
 	rd("ACCEPT !ok, first_drop 100", SEC + 21'h18, 32'h00000064);
-	repeat (2000) @(negedge clk);
+	repeat (slow(2000)) @(negedge clk);
 	check("frame held open (the CD reader waits)", cd_frames, n0);
 	frame_data(32'h00001236, 100, 588);
 	rd("ACCEPT ok after resend", SEC + 21'h18, 32'h8000024C);
@@ -1280,7 +1441,7 @@ initial begin
 	rd("ID, clk_sys stopped", SEC + 21'h38, 32'h32434553);
 	rd("undecoded, clk_sys stopped", 21'h1FFFFC, 32'hDEADBEEF);
 	sys_run = 1;
-	repeat (8000) @(negedge clk);
+	repeat (slow(8000)) @(negedge clk);
 	frame_data(32'h00001237, 512, 588);
 	rd("ACCEPT ok after resend (drops kept)", SEC + 21'h18, 32'h804C024C);
 	wait_frame(n0);
@@ -1305,7 +1466,7 @@ initial begin
 	sec_wr(21'h0C, 32'h00001239);
 	fork
 		frame_data(32'h00001239, 0, 588);
-		begin repeat (100) @(negedge clk); spi_sector(16'h0217, 256, 16'h7700, 3); end
+		begin repeat (slow(100)) @(negedge clk); spi_sector(16'h0217, 256, 16'h7700, 3); end
 	join
 	rd("ACCEPT ok", SEC + 21'h18, 32'h8000024C);
 	wait_frame(n0);
@@ -1360,7 +1521,7 @@ initial begin
 	rd("CTRL TEST bit", SEC + 21'h10, DIAG ? 32'h9 : 32'h1);
 	sec_wr(21'h0C, 32'h00ABCDEF);
 	frame_data(32'h00ABCDEF, 0, 588);
-	repeat (8000) @(negedge clk);
+	repeat (slow(8000)) @(negedge clk);
 	rd("SUM", SEC + 21'h34, dg(frame_sum(32'h00ABCDEF, 588)));
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("TEST frame counted", d[31:16] - d0[31:16], dg(1));
@@ -1595,7 +1756,7 @@ initial begin
 	rd("REQ idle after all three", SEC + 21'h04, 32'd0);
 	check("no ring left after all three", doorbell, 0);
 
-	$display("-- adjacent rejects of two slots at 33.87 MHz clk_sys: both requests re-open");
+	$display("-- adjacent rejects of two slots: both requests re-open");
 	r = mc1.done; s0 = mc2.done;
 	mc1.go(0, 7'h24);
 	mc2.go(0, 7'h34); settle;
@@ -1638,7 +1799,7 @@ initial begin
 	rd("SYS ID STS1", SYSB + 21'h1C, 32'h31535453);
 	check("SYS line low at reset", sys_irq, 0);
 	rd("SYS CAUSE idle", SYSB, 32'd0);
-	rd("SYS STFLG at reset", SYSB + 21'h04, 32'h0000000A0);
+	rd("SYS STFLG at reset", SYSB + 21'h04, 32'h000000A0);
 	st_req(st_pat(1));
 	settle;
 	check("SYS line raised by status_set", sys_irq, 1);
