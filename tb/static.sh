@@ -31,6 +31,7 @@
 #      same module, clocked there and not on the destination clock, named *_lwx (GRAY 0) or *_lwgray (GRAY 1),
 #      each declared with a preserve attribute (in lw_cdc.sv, also a cell's own toggles, and lw_arst's chain,
 #      whose rise is asynchronous, into its own clock); every register so named feeds one. An lw_xfer's s_go and s_d are on its s_clk.
+#      An lw_fence's live, claim, drain and fin are on its clk and its rest on its clk_sys.
 #   6. Every *_lwgray register is one of the Gray buses and is assigned once, unconditionally, as g <= b ^ (b >> 1).
 #   7. No clocked block outside the cells reads, directly or through nets, a register or an input on another
 #      clock (input clocks from PORTDOM) other than through a cell's output, beside the listed reads
@@ -607,7 +608,9 @@ def domains(M):
     cell = {}
     for mod, _, _, con in M['insts']:
         outs = {'lw_sync': [('q', 'clk')], 'lw_xfer': [('d_q', 'd_clk'), ('d_v', 'd_clk'), ('s_busy', 's_clk')],
-                'lw_arst': [('q', 'clk')]}.get(mod, [])
+                'lw_arst': [('q', 'clk')],
+                'lw_fence': [('lease_s', 'clk_sys'), ('open', 'clk'), ('owned', 'clk'), ('idle', 'clk'),
+                             ('lvl', 'clk'), ('fall', 'clk')]}.get(mod, [])
         for o, c in outs:
             for nm in lhs_names(con.get(o, []))[0]: cell[nm] = ''.join(con.get(c, []))
     clocks = {c for c, _ in M['blocks']}
@@ -683,7 +686,7 @@ if check(xfer is not None, '%s: no lw_xfer' % CDC):
         check(d is not None and len(d) == 1 and d[0].startswith('lwsrc_') and d[0] in reg,
               'lw_xfer: the capture\'s D is %s, not a source hold register' % ' '.join(q[0][3].get('d', [])))
 # rule 2: every lw_sync's D is a named source register of its own module; lw_qstat only in lw_xfer; lw_arst inputs
-nsrc, nsync, fed = 0, 0, set()
+nsrc, nsync, nfence, fed = 0, 0, 0, set()
 for n, M in sorted(mods.items()):
     reg, cell, port = domains(M)
     for mod, inst, par, con in M['insts']:
@@ -698,6 +701,13 @@ for n, M in sorted(mods.items()):
             src = {s for x in ('s_go', 's_d') for m in idents(con.get(x, [])) for s in sources(M, reg, cell, port, m)}
             far = sorted('%s (%s)' % s for s in src if s[1] != c)
             check(not far, '%s: s_go and s_d read %s, not on s_clk %s' % (where, ' '.join(far), c))
+        if mod == 'lw_fence':
+            nfence += 1
+            for side, ins in (('clk', ('live', 'claim', 'drain', 'fin')), ('clk_sys', ('rest',))):
+                c = ''.join(con.get(side, []))
+                src = {x for p_ in ins for m in idents(con.get(p_, [])) for x in sources(M, reg, cell, port, m)}
+                far = sorted('%s (%s)' % x for x in src if x[1] != c)
+                check(not far, '%s: the inputs on its %s side read %s, not on %s' % (where, side, ' '.join(far), c))
         if mod != 'lw_sync': continue
         nsync += 1
         d, dst = plain_ref(con.get('d', [])), ''.join(con.get('clk', []))
@@ -755,8 +765,9 @@ for n, M in sorted(mods.items()):
         check(False, '%s: %s on %s reads %s on %s with no cell between' % (n_, t, clk, s, c))
 for a in sorted(XREAD_ALLOW - seen_allow):
     check(False, '%s: the listed read of %s by %s is gone; take it off the list' % (a[0], a[2], a[1]))
-print('crossing structure: %d lw_sync instances, %d source registers, %d listed reads across clocks' %
-      (nsync, nsrc, len(seen_allow)))
+print('crossing structure: %d lw_sync instances, %d source registers, %d lease links, %d listed reads across '
+      'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
+check(nfence == 2, 'lease links: %d lw_fence instances, not one each in lw_sector and lw_lane' % nfence)
 
 # ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
 print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')

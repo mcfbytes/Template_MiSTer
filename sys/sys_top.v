@@ -1984,7 +1984,7 @@ lw_sys_window #(
 	.osd_be(lw_osd_be),
 	.osd_ctrl(lw_osd_ctrl),
 `ifdef LW_LANE_LINK
-	.lane_busy(|link_sel),
+	.lane_busy(|link_sel | ~gp_outr[31]),   // a select, or the ID view: no lane frame starts
 	.lane_wait(io_wait | vs_wait),
 	.lane_dout(io_dout | io_dout_sys),
 	.lane_own(lane_own),

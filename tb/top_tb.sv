@@ -379,6 +379,19 @@ initial begin
 	gpi_on = 1;
 	lw_read(21'h40018, d);
 	check("LEASE: not held, end 3 (GPO[31] seen low)", {d[31], d[13:12]}, {1'b0, 2'd3});
+`ifdef MISTER_LW_LANE
+	$display("-- the link's ID view reaches the lane player's busy input");
+	check("the I/O view, no select: the player's busy input", dut.lw_sys_window.lane_busy, 1'b0);
+	gp_out[31] = 1'b0; sys_cycles(3);
+	check("GPO[31] low: the player's busy input", dut.lw_sys_window.lane_busy, 1'b1);
+	check("GPO[31] low: the lane's own input", dut.lw_sys_window.lane.lane.l_busy, 1'b1);
+	gp_out[31] = 1'b1; sys_cycles(3);
+	check("GPO[31] high again: not busy", dut.lw_sys_window.lane_busy, 1'b0);
+`endif
+	// the next CLAIM waits for the lease links' return: LEASE.quiet
+	k = 0; d = 0;
+	while (!d[30] && k < 200) begin lw_read(21'h40018, d); k = k + 1; end
+	check("the lease links returned: quiet", d[30], 1'b1);
 	lw_write(21'h40018, {16'h4C57, 10'h2A7, 2'd1, 4'd15});
 	repeat (4) @(negedge clk_100m);
 	check("claimed again: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b1);
