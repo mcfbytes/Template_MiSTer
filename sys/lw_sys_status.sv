@@ -21,8 +21,10 @@
 // SYS block (LW directory kind 4, "STS1"): the core->host status back-channel (hps_io's 0x29) as a
 // cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG, the four
 // STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
-// clk_sys side: hps_io's stflg as a registered Gray code. clk_100m side: the Gray code synchronised,
-// a capture of status_req on every change of it (SEQ counts captures), the CAUSE word and its line.
+// clk_sys side: hps_io's stflg as a registered Gray code. clk_100m side: the Gray code through lw_sync
+// (lw_cdc.sv), a capture of status_req on every change of it (SEQ counts captures), the CAUSE word and its line.
+// The capture reads status_req across the clocks with no cell: it relies on the words being stable from before
+// the flag moves until after the flag is seen, and is the one such read tb/static.sh lists.
 // Bridge side has no reset and answers every address in fixed cycles (no back-pressure).
 // Clock-ratio bound of the crossing: docs/LW_BRIDGE.md.
 
@@ -47,23 +49,21 @@ module lw_sys_status
 localparam [31:0] TAG_SYS   = 32'h0010_0000;   // cause word [23:16] one-hot: bit 20 = SYS
 localparam [15:0] C_STATUS  = 16'h0001;
 
-`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
-
 /////////////////////////////// clk_sys ///////////////////////////////////
 
-reg  [3:0] st_g = 0;
-always @(posedge clk_sys) st_g <= stflg ^ (stflg >> 1);
+(* preserve *) reg [3:0] stflg_lwgray = 0;
+always @(posedge clk_sys) stflg_lwgray <= stflg ^ (stflg >> 1);
 
 /////////////////////////////// clk_100m //////////////////////////////////
 
-`LW_SYNC reg [3:0] g_s0 = 0;
-`LW_SYNC reg [3:0] g_s1 = 0;
+wire [3:0] g_s;
+lw_sync #(.W(4), .GRAY(1)) flg_sync(.clk(clk), .d(stflg_lwgray), .q(g_s));
 
 function automatic [3:0] g2b(input [3:0] g);
 	g2b = {g[3], ^g[3:2], ^g[3:1], ^g[3:0]};
 endfunction
 
-wire  [3:0] flg_s = g2b(g_s1);
+wire  [3:0] flg_s = g2b(g_s);
 
 reg   [3:0] flg  = 0;          // the snapshot's flag
 reg  [15:0] seq  = 0;          // captures since configuration
@@ -76,7 +76,6 @@ wire        rd_cause = rsel && raddr[9:2] == 8'h00 && rd_word;
 wire        clr      = rd_cause & rd_ack & (gen == cgen);
 
 always @(posedge clk) begin
-	{g_s1, g_s0} <= {g_s0, st_g};
 	if (capture) begin
 		flg  <= flg_s;
 		seq  <= seq + 16'd1;
@@ -103,8 +102,6 @@ always @(*) begin
 		default: rdata = 32'd0;
 	endcase
 end
-
-`undef LW_SYNC
 
 endmodule
 

@@ -25,6 +25,9 @@
 // takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1.
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
+// Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
+// (sys_lwx), each through lw_sync (lw_cdc.sv); a frame's SUM (DIAG) through lw_xfer. The request LBAs are latched on clk_100m straight from the core's
+// clk_sys registers, relying on their being stable while the request stands: the one such read tb/static.sh lists.
 // Bridge side has no reset and answers in fixed cycles (no back-pressure); a full FIFO drops the store and
 // counts it. Clock-ratio bound of the reject path: docs/LW_BRIDGE.md.
 // DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:4], DROPS, COUNTS, GEN, TSTAMP_*, CYCLES, SUM and TEST:
@@ -72,8 +75,6 @@ localparam [15:0] SDSTAT = {1'b1, 6'd0, BLKSZ, SLOT[3:0], 1'b0, 1'b1};
 localparam [3:0]  PSLOT  = SLOT[3:0];
 localparam [1:0]  T_DATA = 2'd0, T_BEGIN = 2'd1, T_ABORT = 2'd2;
 
-`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
-
 // Servable geometry: frames of 1-1023 words; a save-slot frame of at most 256 words (the 9-bit strobe address).
 // synthesis translate_off
 initial if (FRAME == 0 || XFRAME == 0 || XFRAME > 256) begin
@@ -88,12 +89,11 @@ localparam DEPTH = 1 << AW;
 
 (* ramstyle = "M10K" *) reg [43:0] fram [0:DEPTH-1];
 
-reg  [AW:0] wptr = 0, wgray = 0;
-reg  [AW:0] rptr = 0, rgray = 0;
-`LW_SYNC reg [AW:0] rg_s0 = 0;
-`LW_SYNC reg [AW:0] rg_s1 = 0;
-`LW_SYNC reg [AW:0] wg_s0 = 0;
-`LW_SYNC reg [AW:0] wg_s1 = 0;
+reg  [AW:0] wptr = 0;
+reg  [AW:0] rptr = 0;
+(* preserve *) reg [AW:0] sector_w_lwgray = 0;   // clk_100m
+(* preserve *) reg [AW:0] sector_r_lwgray = 0;   // clk_sys
+wire [AW:0] rg_s, wg_s;
 
 function automatic [AW:0] g2b(input [AW:0] g);
 	integer n;
@@ -103,7 +103,7 @@ function automatic [AW:0] g2b(input [AW:0] g);
 	end
 endfunction
 
-wire [AW:0] used  = wptr - g2b(rg_s1);
+wire [AW:0] used  = wptr - g2b(rg_s);
 wire        ffull = used[AW];
 
 /////////////////////////////// clk_100m //////////////////////////////////
@@ -116,15 +116,16 @@ reg         em = 0, qv = 0, tmode = 0;
 reg   [1:0] ph = 0, ackc = 0;
 reg  [15:0] hi = 0;
 reg  [43:0] q;
-reg  [19:0] fsum = 0, sum_l = 0;
+reg  [19:0] fsum = 0;
 reg   [4:0] evt = 0;                // {done, reset_fill, abort, skip, reject} toggles
 
 reg         pending = 0;
 reg  [31:0] gen = 0, tsreq = 0, tsdone = 0, cycles = 0;
 reg   [3:0] snap = 0;
 reg  [31:0] lba = 0;
-reg         en = 0, test = 0;
-reg   [1:0] xen = 0;                // CTRL[4+XSLOT0], CTRL[4+XSLOT1]
+(* preserve *) reg       en_lwx   = 0;   // CTRL[0]
+(* preserve *) reg       test_lwx = 0;   // CTRL[3]
+(* preserve *) reg [1:0] xen_lwx  = 0;   // CTRL[4+XSLOT0], CTRL[4+XSLOT1]
 reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the open request entered the FIFO
 reg   [2:0] btag = 0;               // per slot: toggled by each BEGIN/WACK entering, carried in its entry
 reg  [13:0] xlba = 0;
@@ -134,13 +135,15 @@ reg         bfail = 0;
 reg  [15:0] drops = 0, frames = 0;
 reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
-reg  [19:0] sum = 0;
+wire [19:0] sum;
 
 // clk_sys -> clk_100m: request levels, status bits, event toggles, the rejected answer's {tag, slot}
-wire [16:0] sys_bits;
-`LW_SYNC reg [16:0] sb0 = 0;
-`LW_SYNC reg [16:0] sb1 = 0;
+(* preserve *) reg [16:0] sys_lwx = 0;
+wire [16:0] sb1;
 reg  [16:0] sb2 = 0;
+
+lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(sector_r_lwgray), .q(rg_s));
+lw_sync #(.W(17)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
 wire        req_s = sb1[0];
 wire        req_rise = sb1[0] & ~sb2[0];
 wire  [3:0] st_s = sb1[4:1];          // {rejecting, streaming, ack, en_sys}
@@ -152,7 +155,7 @@ wire  [1:0] xrise  = xreq_s & ~({sb2[13], sb2[11]} | {sb2[12], sb2[10]});
 wire  [1:0] rjslot = sb1[15:14];   // the rejected BEGIN/WACK's slot and tag: stable a clk_sys cycle
 wire        rjtag  = sb1[16];      // before ev[0] (the reject toggle, synced in every build) moves
 wire  [2:0] rjsel  = (rjslot == 2'd0) ? 3'b001 : (rjslot == 2'd1) ? 3'b010 : (rjslot == 2'd2) ? 3'b100 : 3'b000;
-wire  [2:0] cand   = {xreq_s & xen, req_s & en} & ~ans;
+wire  [2:0] cand   = {xreq_s & xen_lwx, req_s & en_lwx} & ~ans;
 wire        any    = |cand;
 wire  [1:0] pick   = cand[0] ? 2'd0 : cand[1] ? 2'd1 : 2'd2;
 wire [15:0] xst0   = {1'b1, 6'd0, BLKSZ, XSLOT0, xwr_s[0], xrd_s[0]};
@@ -186,7 +189,7 @@ wire  [2:0] reqs  = {xreq_s, req_s};
 // a reject of the LATEST answer re-opens the request: REQ shows it again and the doorbell re-rings
 wire        rjlast = (rjtag == ((rjslot == 2'd0) ? btag[0] : (rjslot == 2'd1) ? btag[1] : btag[2]));
 wire  [2:0] unans = ans & rjsel & {3{ev[0] & rjlast}} & ~bent;
-wire        fire  = req_rise | |(xrise & xen) | |(unans & reqs & {xen, en});
+wire        fire  = req_rise | |(xrise & xen_lwx) | |(unans & reqs & {xen_lwx, en_lwx});
 wire        clr_c = (rd_cause & rd_ack & (gen[3:0] == snap)) | w_cause;
 wire        etag  = ~btag[bsel];
 wire [43:0] entry = w_begin ? {T_BEGIN, 6'd0, etag, w_wk, bsel, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
@@ -199,8 +202,7 @@ endfunction
 
 always @(posedge clk) begin
 	if (DIAG) cycles <= cycles + 32'd1;
-	{sb2, sb1, sb0} <= {sb1, sb0, sys_bits};
-	{rg_s1, rg_s0}  <= {rg_s0, rgray};
+	sb2 <= sb1;
 
 	// doorbell: the request rise raises, a raise beats a concurrent clear
 	gen     <= gen + fire;
@@ -216,15 +218,12 @@ always @(posedge clk) begin
 	if (DIAG && fire) tsreq <= cycles;
 	if (rd_cause & ren) snap <= gen[3:0];
 
-	if (DIAG && ev[4]) begin
-		tsdone <= cycles;
-		sum    <= sum_l;
-	end
+	if (DIAG && ev[4]) tsdone <= cycles;
 
 	if (w_ctrl) begin
-		en   <= wdata[0];
-		xen  <= {wdata[4 + XSLOT1], wdata[4 + XSLOT0]};
-		test <= DIAG ? wdata[3] : 1'b0;
+		en_lwx   <= wdata[0];
+		xen_lwx  <= {wdata[4 + XSLOT1], wdata[4 + XSLOT0]};
+		test_lwx <= DIAG ? wdata[3] : 1'b0;
 	end
 
 	// store path: never back-pressured, a full FIFO drops and counts
@@ -233,7 +232,7 @@ always @(posedge clk) begin
 		if (~&fdrops) fdrops <= fdrops + 10'd1;
 	end
 	if (fwe) wptr <= wptr + 1'd1;
-	wgray <= wptr ^ (wptr >> 1);
+	sector_w_lwgray <= wptr ^ (wptr >> 1);
 
 	if (w_begin) begin
 		exp_w  <= 0;
@@ -272,9 +271,9 @@ always @(*) begin
 		5'h01: rdata = {any, 15'd0, pst};
 		5'h02: rdata = lba;
 		5'h04: begin
-			rdata = {28'd0, test, 2'b00, en};
-			rdata[4 + XSLOT0] = xen[0];
-			rdata[4 + XSLOT1] = xen[1];
+			rdata = {28'd0, test_lwx, 2'b00, en_lwx};
+			rdata[4 + XSLOT0] = xen_lwx[0];
+			rdata[4 + XSLOT1] = xen_lwx[1];
 		end
 		5'h05: rdata = DIAG ? {frames, hw, 4'd0, st_s} : {28'd0, st_s};
 		5'h06: rdata = {ok, 5'd0, fdrops, 6'd0, exp_w};
@@ -296,12 +295,14 @@ end
 
 /////////////////////////////// clk_sys: feeder ///////////////////////////
 
-`LW_SYNC reg [3:0] cs0 = 0;
-`LW_SYNC reg [3:0] cs1 = 0;
+wire [3:0] cs1;
+lw_sync #(.W(4)) ctl_sync (.clk(clk_sys), .d({xen_lwx, test_lwx, en_lwx}), .q(cs1));
+lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(sector_w_lwgray), .q(wg_s));
+
 wire       en_s = cs1[0], test_s = cs1[1];
 wire [1:0] xen_s = cs1[3:2];
 
-wire       rempty = (rgray == wg_s1);
+wire       rempty = (sector_r_lwgray == wg_s);
 wire       pop    = ~rempty & ~qv & (fs != F_FILL) & (fs != F_ACK) & (~em | ph == 2'd3);
 wire [1:0] qt = q[43:42];
 wire [9:0] qi = q[41:32];
@@ -323,20 +324,29 @@ always @(posedge clk_sys) q <= fram[rptr[AW-1:0]];
 reg  [1:0] rjs = 0;                    // the last reject's slot and its entry's tag; evt[0] moves
 reg        rjt = 0, rjp = 0;           // one cycle after them (rjp)
 
-assign sys_bits = {rjt, rjs, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt[4:1] : 4'd0, evt[0], fs == F_REJECT,
-                   fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys, c_req};
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
+
+// SUM: the byte sum of each data frame the feeder completes, to clk_100m (DIAG builds only)
+generate
+if (DIAG) begin : sumx
+	wire sum_go = em && ph == 2'd3 && fexp == flen - 1'd1;
+	lw_xfer #(.W(20)) sum_x(.s_clk(clk_sys), .s_go(sum_go), .s_d(fsum), .s_busy(), .d_clk(clk), .d_q(sum), .d_v());
+end
+else begin : nosum
+	assign sum = 20'd0;
+end
+endgenerate
 assign o_ack = fack[0];
 assign x_ack = fack[2:1];
 
 always @(posedge clk_sys) begin
-	{cs1, cs0}     <= {cs0, xen, test, en};
-	{wg_s1, wg_s0} <= {wg_s0, wgray};
+	sys_lwx <= {rjt, rjs, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt[4:1] : 4'd0, evt[0], fs == F_REJECT,
+	            fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys, c_req};
 
 	qv <= pop;
 	if (pop) rptr <= rptr + 1'd1;
-	rgray <= rptr ^ (rptr >> 1);
+	sector_r_lwgray <= rptr ^ (rptr >> 1);
 
 	o_wr <= 0;
 	if (rjp) evt[0] <= ~evt[0];
@@ -430,7 +440,6 @@ always @(posedge clk_sys) begin
 				fexp   <= 0;
 				fack[fsel] <= 1'b0;
 				fs     <= F_IDLE;
-				if (DIAG) sum_l <= fsum;
 				evt[4] <= ~evt[4];
 			end
 			else fexp <= fexp + 1'd1;
@@ -450,8 +459,6 @@ always @(posedge clk_sys) begin
 		else if (fs == F_REJECT) fs <= F_IDLE;
 	end
 end
-
-`undef LW_SYNC
 
 endmodule
 

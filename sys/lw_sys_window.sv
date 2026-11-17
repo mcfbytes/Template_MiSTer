@@ -20,8 +20,8 @@
 
 // LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR, OSDBUF and SYS blocks.
 // Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
-// or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a toggle handshake
-// drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) is built only when the core
+// or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a held-data handshake
+// (lw_xfer, lw_cdc.sv) drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) is built only when the core
 // declares it (SEC_EN): one primary hps_io read slot plus up to two save slots ("cards"); entry 1
 // words 7-12 declare each card slot, its DDR image base (wsrc) and extent. Without SEC_EN, entry 1
 // reads 0 (no kind) and the block's addresses read 0.
@@ -69,7 +69,7 @@ module lw_sys_window #(
 	output wire        sys_irq,      // SYS cause level -> f2h_irq[9]
 
 	input wire         clk_sys,
-	output reg  [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
+	output wire [48:0] lw_pad,       // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
 	input wire  [34:0] blk_up,       // {reset, hps_ack, req, lba[31:0]} on clk_sys, from emu
 	output wire [18:0] blk_dn,       // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
 	input wire  [19:0] card_up,      // {card 1, card 0}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
@@ -368,11 +368,7 @@ wire [2:0] wsl  = slot_of(wop);
 wire       st_d = st && wsl != 3'd7 && widx == 8'd0;
 wire       st_a = st && (wop == 8'h1A || wop == 8'h3D) && !st_d;
 
-reg        req_t = 0;
-reg        ack_t = 0;
-reg  [1:0] ack_s = 0;
-reg [47:0] hold  = 0;
-wire       busy  = req_t ^ ack_s[1];
+wire       busy;
 
 wire [6:0] ready = {~aempty, dirty};
 reg  [2:0] rr = 0;
@@ -404,8 +400,6 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-	ack_s <= {ack_s[0], ack_t};
-
 	if (DIAG && lw_write && w_in && wwin == 21'h0C) begin
 		if (lw_be[0]) scratch[ 7: 0] <= lw_wdata[ 7: 0];
 		if (lw_be[1]) scratch[15: 8] <= lw_wdata[15: 8];
@@ -424,11 +418,7 @@ always @(posedge clk) begin
 			else dirty[psel] <= 0;
 			ds <= 2'd2;
 		end
-		default: begin
-			hold  <= (psel == 3'd6) ? {pq[24] ? 8'h3D : 8'h1A, pq[23:16], 16'd0, pq[15:0]} : {op_of(psel), 8'd0, pq};
-			req_t <= ~req_t;
-			ds    <= 2'd0;
-		end
+		default: ds <= 2'd0;   // the handshake takes the word in this cycle
 	endcase
 
 	// after the drain, so a store landing in the read cycle stays dirty (its RAM read returned the old word)
@@ -441,14 +431,14 @@ always @(posedge clk) begin
 	end
 end
 
-// clk_sys side: hold is stable for >=2 clk_sys cycles when the toggle edge arrives.
-reg  [2:0] req_s = 0;
+// to clk_sys: the store's word, and its strobe the cycle after the capture
+wire [47:0] pad_w = (psel == 3'd6) ? {pq[24] ? 8'h3D : 8'h1A, pq[23:16], 16'd0, pq[15:0]} : {op_of(psel), 8'd0, pq};
 
-always @(posedge clk_sys) begin
-	req_s  <= {req_s[1:0], req_t};
-	ack_t  <= req_s[2];
-	lw_pad <= {req_s[2] ^ req_s[1], hold};
-end
+lw_xfer #(.W(48)) pad_x
+(
+	.s_clk(clk), .s_go(ds == 2'd2), .s_d(pad_w), .s_busy(busy),
+	.d_clk(clk_sys), .d_q(lw_pad[47:0]), .d_v(lw_pad[48])
+);
 
 endmodule
 
