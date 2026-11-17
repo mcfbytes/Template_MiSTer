@@ -174,6 +174,8 @@ wire  [9:0] blen    = w_wk ? 10'd0 : b_p ? FRAME : XFRAME;
 wire        w_abort = w_ctrl & wdata[1];
 wire        clr     = w_ctrl & wdata[2];
 wire        rd_cause = rreg && raddr[6:2] == 5'h00 && rd_word;
+wire        push  = w_begin | w_abort | wdat;
+wire        fwe   = push & ~ffull;
 
 wire  [2:0] bent  = {b_x1, b_x0, b_p} & {3{fwe}};
 wire  [2:0] reqs  = {xreq_s, req_s};
@@ -182,8 +184,6 @@ wire        rjlast = (rjtag == ((rjslot == 2'd0) ? btag[0] : (rjslot == 2'd1) ? 
 wire  [2:0] unans = ans & rjsel & {3{ev[0] & rjlast}} & ~bent;
 wire        fire  = req_rise | |(xrise & xen) | |(unans & reqs & {xen, en});
 wire        clr_c = (rd_cause & rd_ack & (gen[3:0] == snap)) | w_cause;
-wire        push  = w_begin | w_abort | wdat;
-wire        fwe   = push & ~ffull;
 wire        etag  = ~btag[bsel];
 wire [43:0] entry = w_begin ? {T_BEGIN, 6'd0, etag, w_wk, bsel, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
 
