@@ -31,11 +31,11 @@ module cyclonev_hps_interface_hps2fpga_light_weight
 	input  [11:0] rid, input [31:0] rdata, input [1:0] rresp, input rlast,
 	input         rvalid, output rready
 );
-assign {awid, awaddr, awlen, awsize, awburst, awvalid} = {tb.awid, tb.awaddr, tb.awlen, tb.awsize, 2'b01, tb.awvalid};
+assign {awid, awaddr, awlen, awsize, awburst, awvalid} = {tb.awid, tb.awaddr, tb.awlen, tb.awsize, tb.awburst, tb.awvalid};
 assign {awlock, awcache, awprot} = 0;
 assign {wid, wdata, wstrb, wlast, wvalid} = {tb.awid, tb.wdata, tb.wstrb, tb.wlast, tb.wvalid};
 assign bready = tb.bready;
-assign {arid, araddr, arlen, arsize, arburst, arvalid} = {tb.arid, tb.araddr, tb.arlen, tb.arsize, 2'b01, tb.arvalid};
+assign {arid, araddr, arlen, arsize, arburst, arvalid} = {tb.arid, tb.araddr, tb.arlen, tb.arsize, tb.arburst, tb.arvalid};
 assign {arlock, arcache, arprot} = 0;
 assign rready = tb.rready;
 endmodule
