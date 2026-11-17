@@ -158,13 +158,13 @@ wire [31:0] osd_data;
 wire  [3:0] osd_be;
 wire  [1:0] osd_ctrl;
 
-wire        lw_hrst, fw_idle;
+wire        lw_hrst, fw_present, fw_idle;
 wire  [1:0] lw_freed;
 
 hps_lw_bridge bridge
 (
 	.clk(clk),
-	.hps_rst_n(hps_rst_n), .lw_hrst(lw_hrst), .lw_freed(lw_freed), .idle(fw_idle),
+	.hps_rst_n(hps_rst_n), .lw_hrst(lw_hrst), .lw_freed(lw_freed), .present(fw_present), .idle(fw_idle),
 	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be), .lw_wburst(lw_wburst)
 );
@@ -289,7 +289,7 @@ wire [11:0] bid   = bridge.hps2fpga_light_weight.bid;
 // the state each machine was in, in that rise's cycle.
 reg      fm_rout = 0, fm_wout = 0, fm_rmark = 0, fm_wmark = 0, fm_hq = 1, fm_rfreed = 0, fm_wfreed = 0;
 reg      fm_mk_r = 0, fm_mk_w = 0;
-integer  fm_st_r = -1, fm_st_w = -1, fm_cycles = 0, fm_bad = 0, fw_glitch = 0, n_fr = 0, n_fw = 0;
+integer  fm_st_r = -1, fm_st_w = -1, fm_cycles = 0, fm_bad = 0, fw_glitch = 0, n_fr = 0, n_fw = 0, fw_absent = 0;
 realtime fw_tpos = 0;
 always @(posedge clk) begin : fw_model
 	reg ar_hs, r_hs, r_end, aw_hs, b_hs, wb_hs, rise, fall, ra, wa, rf, wf;
@@ -317,6 +317,7 @@ always @(posedge clk) begin : fw_model
 end
 always @(negedge clk) begin
 	fm_cycles = fm_cycles + 1;
+	if (fw_present !== 1'b1) fw_absent = fw_absent + 1;
 	if (fw_idle !== !(fm_rout || fm_wout) || lw_freed !== {fm_wfreed, fm_rfreed} ||
 	    bridge.adapter.rmark !== fm_rmark || bridge.adapter.wmark !== fm_wmark ||
 	    (bridge.adapter.rstate != 2'd0) !== fm_rout || (bridge.adapter.wstate != 2'd0) !== fm_wout) begin
@@ -3456,6 +3457,7 @@ initial begin
 	$display("     %0d cycles compared with the model of the marks, the machines freed and idle", fm_cycles);
 	check("firewall model: cycles that differ", fm_bad, 0);
 	check("idle changed off a clk_100m edge", fw_glitch, 0);
+	check("cycles in which present (GPI bit 25) is not 1", fw_absent, 0);
 
 	$display("fixed latency: BVALID %0d cycles after AWVALID, RVALID %0d cycles after ARVALID (the firewall's RD_LAT)",
 	         wlat_ref, rlat_ref);

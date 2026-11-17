@@ -240,8 +240,10 @@ end
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
 `ifdef MISTER_LW
-// gp_in[27] = 1 - an LW directory ("SYS1") is decoded at LW offset 0x40000 (lw_sys_window.sv)
-wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 1'b1, 6'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+// gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it)
+// gp_in[24]     - the firewall holds no transaction (its idle register)
+wire        lw_present, lw_idle;
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 3'b000, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
 `else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 7'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
 `endif
@@ -1929,7 +1931,8 @@ hps_lw_bridge hps_lw_bridge
 	.hps_rst_n(lw_hps_rst_n),
 	.lw_hrst(),
 	.lw_freed(),
-	.idle(),
+	.present(lw_present),
+	.idle(lw_idle),
 	.lw_raddr(lw_raddr),
 	.lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr),

@@ -21,8 +21,9 @@
 //   - every LW net and port tb/static.sh lists for this configuration (lw_e_nets.vh) is driven: no bit reads z,
 //     except the from-core SECTOR nets, which only a core's lw_blk_mux and lw_card_mux drive and the Template
 //     does not instantiate: those must read z in every bit, so nothing in sys/ drives a bit the core owns;
-//   - GPI: the ID view reads the core magic; the I/O view has the discovery bit 27 set exactly with MISTER_LW
-//     and bits 26:21 clear;
+//   - GPI: the ID view reads the core magic (bits 25 and 24 clear); in the I/O view bit 25 is the firewall's
+//     present output, 1, and bit 24 its idle register, in every clk_100m cycle of the run, both moving when
+//     their source is forced; without MISTER_LW bits 27:21 are clear;
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
 //     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window;
 //   - forcing each LW line output of lw_sys_window moves its f2h_irq bit at the interrupt atom and no other;
@@ -140,6 +141,20 @@ task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 integer n_freed = 0;   // the firewall's read machine freed at a release
 always @(posedge clk_100m) if (dut.hps_lw_bridge.lw_freed === 2'b01) n_freed = n_freed + 1;
 
+// GPI in the I/O view against the firewall, every clk_100m cycle: bit 25 its present output, bit 24 its idle
+// register; gpi_on gates the monitor off while a check forces either source.
+integer n_gpi = 0, n_gpi_bad = 0, n_gpi_busy = 0;
+reg     gpi_on = 0;
+always @(negedge clk_100m) if (gpi_on && gp_out[31]) begin
+	n_gpi = n_gpi + 1;
+	if (dut.hps_lw_bridge.idle === 1'b0) n_gpi_busy = n_gpi_busy + 1;
+	if (dut.h2f_gp.gp_in[25:24] !== {1'b1, dut.hps_lw_bridge.idle} || dut.hps_lw_bridge.idle === 1'bx) begin
+		n_gpi_bad = n_gpi_bad + 1;
+		if (n_gpi_bad <= 4) $display("   GPI at %0t: gp_in[25:24] %b, the firewall's idle %b", $time,
+		                             dut.h2f_gp.gp_in[25:24], dut.hps_lw_bridge.idle);
+	end
+end
+
 task lw_read(input [20:0] a, output [31:0] d);
 	integer n;
 	reg ar_hs;
@@ -186,16 +201,29 @@ initial begin
 `include "lw_e_nets.vh"
 	$display("%0d LW nets, %0d LW ports", nnets, nports);
 
-	$display("-- GPI: the core magic in the ID view; the discovery bit and the free bits in the I/O view");
+	$display("-- GPI: the core magic in the ID view; the firewall's bits 25 and 24 and the free bits in the I/O view");
 	gp_out = 32'h0000_0000; #20;
 `ifdef MISTER_DUAL_SDRAM
 	check("ID view", dut.h2f_gp.gp_in, 32'h5CA623A8);
 `else
 	check("ID view", dut.h2f_gp.gp_in, 32'h5CA623A4);
 `endif
+	check("ID view gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b00);
 	gp_out = 32'h8000_0000; #20;
 `ifdef MISTER_LW
-	check("I/O view gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b1000000);
+	check("I/O view gp_in[27:21], the firewall idle", dut.h2f_gp.gp_in[27:21], 7'b0011000);
+	@(negedge clk_100m);
+	force dut.hps_lw_bridge.adapter.idle_q = 1'b0; #1;
+	check("the firewall's idle register forced 0: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b10);
+	release dut.hps_lw_bridge.adapter.idle_q;
+	@(negedge clk_100m);
+	check("released, the next clk_100m edge: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b11);
+	force dut.hps_lw_bridge.present = 1'b0; #1;
+	check("the firewall's present output forced 0: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b01);
+	release dut.hps_lw_bridge.present; #1;
+	check("released: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b11);
+	@(negedge clk_100m);
+	gpi_on = 1;
 `else
 	check("I/O view gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0000000);
 `endif
@@ -313,6 +341,7 @@ initial begin
 	@(negedge clk_100m); arvalid = 0;
 	repeat (4) @(negedge clk_100m);
 	check("a read its master abandoned: RVALID held, not idle", {dut.hps_lw_bridge.rvalid, dut.hps_lw_bridge.idle}, 2'b10);
+	check("a read its master abandoned: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b10);
 	k = n_freed;
 	h2f_rst_n = 0;
 	repeat (6) @(negedge clk_100m);
@@ -323,8 +352,15 @@ initial begin
 	check("after the release: lw_hrst", dut.hps_lw_bridge.lw_hrst, 1'b0);
 	check("after the release: read machines freed", n_freed - k, 1);
 	check("after the release: RVALID dropped, idle", {dut.hps_lw_bridge.rvalid, dut.hps_lw_bridge.idle}, 2'b01);
+	check("after the release: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b11);
 	rready = 1;
 	lw_read(21'h40000, d); check("a read after the release", d, 32'h31535953);
+
+	$display("-- GPI against the firewall in every clk_100m cycle of the I/O view");
+	gpi_on = 0;
+	$display("     %0d cycles, %0d with a transaction held", n_gpi, n_gpi_busy);
+	check("cycles where gp_in[25:24] differs from {1, the firewall's idle}", n_gpi_bad, 0);
+	check("cycles compared, with and without a transaction held", {n_gpi > 100, n_gpi_busy > 10}, 2'b11);
 `endif
 
 	$display("%s: %0d checks, %0d failures", (fails != 0) ? "FAILED" : "PASSED", checks, fails);

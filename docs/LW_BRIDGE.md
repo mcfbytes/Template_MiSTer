@@ -55,7 +55,7 @@ A core that instantiates its own modules on `HPS_BUS` must widen those ports to 
 
 | macro | default | effect |
 |---|---|---|
-| `MISTER_LW` | off | builds the bridge, the window, the `hps_io` LW path, the OSD shadow and GPI bit 27 |
+| `MISTER_LW` | off | builds the bridge, the window, the `hps_io` LW path, the OSD shadow and GPI bits 25 and 24 |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH, the analog-drop count and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
@@ -73,9 +73,23 @@ An LW access the fabric does not answer **hangs the SoC**. Nothing here is probe
 window exists before it touches it:
 
 - **`CONF_STR` field 1, `AXI:40000:80000:LW`:** a window at LW offset `0x40000`, `0x80000` bytes long.
-- **GPI bit 27 = 1** (the FPGA manager's `gpi` register, read with `gp_out[31] = 1`, always safe): a directory is
-  decoded at LW `0x40000`. Stock bitstreams leave it 0, and the stock Main never reads bits 21-27.
+- **GPI bit 25 = 1** (the FPGA manager's `gpi` register, read with `gp_out[31] = 1`; reading it never touches the
+  bridge, so it is always safe): the firewall below is in this bitstream. The firewall's instance drives the bit,
+  so no bitstream without it can show 1. Stock bitstreams leave it 0, and the stock Main never reads bits 21-27.
+- **GPI bit 24** is the firewall's idle state, a register: 1 while it holds no transaction on either channel. It
+  toggles with every access, so it means something only to a host that knows it has none of its own in flight.
 - **The directory magic `SYS1`** at the window's first word, then the entries.
+
+In the ID view (`gp_out[31] = 0`) GPI carries the core magic, which has bits 25 and 24 clear, and an unconfigured
+FPGA reads all ones, so the bits count only in a sample that also shows bit 31 = 0. Before its first LW access,
+and again after every core load and every bridge or HPS reset (with every cached directory value discarded), a
+host takes **one** GPI sample in the I/O view that shows bit 31 = 0, bit 25 = 1 and bit 24 = 1. Bit 24 = 0 at that
+point, with no access of its own in flight, means the firewall still holds a transaction nobody will finish: stay
+on SPI until the core is loaded again. Then the `CONF_STR` token, then the magic. Any failure: never touch the
+bridge. Bit 25 says nothing about the HPS side: the bridge must also be out of reset (the reset manager's bit for
+this bridge reads 0), which a host that did not release the bridge itself checks. A periodic task that accesses
+the window samples GPI first and requires bit 31 = 0 and bit 25 = 1 before each access (not bit 24, which another
+thread's access makes 0); a failed sample means no access now and the whole discovery again before the next.
 
 `hps_lw_bridge.sv` answers **every** address of the 2 MB bridge, every burst and both channels, in fixed cycles.
 No reset holds it, so a read during a core reset, or while the HPS holds the fabric reset, still completes. After an
