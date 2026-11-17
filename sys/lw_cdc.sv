@@ -35,16 +35,16 @@
 // synchroniser late, never skews a bus and never tears a capture. The seed is the plusarg lw_seed.
 
 // Two flops per bit with the synchroniser attribute: no enable, no reset, nothing but the source register on D.
-// GRAY = 1 marks a Gray-coded pointer: only its delay model differs.
-module lw_sync #(parameter W = 1, parameter GRAY = 0)
+// GRAY = 1 marks a Gray-coded pointer: only its delay model differs. INIT is both stages' configuration value.
+module lw_sync #(parameter W = 1, parameter GRAY = 0, parameter [0:0] INIT = 1'b0)
 (
 	input wire          clk,        // the destination clock
 	input wire  [W-1:0] d,          // a source register, in the source clock's domain
 	output wire [W-1:0] q
 );
 
-(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *) reg [W-1:0] lws0_q = {W{1'b0}};
-(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *) reg [W-1:0] lws1_q = {W{1'b0}};
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *) reg [W-1:0] lws0_q = {W{INIT}};
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *) reg [W-1:0] lws1_q = {W{INIT}};
 
 assign q = lws1_q;
 
@@ -119,8 +119,12 @@ end
 
 endmodule
 
-// Two flops set asynchronously while rst_n is low, shifting in 0 on clk: q is high from configuration, and from
-// rst_n falling, until the second clk edge after rst_n is high. rst_n is the output of a hard HPS register.
+// An asynchronous reset input made a clean clk level. Two flops are set asynchronously while rst_n is low and
+// shift in 0 on clk, so a low pulse is caught even with clk stopped; the chain's rise is asynchronous, so its
+// output crosses through an lw_sync. q is high from configuration, and from each fall of rst_n, at most three clk
+// edges after it; it falls on the fourth clk edge after rst_n is high again. However short the pulse, q is high
+// for at least one cycle: the chain's synchronous fall cannot overtake its rise, which may resolve an edge late.
+// rst_n is the output of a hard HPS register.
 module lw_arst
 (
 	input wire  clk,
@@ -142,7 +146,7 @@ always @(posedge clk or negedge rst_n) begin
 	end
 end
 
-assign q = lwa1_q;
+lw_sync #(.W(1), .INIT(1'b1)) sync(.clk(clk), .d(lwa1_q), .q(q));
 
 endmodule
 

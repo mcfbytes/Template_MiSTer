@@ -101,7 +101,8 @@ localparam DIAG = 0;
 function [31:0] dg(input [31:0] v); dg = DIAG ? v : 32'd0; endfunction
 
 reg clk = 0;            // clk_100m
-always #5 clk = ~clk;
+reg clk_run = 1;        // 0 = clk_100m stopped (low)
+always #5 clk = clk_run ? ~clk : 1'b0;
 
 // clk_sys: half period LW_TB_SYS_HP_PS (default 33.8688 MHz), stretched by 50 ppm so its phase against clk_100m
 // sweeps at every rate, 100 MHz included. Edges are placed from an accumulated real time, so the 1 ps
@@ -137,6 +138,7 @@ reg  [1:0] arburst = 2'b01, awburst = 2'b01;   // INCR unless a case sets anothe
 reg        awvalid = 0, wvalid = 0, wlast = 1, bready = 1, arvalid = 0, rready = 1;
 reg [31:0] wdata = 0;
 reg  [3:0] wstrb = 4'hF;
+reg        hps_rst_n = 1;   // the HPS's fabric reset
 
 wire [20:0] lw_raddr, lw_waddr;
 wire        lw_write, lw_wburst;
@@ -156,9 +158,13 @@ wire [31:0] osd_data;
 wire  [3:0] osd_be;
 wire  [1:0] osd_ctrl;
 
+wire        lw_hrst, fw_idle;
+wire  [1:0] lw_freed;
+
 hps_lw_bridge bridge
 (
 	.clk(clk),
+	.hps_rst_n(hps_rst_n), .lw_hrst(lw_hrst), .lw_freed(lw_freed), .idle(fw_idle),
 	.lw_raddr(lw_raddr), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be), .lw_wburst(lw_wburst)
 );
@@ -276,6 +282,71 @@ wire rlast   = bridge.hps2fpga_light_weight.rlast;
 wire [31:0] rdata = bridge.hps2fpga_light_weight.rdata;
 wire [11:0] rid   = bridge.hps2fpga_light_weight.rid;
 wire [11:0] bid   = bridge.hps2fpga_light_weight.bid;
+
+// The firewall's HPS-reset rules as a reference model, built from the AXI handshakes and lw_hrst alone, and
+// compared with the RTL in every cycle of the run: which state machine holds a transaction, each one's mark, the
+// machines freed at a release, and idle. fm_mk_r/fm_mk_w: the marks the last rise of lw_hrst set; fm_st_r/fm_st_w:
+// the state each machine was in, in that rise's cycle.
+reg      fm_rout = 0, fm_wout = 0, fm_rmark = 0, fm_wmark = 0, fm_hq = 1, fm_rfreed = 0, fm_wfreed = 0;
+reg      fm_mk_r = 0, fm_mk_w = 0;
+integer  fm_st_r = -1, fm_st_w = -1, fm_cycles = 0, fm_bad = 0, fw_glitch = 0, n_fr = 0, n_fw = 0;
+realtime fw_tpos = 0;
+always @(posedge clk) begin : fw_model
+	reg ar_hs, r_hs, r_end, aw_hs, b_hs, wb_hs, rise, fall, ra, wa, rf, wf;
+	fw_tpos = $realtime;
+	ar_hs = arvalid & arready; r_hs = rvalid & rready; r_end = r_hs & rlast;
+	aw_hs = awvalid & awready; b_hs = bvalid & bready; wb_hs = (wvalid & wready) | b_hs;
+	rise = lw_hrst & ~fm_hq; fall = ~lw_hrst & fm_hq;
+	ra = (fm_rout & ~r_end) | ar_hs;           // holds a transaction after this cycle
+	wa = (fm_wout & ~b_hs) | aw_hs;
+	rf = fall & fm_rmark & ~r_hs;
+	wf = fall & fm_wmark & ~wb_hs;
+	if (rise) begin
+		fm_rmark <= ra; fm_wmark <= wa; fm_mk_r <= ra; fm_mk_w <= wa;
+		fm_st_r <= bridge.adapter.rstate; fm_st_w <= bridge.adapter.wstate;
+	end
+	else begin
+		if (fall || r_hs || !fm_rout) fm_rmark <= 1'b0;
+		if (fall || wb_hs || !fm_wout) fm_wmark <= 1'b0;
+	end
+	fm_rout <= ra & ~rf; fm_wout <= wa & ~wf;
+	fm_rfreed <= rf; fm_wfreed <= wf;
+	fm_hq <= lw_hrst;
+	if (lw_freed[0]) n_fr = n_fr + 1;
+	if (lw_freed[1]) n_fw = n_fw + 1;
+end
+always @(negedge clk) begin
+	fm_cycles = fm_cycles + 1;
+	if (fw_idle !== !(fm_rout || fm_wout) || lw_freed !== {fm_wfreed, fm_rfreed} ||
+	    bridge.adapter.rmark !== fm_rmark || bridge.adapter.wmark !== fm_wmark ||
+	    (bridge.adapter.rstate != 2'd0) !== fm_rout || (bridge.adapter.wstate != 2'd0) !== fm_wout) begin
+		fm_bad = fm_bad + 1;
+		if (fm_bad <= 8)
+			$display("   firewall model at %0t: idle %b freed %b marks %b%b states %0d %0d; model %b %b%b %b%b %b%b", $time,
+			         fw_idle, lw_freed, bridge.adapter.rmark, bridge.adapter.wmark, bridge.adapter.rstate,
+			         bridge.adapter.wstate, !(fm_rout || fm_wout), fm_wfreed, fm_rfreed, fm_rmark, fm_wmark, fm_rout, fm_wout);
+	end
+end
+// idle is a register: it changes only at a clk_100m edge
+always @(fw_idle) if ($realtime > 0 && $realtime != fw_tpos) fw_glitch = fw_glitch + 1;
+
+// Each response handshake: the count, and the last beat's ID, data and RLAST; fr_log keeps the read beats.
+integer     fr_n = 0, fb_n = 0;
+reg  [11:0] fr_id = 0, fb_id = 0;
+reg  [31:0] fr_d = 0;
+reg         fr_last = 0;
+reg  [31:0] fr_log [0:31];
+reg  [11:0] fr_idlog [0:31];
+reg         fr_lastlog [0:31];
+reg  [20:0] fw_wa = 0;
+always @(posedge clk) begin
+	if (rvalid && rready) begin
+		fr_log[fr_n % 32] = rdata; fr_idlog[fr_n % 32] = rid; fr_lastlog[fr_n % 32] = rlast;
+		fr_n = fr_n + 1; fr_id = rid; fr_d = rdata; fr_last = rlast;
+	end
+	if (bvalid && bready) begin fb_n = fb_n + 1; fb_id = bid; end
+	if (lw_write) fw_wa = lw_waddr;
+end
 
 // HPS_BUS as sys_top wires it: {st_up, card_up/dn, blk_up, blk_dn, lw_pad, ...}; the SPI side is driven by the tb (io_*)
 reg         io_enable = 0, io_strobe = 0;
@@ -1378,6 +1449,367 @@ task sys_rate;
 		         1000.0 * 1000.0 / ($realtime - t0));
 		t0 = ($realtime - t0) * 1000.0 - 2000.0 * `LW_TB_SYS_HP_PS * 1.00005;
 		check("clk_sys: 1000 periods within 1 ps of 2 x LW_TB_SYS_HP_PS x 1.00005", {31'd0, t0 < -1.0 || t0 > 1.0}, 0);
+	end
+endtask
+
+// ---- The firewall across an HPS reset ----
+// OSD CTRL is the store target (two readable bits, in every arm); the directory magic the read target.
+localparam [20:0] FW_CTRL  = OSD + 21'h1000;
+localparam [31:0] FW_MAGIC = 32'h31535953;
+
+// At negedges: until lw_hrst has been high for a full cycle (its rise is behind), or until the cycle it falls in.
+task fw_wait_high;
+	integer n;
+	begin
+		n = 0; @(negedge clk);
+		while (!(lw_hrst === 1'b1 && fm_hq === 1'b1) && n < 200) begin @(negedge clk); n = n + 1; end
+		if (n >= 200) begin fails = fails + 1; $display("FAIL lw_hrst never rose"); end
+	end
+endtask
+task fw_wait_fall;
+	integer n;
+	begin
+		n = 0; @(negedge clk);
+		while (!(lw_hrst === 1'b0 && fm_hq === 1'b1) && n < 400) begin @(negedge clk); n = n + 1; end
+		if (n >= 400) begin fails = fails + 1; $display("FAIL lw_hrst never fell"); end
+	end
+endtask
+
+// Called at a negedge: present AR (AW) until it is accepted, and return at the negedge after its handshake.
+task fw_ar(input [20:0] a, input [3:0] len, input [11:0] id);
+	integer n;
+	begin
+		araddr = a; arlen = len; arsize = 2; rsize = 2; arburst = 2'b01; arid = id; arvalid = 1; n = 0;
+		while (arready !== 1'b1 && n < 200) begin @(negedge clk); n = n + 1; end
+		@(negedge clk); arvalid = 0; arid = 0;
+	end
+endtask
+task fw_aw(input [20:0] a, input [11:0] id);
+	integer n;
+	begin
+		awaddr = a; awlen = 0; awsize = 2; awburst = 2'b01; awid = id; awvalid = 1; n = 0;
+		while (awready !== 1'b1 && n < 200) begin @(negedge clk); n = n + 1; end
+		@(negedge clk); awvalid = 0;
+	end
+endtask
+// One W beat, presented for exactly one cycle.
+task fw_w1(input [31:0] v);
+	begin wdata = v; wstrb = 4'hF; wlast = 1; wvalid = 1; @(negedge clk); wvalid = 0; end
+endtask
+
+// One reset case. A transaction of `kind` (0 a read of the magic, 1 a store to OSD CTRL whose data beat waits,
+// 2 a store to OSD CTRL whose response waits) is issued `off` cycles before hps_rst_n falls (after it when
+// negative), or, with off 100, so that it is accepted on the edge lw_hrst rises on (seen one cycle ahead in the
+// synchroniser's first stage, which the delay models may hold a cycle), and with 101 in the rise's own cycle;
+// hps_rst_n is low for 10 cycles. Its master then completes it per `pol`: 0 only well after the
+// release, 1 while lw_hrst is high, 2 in the cycle lw_hrst falls, 3 in the cycle after. A transaction the rise of
+// lw_hrst found in the machine is marked, and freed at the fall unless a handshake was made since; every other
+// one completes with its own data and ID. Then a read and a store are answered in the fixed latency.
+// cov: bit (1 << state) for each machine state a marked transaction held at the rise (IDLE: one accepted in the
+// rise's own cycle, which counts as outstanding).
+task fw_case(input integer kind, input integer off, input integer pol, inout integer cov);
+	integer fr0, fw0, nr0, nb0, nw0, nr1, nb1, mk, fe, j;
+	reg [11:0] id;
+	reg [31:0] oc, v, rv;
+	reg [20:0] a;
+	reg  [1:0] st;
+	string     w;
+	begin
+		axi_read(FW_CTRL, 0, oc, dl, beats);
+		v  = {30'd0, ~oc[1:0]};
+		id = 12'h800 | (kind << 8) | (pol << 4) | ((off + 4) & 15);
+		a  = (kind != 0) ? FW_CTRL : 21'h40000;
+		rready = 0; bready = (kind != 2);
+		fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n; nw0 = n_lwwr;
+		fork
+			begin
+				repeat (4) @(negedge clk); hps_rst_n = 0;
+				repeat (10) @(negedge clk); hps_rst_n = 1;
+			end
+			begin
+				if (off < 100) repeat (4 - off) @(negedge clk);
+				else begin
+					j = 0; @(negedge clk);
+					while (j < 40 && !(off == 100 ? (bridge.hrst_c.sync.lws0_q === 1'b1 && lw_hrst === 1'b0)
+					                               : (lw_hrst === 1'b1 && fm_hq === 1'b0))) begin
+						@(negedge clk); j = j + 1;
+					end
+				end
+				case (kind)
+					0: fw_ar(a, 0, id);
+					1: fw_aw(a, id);
+					default: begin
+						wdata = v; wstrb = 4'hF; wlast = 1; wvalid = 1;
+						fw_aw(a, id);
+						j = 0; while (wready !== 1'b1 && j < 20) begin @(negedge clk); j = j + 1; end
+						@(negedge clk); wvalid = 0;
+					end
+				endcase
+				case (pol)
+					1: begin
+						fw_wait_high;
+						j = 0;
+						if (kind == 0) begin
+							while (rvalid !== 1'b1 && j < 20) begin @(negedge clk); j = j + 1; end
+							rready = 1;
+						end
+						else if (kind == 1) begin
+							while (wready !== 1'b1 && j < 20) begin @(negedge clk); j = j + 1; end
+							fw_w1(v);
+						end
+						else begin
+							while (bvalid !== 1'b1 && j < 20) begin @(negedge clk); j = j + 1; end
+							bready = 1;
+						end
+						@(negedge clk);
+						check("the handshake is made while lw_hrst is high", lw_hrst, 1);
+					end
+					2, 3: begin
+						fw_wait_fall;
+						if (pol == 3) @(negedge clk);
+						if (kind == 0) rready = 1;
+						else if (kind == 1) fw_w1(v);
+						else bready = 1;
+					end
+					default: ;
+				endcase
+			end
+		join
+		if (pol < 2) fw_wait_fall;
+		repeat (6) @(negedge clk);
+		mk = (kind == 0) ? fm_mk_r : fm_mk_w;
+		st = (kind == 0) ? fm_st_r : fm_st_w;
+		if (mk) cov = cov | (1 << st);
+		// a marked store whose AW was accepted in the rise's cycle has its data beat taken after it: that
+		// handshake clears the mark, and the store's response waits for its master like any other
+		fe = mk && (pol == 0 || pol == 3) && !(kind == 2 && st == 2'd0);
+		nr1 = fr_n - nr0; nb1 = fb_n - nb0;
+		if (off == 100)      w = $sformatf("kind %0d, accepted on lw_hrst's rising edge", kind);
+		else if (off == 101) w = $sformatf("kind %0d, issued in lw_hrst's first cycle", kind);
+		else                 w = $sformatf("kind %0d, %0d cycles before hps_rst_n falls", kind, off);
+		if (mk) w = $sformatf("%s, marked in state %0d", w, st);
+		else    w = {w, ", not marked"};
+		check({w, ": its machine freed"}, ((kind == 0) ? n_fr - fr0 : n_fw - fw0), fe);
+		check({w, ": the other machine untouched"}, ((kind == 0) ? n_fw - fw0 : n_fr - fr0), 0);
+		if (pol == 1 || pol == 2) check({w, ": answered before its master's cleanup"}, (kind == 0) ? nr1 : nb1, 1);
+		// a master that has not finished does so now
+		rready = 1; bready = 1;
+		if (bridge.adapter.wstate == 2'd1) fw_w1(v);
+		j = 0; while (fw_idle !== 1'b1 && j < 50) begin @(negedge clk); j = j + 1; end
+		repeat (2) @(negedge clk);
+		check({w, ": idle after"}, fw_idle, 1);
+		if (kind == 0) begin
+			check({w, ": responses"}, fr_n - nr0, fe ? 0 : 1);
+			if (!fe) check({w, ": the beat's ID, data and RLAST"}, {fr_id, fr_last, fr_d == FW_MAGIC}, {id, 2'b11});
+		end
+		else begin
+			check({w, ": stores that reached the bus"}, n_lwwr - nw0, (kind == 1 && fe) ? 0 : 1);
+			check({w, ": write responses"}, fb_n - nb0, fe ? 0 : 1);
+			if (!fe) check({w, ": the response's ID"}, fb_id, id);
+		end
+		axi_read(FW_CTRL, 0, rv, dl, beats);
+		check({w, ": OSD CTRL"}, rv, (kind == 0 || (kind == 1 && fe)) ? oc : v);
+		// the next accesses are answered in the fixed latency (axi_read and axi_write check it)
+		rd({w, ": a read after"}, 21'h40000, FW_MAGIC);
+		axi_write(FW_CTRL, oc, 4'hF);
+		rd({w, ": a store after"}, FW_CTRL, oc);
+	end
+endtask
+
+// A monitor for case (i): cycles in which idle read 1 while fw_i_mon is set.
+reg     fw_i_mon = 0;
+integer fw_i_ones = 0;
+always @(negedge clk) if (fw_i_mon && fw_idle !== 1'b0) fw_i_ones = fw_i_ones + 1;
+
+task fw_reset_cases;
+	integer kind, off, pol, cov, fr0, fw0, nr0, nb0, nw0, j, n, nm;
+	reg [31:0] oc, v, ref16 [0:15];
+	reg aw_hs, ar_hs, w_hs;
+	begin
+		for (pol = 0; pol < 4; pol = pol + 1)
+			for (kind = 0; kind < 3; kind = kind + 1) begin
+				$display("-- firewall, HPS reset: %s, %s",
+				         kind == 0 ? "a read" : kind == 1 ? "a store waiting for its data beat" :
+				                                            "a store waiting for its response",
+				         pol == 0 ? "its master waits past the release" :
+				         pol == 1 ? "its master completes it during the reset" :
+				         pol == 2 ? "its master completes it in the release cycle" :
+				                    "its master completes it the cycle after");
+				cov = 0;
+				for (off = 3; off >= -3; off = off - 1) fw_case(kind, off, pol, cov);
+				fw_case(kind, 100, pol, cov);
+				fw_case(kind, 101, pol, cov);
+				// the rise found the machine in each state a transaction can be in
+				check("states a marked transaction held at the rise", cov, (kind == 1) ? 32'h3 : 32'h7);
+			end
+
+		$display("-- firewall, HPS reset: a read and a store accepted while it is held complete across the release");
+		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
+		rready = 0; bready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n;
+		hps_rst_n = 0; fw_wait_high;
+		fw_ar(21'h40000, 0, 12'h0C3);
+		wdata = v; wstrb = 4'hF; wlast = 1; wvalid = 1;
+		fw_aw(FW_CTRL, 12'h0C4);
+		j = 0; while (wready !== 1'b1 && j < 20) begin @(negedge clk); j = j + 1; end
+		@(negedge clk); wvalid = 0;
+		repeat (4) @(negedge clk); hps_rst_n = 1;
+		fw_wait_fall; repeat (6) @(negedge clk);
+		check("both still answering after the release", {rvalid, bvalid}, 2'b11);
+		check("both marks clear", {bridge.adapter.rmark, bridge.adapter.wmark}, 0);
+		rready = 1; bready = 1; repeat (4) @(negedge clk);
+		check("the read's beats", fr_n - nr0, 1);
+		check("the read's beat: ID", fr_id, 12'h0C3);
+		check("the read's beat: data", fr_d, FW_MAGIC);
+		check("the store's responses", fb_n - nb0, 1);
+		check("the store's response: ID", fb_id, 12'h0C4);
+		check("nothing freed", (n_fr - fr0) + (n_fw - fw0), 0);
+		rd("the store took effect", FW_CTRL, v);
+		axi_write(FW_CTRL, oc, 4'hF);
+
+		$display("-- firewall, HPS reset: a 16-beat read carried across the whole reset, beats taken during it");
+		axi_read(21'h40000, 15, d, dl, beats);
+		for (j = 0; j < 16; j = j + 1) ref16[j] = rb_d[j];
+		rready = 0; fr0 = n_fr; nr0 = fr_n;
+		@(negedge clk); fw_ar(21'h40000, 15, 12'h0D1);
+		rready = 1; n = 0; while (fr_n - nr0 < 4 && n < 50) begin @(negedge clk); n = n + 1; end
+		rready = 0;
+		hps_rst_n = 0; fw_wait_high;
+		check("the read is marked at the rise", fm_mk_r, 1);
+		rready = 1; n = 0; while (fr_n - nr0 < 8 && n < 50) begin @(negedge clk); n = n + 1; end
+		rready = 0;
+		check("beats taken by now", fr_n - nr0, 8);
+		check("beats 4-7 taken while lw_hrst is high", lw_hrst, 1);
+		repeat (4) @(negedge clk); hps_rst_n = 1;
+		fw_wait_fall; repeat (4) @(negedge clk);
+		rready = 1; n = 0; while (fr_n - nr0 < 16 && n < 100) begin @(negedge clk); n = n + 1; end
+		repeat (4) @(negedge clk);
+		check("beats delivered", fr_n - nr0, 16);
+		n = 0;
+		for (j = 0; j < 16; j = j + 1)
+			if (fr_log[(nr0 + j) % 32] !== ref16[j] || fr_idlog[(nr0 + j) % 32] !== 12'h0D1 ||
+			    fr_lastlog[(nr0 + j) % 32] !== (j == 15)) n = n + 1;
+		check("beats that differ from a plain 16-beat read (data, ID, RLAST)", n, 0);
+		check("nothing freed", n_fr - fr0, 0);
+		rd("a read after", 21'h40000, FW_MAGIC);
+
+		$display("-- firewall, HPS reset held low while reads and stores run: every access answers, nothing is freed");
+		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
+		fr0 = n_fr; fw0 = n_fw;
+		hps_rst_n = 0; fw_wait_high;
+		for (j = 0; j < 4; j = j + 1) begin
+			rd("magic, reset held", 21'h40000, FW_MAGIC);
+			axi_write(FW_CTRL, v, 4'hF);
+			rd("a store, reset held", FW_CTRL, v);
+			axi_write(FW_CTRL, oc, 4'hF);
+			rd("a store back, reset held", FW_CTRL, oc);
+		end
+		axi_read(21'h40000, 15, d, dl, beats);
+		check("a 16-beat read, reset held", beats, 16);
+		check("lw_hrst still high", lw_hrst, 1);
+		hps_rst_n = 1; fw_wait_fall; repeat (4) @(negedge clk);
+		check("nothing freed", (n_fr - fr0) + (n_fw - fw0), 0);
+		check("idle", fw_idle, 1);
+
+		$display("-- firewall, HPS reset with clk_100m stopped across the pulse: once the clock runs, the orphan is freed");
+		rready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n;
+		@(negedge clk); fw_ar(21'h40000, 0, 12'h0E7);
+		n = 0; while (rvalid !== 1'b1 && n < 20) begin @(negedge clk); n = n + 1; end
+		clk_run = 0; #40;
+		hps_rst_n = 0; #25; hps_rst_n = 1; #25;
+		check("clock stopped: the chain caught the pulse", bridge.hrst_c.lwa1_q, 1);
+		check("clock stopped: lw_hrst not yet high", lw_hrst, 0);
+		clk_run = 1;
+		// a pulse this short may leave lw_hrst high for one cycle only: the first stage can take the chain's rise
+		// an edge late, while its fall, synchronous, is never late
+		n = 0; @(negedge clk); while (lw_hrst !== 1'b1 && n < 20) begin @(negedge clk); n = n + 1; end
+		check("lw_hrst rose once the clock ran", lw_hrst, 1);
+		fw_wait_fall;
+		check("the read was marked at the rise", fm_mk_r, 1);
+		repeat (4) @(negedge clk);
+		check("the read machine freed", n_fr - fr0, 1);
+		check("the write machine not", n_fw - fw0, 0);
+		check("RVALID dropped, idle", {rvalid, fw_idle}, 2'b01);
+		rready = 1;
+		rd("a read after", 21'h40000, FW_MAGIC);
+		check("responses: only the new read's", fr_n - nr0, 1);
+		axi_read(FW_CTRL, 0, oc, dl, beats);
+		axi_write(FW_CTRL, oc, 4'hF);
+
+		$display("-- firewall, a bridge-only reset (records): an abandoned read holds AR until an HPS reset pulse");
+		rready = 0; fr0 = n_fr; nr0 = fr_n;
+		@(negedge clk); fw_ar(21'h40000, 0, 12'h0E1);
+		n = 0; while (rvalid !== 1'b1 && n < 20) begin @(negedge clk); n = n + 1; end
+		araddr = 21'h40000; arid = 12'h0E2; arlen = 0; arvalid = 1;
+		n = 0; for (j = 0; j < 40; j = j + 1) begin @(negedge clk); n = n + arready; end
+		check("records: the next AR not accepted in 40 cycles", n, 0);
+		hps_rst_n = 0; repeat (6) @(negedge clk); hps_rst_n = 1;
+		fw_wait_fall;
+		n = 0; while (arready !== 1'b1 && n < 20) begin @(negedge clk); n = n + 1; end
+		@(negedge clk); arvalid = 0; arid = 0;
+		rready = 1; repeat (6) @(negedge clk);
+		check("the pulse freed the read machine", n_fr - fr0, 1);
+		check("the held AR answered after the release: beats", fr_n - nr0, 1);
+		check("the held AR answered after the release: ID", fr_id, 12'h0E2);
+		check("the held AR answered after the release: data", fr_d, FW_MAGIC);
+
+		$display("-- firewall, a master revived before the release (records): idle reads 0 throughout");
+		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
+		rready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n; nw0 = n_lwwr;
+		@(negedge clk); fw_ar(21'h000100, 0, 12'h0A1);
+		fw_aw(21'h000104, 12'h0A2);
+		fw_i_mon = 1; fw_i_ones = 0;
+		hps_rst_n = 0; fw_wait_high;
+		check("both orphans marked", {fm_mk_r, fm_mk_w}, 2'b11);
+		// the new master issues a read and a store together, with every READY high
+		araddr = 21'h40000; arid = 12'h0B1; arlen = 0; arvalid = 1; rready = 1;
+		awaddr = FW_CTRL; awid = 12'h0B2; awlen = 0; awvalid = 1; bready = 1;
+		wdata = v; wstrb = 4'hF; wlast = 1; wvalid = 1;
+		n = 0;
+		while ((arvalid || awvalid || wvalid || fr_n - nr0 < 2) && n < 40) begin
+			ar_hs = arvalid & arready; aw_hs = awvalid & awready; w_hs = wvalid & wready;
+			@(negedge clk); n = n + 1;
+			if (ar_hs) arvalid = 0;
+			if (aw_hs) awvalid = 0;
+			if (w_hs) wvalid = 0;
+		end
+		arid = 0;
+		check("records: the first beat the new master took is the orphan's (its ID)", fr_idlog[nr0 % 32], 12'h0A1);
+		check("records: the second is its own read (ID)", fr_idlog[(nr0 + 1) % 32], 12'h0B1);
+		check("records: the second is its own read (data)", fr_log[(nr0 + 1) % 32], FW_MAGIC);
+		check("records: its W beat is one store", n_lwwr - nw0, 1);
+		check("records: stored at the orphan's address", fw_wa, 21'h000104);
+		check("records: one write response", fb_n - nb0, 1);
+		check("records: answered with the orphan's ID", fb_id, 12'h0A2);
+		check("records: its AW accepted alone, the write machine waiting for data", bridge.adapter.wstate, 1);
+		hps_rst_n = 1; fw_wait_fall; repeat (4) @(negedge clk);
+		check("no machine freed: each orphan saw a handshake", (n_fr - fr0) + (n_fw - fw0), 0);
+		fw_w1(oc);                                     // its next store's data beat: lands on OSD CTRL's address
+		fw_i_mon = 0;
+		repeat (4) @(negedge clk);
+		check("idle read 0 from the orphans to the last data beat", fw_i_ones, 0);
+		check("records: the next beat completes the accepted AW (ID)", fb_id, 12'h0B2);
+		check("idle after", fw_idle, 1);
+		rd("OSD CTRL holds the next beat's data", FW_CTRL, oc);
+
+		$display("-- firewall, the fabric reset held low with an orphan: idle and the mark stay until the net rises");
+		rready = 0; fr0 = n_fr; fw0 = n_fw;
+		@(negedge clk); fw_ar(21'h40000, 0, 12'h0C1);
+		hps_rst_n = 0; fw_wait_high;
+		n = 0; nm = 0;
+		for (j = 0; j < 200; j = j + 1) begin
+			@(negedge clk);
+			n = n + (fw_idle !== 1'b0); nm = nm + (bridge.adapter.rmark !== 1'b1);
+		end
+		check("held 200 cycles: cycles idle read other than 0", n, 0);
+		check("held 200 cycles: cycles the read's mark was not set", nm, 0);
+		check("held 200 cycles: nothing freed", (n_fr - fr0) + (n_fw - fw0), 0);
+		check("held 200 cycles: lw_hrst high", lw_hrst, 1);
+		hps_rst_n = 1; fw_wait_fall; repeat (4) @(negedge clk);
+		check("freed at the release: the read machine", n_fr - fr0, 1);
+		check("freed at the release: not the write machine", n_fw - fw0, 0);
+		check("idle", fw_idle, 1);
+		rready = 1;
+		rd("a read after", 21'h40000, FW_MAGIC);
 	end
 endtask
 
@@ -2990,6 +3422,8 @@ initial begin
 `endif
 	end
 
+	fw_reset_cases;
+
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");
 		rd("lean SCRATCH", 21'h4000C, 32'd0);
@@ -3017,6 +3451,11 @@ initial begin
 	check("models: the lane's pointers took extra cycles", win.lane.lane.wg_sync.m_n + win.lane.lane.rg_sync.m_n > 0, 1);
 `endif
 `endif
+
+	$display("-- firewall: idle is a register, 1 exactly while both state machines are idle (the model, every cycle)");
+	$display("     %0d cycles compared with the model of the marks, the machines freed and idle", fm_cycles);
+	check("firewall model: cycles that differ", fm_bad, 0);
+	check("idle changed off a clk_100m edge", fw_glitch, 0);
 
 	$display("fixed latency: BVALID %0d cycles after AWVALID, RVALID %0d cycles after ARVALID (the firewall's RD_LAT)",
 	         wlat_ref, rlat_ref);

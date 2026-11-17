@@ -78,8 +78,13 @@ window exists before it touches it:
 - **The directory magic `SYS1`** at the window's first word, then the entries.
 
 `hps_lw_bridge.sv` answers **every** address of the 2 MB bridge, every burst and both channels, in fixed cycles.
-It has no reset, so a read during a core reset still completes. Addresses outside every block read `0xDEADBEEF`,
-and writes there are dropped.
+No reset holds it, so a read during a core reset, or while the HPS holds the fabric reset, still completes. After an
+HPS reset it drops only a transaction the reset orphaned: one whose master made no handshake on its channel between
+the reset reaching the fabric and its release. The first access after the reset is answered; nothing else is
+touched. A reset of the bridge alone is invisible to the fabric, so **no LW access may be in flight when anything
+resets the bridge, asserts the fabric reset or programs the FPGA**: a transaction left in flight through a
+bridge-only reset holds its channel until the next HPS reset or core load. Addresses outside every block read
+`0xDEADBEEF`, and writes there are dropped.
 
 Nothing back-pressures. A store is accepted in fixed cycles. Where a FIFO is full, the store is dropped and counted,
 and the protocol detects the loss (PAD analog drops, SECTOR `ACCEPT`).

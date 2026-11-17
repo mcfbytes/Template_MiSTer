@@ -64,7 +64,7 @@ assign {wid, wdata, wstrb, wlast, wvalid} = {12'd0, top_tb.wdata, 4'hF, 1'b1, to
 assign {arid, araddr, arlen, arsize, arburst, arvalid} = {12'd0, top_tb.araddr, 4'd0, 3'd2, 2'b01, top_tb.arvalid};
 assign {awlock, awcache, awprot, arlock, arcache, arprot} = 0;
 assign bready = 1'b1;
-assign rready = 1'b1;
+assign rready = top_tb.rready;
 endmodule
 
 module cyclonev_hps_interface_peripheral_uart

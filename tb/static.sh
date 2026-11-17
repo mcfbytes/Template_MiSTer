@@ -24,8 +24,8 @@
 #      its hold register; an lw_arst input is hps_rst_n or gp_out[31].
 #   5. The D of every lw_sync is a plain reference (names, selects, a concatenation of them) to registers of the
 #      same module, clocked there and not on the destination clock, named *_lwx (GRAY 0) or *_lwgray (GRAY 1),
-#      each declared with a preserve attribute (in lw_cdc.sv, also a cell's own toggles); every register so
-#      named feeds one. An lw_xfer's s_go and s_d are on its s_clk.
+#      each declared with a preserve attribute (in lw_cdc.sv, also a cell's own toggles, and lw_arst's chain,
+#      whose rise is asynchronous, into its own clock); every register so named feeds one. An lw_xfer's s_go and s_d are on its s_clk.
 #   6. Every *_lwgray register is one of the Gray buses and is assigned once, unconditionally, as g <= b ^ (b >> 1).
 #   7. No clocked block outside the cells reads, directly or through nets, a register or an input on another
 #      clock (input clocks from PORTDOM) other than through a cell's output, beside the listed reads
@@ -677,11 +677,14 @@ for n, M in sorted(mods.items()):
         gray = ''.join(par.get('GRAY', ['0'])) not in ('0', "1'b0")
         for s in d:
             nsrc += 1; fed.add((n, s))
-            okname = s.endswith('_lwx') or s.endswith('_lwgray') or (n in ('lw_xfer', 'lw_fence') and
-                                                                     s.startswith(('lwtg_', 'lwa1_')))
+            # in the cells: a handshake's toggles, and the asynchronously set chain, whose rise has no clock
+            chain = n == 'lw_arst' and s.startswith('lwa1_')
+            okname = s.endswith('_lwx') or s.endswith('_lwgray') or chain or (n in ('lw_xfer', 'lw_fence') and
+                                                                              s.startswith(('lwtg_', 'lwa1_')))
             check(okname, '%s: source %s is not named *_lwx or *_lwgray' % (where, s))
             check(s in M['regs'] and s in reg, '%s: source %s is not a register clocked in %s' % (where, s, n))
-            check(s not in reg or dst not in reg[s], '%s: source %s is on the destination clock %s' % (where, s, dst))
+            check(chain or s not in reg or dst not in reg[s],
+                  '%s: source %s is on the destination clock %s' % (where, s, dst))
             if s.endswith(('_lwx', '_lwgray')):
                 check('preserve' in M['regs'].get(s, {}).get('attr', []),
                       '%s: source %s is declared without a preserve attribute' % (where, s))

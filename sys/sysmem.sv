@@ -40,6 +40,11 @@ module sysmem_lite
 	input  [127:0] vbuf_writedata,
 	input   [15:0] vbuf_byteenable,
 	input          vbuf_write
+`ifdef MISTER_LW
+	,
+	// the HPS's fabric reset, for the LW firewall (hps_lw_bridge.sv)
+	output         hps_rst_n
+`endif
 );
 
 assign reset_out = ~init_reset_n | ~hps_h2f_reset_n | reset_core_req;
@@ -223,6 +228,9 @@ sysmem_HPS_fpga_interfaces fpga_interfaces (
 );
 
 wire hps_h2f_reset_n;
+`ifdef MISTER_LW
+assign hps_rst_n = hps_h2f_reset_n;
+`endif
 
 reg init_reset_n = 0;
 always @(posedge clock) begin

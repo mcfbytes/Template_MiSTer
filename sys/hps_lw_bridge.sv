@@ -24,7 +24,11 @@
 //  Silicon-proven on the DE10-Nano.  Answers every address of the 2 MB
 //  window, every burst, both channels, unconditionally: an unanswered LW
 //  access hangs the SoC.
-//   * NO reset input: a read landing in a reset window must still answer.
+//   * No reset holds it: a read landing in a reset window must still answer.
+//     After an HPS reset (hps_rst_n), it drops only a transaction the reset
+//     orphaned: one whose master made no handshake on its channel between
+//     the reset reaching the fabric and the release.  `idle` shows whether
+//     both state machines are idle.
 //   * Clock is clk_100m (h2f_user0_clk), never a reconfigurable PLL.
 //   * AXI3 LEN/SIZE/BURST handled; IDs echoed; BRESP/RRESP always OKAY.
 //   * Reads step every burst type on the address's low 12 bits.  Only a
@@ -41,6 +45,11 @@
 module hps_lw_bridge
 (
 	input wire         clk,          // clk_100m == h2f_user0_clk
+	input wire         hps_rst_n,    // the HPS's fabric reset (h2f_rst_n), asynchronous
+
+	output wire        lw_hrst,      // hps_rst_n as a clk level: high while the reset is seen
+	output wire  [1:0] lw_freed,     // pulses: [0] the read, [1] the write state machine was freed at a release
+	output wire        idle,         // a register: both state machines are idle
 
 	// simple synchronous register bus, read side
 	output wire [20:0] lw_raddr,     // byte address inside the 2MB window
@@ -138,9 +147,12 @@ cyclonev_hps_interface_hps2fpga_light_weight hps2fpga_light_weight
 	.rready(rready)
 );
 
+lw_arst hrst_c(.clk(clk), .rst_n(hps_rst_n), .q(lw_hrst));
+
 lw_axi_regbus adapter
 (
 	.clk(clk),
+	.hrst(lw_hrst), .freed(lw_freed), .idle(idle),
 
 	.awid(awid), .awaddr(awaddr), .awlen(awlen),
 	.awvalid(awvalid), .awready(awready),
@@ -171,6 +183,15 @@ endmodule
 //  direction; read and write channels are fully independent (no shared
 //  state), so neither can deadlock the other.
 //
+//  HPS reset: hrst stops nothing.  In the cycle hrst rises, each state
+//  machine that will hold a transaction after that cycle is marked; in any
+//  other cycle a handshake on the machine's own channels (R; W or B) clears
+//  the mark, as does an idle machine.  In the cycle hrst falls, a machine
+//  still marked goes idle (freed pulses the cycle after), unless a handshake
+//  in that cycle takes its normal step.  A marked machine has waited on its
+//  master, without one handshake, since the reset was seen: its master was
+//  reset with it.  A transaction accepted while hrst is high is never marked.
+//
 //  Read pipeline per beat: FETCH (capture combinational lw_rdata) -> DATA
 //  (RVALID with registered data -- AXI requires RDATA stable while
 //  RVALID & ~RREADY).  The read side is lw_raddr alone: no strobe leaves
@@ -185,6 +206,9 @@ endmodule
 module lw_axi_regbus
 (
 	input wire         clk,
+	input wire         hrst,         // the HPS reset as a clk level
+	output wire  [1:0] freed,        // [0] read, [1] write: freed at the release, one cycle
+	output wire        idle,         // a register: both state machines are idle
 
 	// AXI3 slave
 	input wire  [11:0] awid,
@@ -251,6 +275,14 @@ function [11:0] step_addr(input [11:0] a, input [1:0] size, input [1:0] burst, i
 	end
 endfunction
 
+//////////////////////////////// HPS reset ///////////////////////////////
+
+reg  hrst_q = 1'b1;                       // lw_arst's q is high from configuration: no rise there
+wire hrst_rise = hrst & ~hrst_q;
+wire hrst_fall = ~hrst & hrst_q;
+
+always @(posedge clk) hrst_q <= hrst;
+
 ////////////////////////////// read channel //////////////////////////////
 
 localparam R_IDLE  = 2'd0;
@@ -278,8 +310,22 @@ assign rresp     = 2'b00;                 // always OKAY: never a no-ack
 assign rlast     = (rbeat == rlen_q);
 assign lw_raddr  = raddr_q;
 
+wire r_hs   = rvalid & rready;
+wire r_hold = (rstate == R_IDLE && arvalid) || rstate == R_FETCH ||
+              (rstate == R_DATA && !(rready && rbeat == rlen_q));   // holds a transaction after this cycle
+reg  rmark   = 1'b0;
+reg  rfreed  = 1'b0;
+wire r_free  = hrst_fall & rmark & ~r_hs;
+
 always @(posedge clk) begin
-	case (rstate)
+	if (hrst_rise) rmark <= r_hold;
+	else if (hrst_fall || r_hs || rstate == R_IDLE) rmark <= 1'b0;
+	rfreed <= r_free;
+end
+
+always @(posedge clk) begin
+	if (r_free) rstate <= R_IDLE;
+	else case (rstate)
 	R_IDLE: if (arvalid) begin
 		rid_q    <= arid;
 		raddr_q  <= araddr;
@@ -338,8 +384,21 @@ assign lw_wburst = wvalid & wready & ~wsingle_q;  // an accepted beat of a burst
 assign lw_wdata  = wdata;
 assign lw_be     = wstrb;
 
+wire w_hs   = (wvalid & wready) | (bvalid & bready);
+wire w_hold = (wstate == W_IDLE && awvalid) || wstate == W_DATA || (wstate == W_RESP && !bready);
+reg  wmark   = 1'b0;
+reg  wfreed  = 1'b0;
+wire w_free  = hrst_fall & wmark & ~w_hs;
+
 always @(posedge clk) begin
-	case (wstate)
+	if (hrst_rise) wmark <= w_hold;
+	else if (hrst_fall || w_hs || wstate == W_IDLE) wmark <= 1'b0;
+	wfreed <= w_free;
+end
+
+always @(posedge clk) begin
+	if (w_free) wstate <= W_IDLE;
+	else case (wstate)
 	W_IDLE: if (awvalid) begin
 		bid_q     <= awid;
 		waddr_q   <= awaddr;
@@ -354,6 +413,16 @@ always @(posedge clk) begin
 	default: wstate <= W_IDLE;
 	endcase
 end
+
+////////////////////////////////// idle //////////////////////////////////
+
+// 1 exactly while both state machines are in IDLE: the next states, registered.
+reg idle_q = 1'b1;
+
+always @(posedge clk) idle_q <= !(r_hold && !r_free) && !(w_hold && !w_free);
+
+assign idle  = idle_q;
+assign freed = {wfreed, rfreed};
 
 endmodule
 
