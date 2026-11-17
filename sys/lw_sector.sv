@@ -24,6 +24,9 @@
 // XFRAME words with a strobe address; a save slot WRITE is answered by WACK_S (ack, no strobes): the HPS
 // takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1.
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
+// CAUSE: bit 0, raised by each request rise (and each re-open after a reject), under the read-only class tag
+// [23:16] while set; a full-word store with bit 0 set clears it, and a raise in the store's cycle wins. Reads
+// change nothing: the request word is REQ's.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
 // Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
 // (sys_lwx), each through lw_sync (lw_cdc.sv). The request LBAs are latched on clk_100m straight from the core's
@@ -44,9 +47,6 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 
 	input wire [12:0] raddr,        // block-relative
 	input wire        rsel,
-	input wire        ren,
-	input wire        rd_ack,
-	input wire        rd_word,
 	output reg [31:0] rdata,
 	input wire [12:0] waddr,
 	input wire        wsel,
@@ -127,7 +127,6 @@ reg  [19:0] dsum = 0;               // DIAG: the last data frame's SUM
 
 reg         pending = 0;
 reg  [31:0] gen = 0, tsreq = 0, tsdone = 0, cycles = 0;
-reg   [3:0] snap = 0;
 reg  [31:0] lba = 0;
 (* preserve *) reg       en_lwx   = 0;   // CTRL[0]
 (* preserve *) reg       test_lwx = 0;   // CTRL[3]
@@ -190,7 +189,6 @@ wire  [1:0] bsel    = b_x0 ? 2'd1 : b_x1 ? 2'd2 : 2'd0;
 wire  [9:0] blen    = w_wk ? 10'd0 : b_p ? FRAME : XFRAME;
 wire        w_abort = w_ctrl & wdata[1];
 wire        clr     = w_ctrl & wdata[2];
-wire        rd_cause = rreg && raddr[6:2] == 5'h00 && rd_word;
 wire        push  = w_begin | w_abort | wdat;
 wire        fwe   = push & ~ffull;
 
@@ -200,7 +198,7 @@ wire  [2:0] reqs  = {xreq_s, req_s};
 wire        rjlast = (rjtag == ((rjslot == 2'd0) ? btag[0] : (rjslot == 2'd1) ? btag[1] : btag[2]));
 wire  [2:0] unans = ans & rjsel & {3{ev[0] & rjlast}} & ~bent;
 wire        fire  = req_rise | |(xrise & xen_lwx) | |(unans & reqs & {xen_lwx, en_lwx});
-wire        clr_c = (rd_cause & rd_ack & (gen[3:0] == snap)) | w_cause;
+wire        clr_c = w_cause & wdata[0];
 wire        etag  = ~btag[bsel];
 wire [43:0] entry = w_begin ? {T_BEGIN, 6'd0, etag, w_wk, bsel, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
 
@@ -226,7 +224,6 @@ always @(posedge clk) begin
 	ans  <= bent | (ans & reqs & ~unans);
 	btag <= btag ^ bent;
 	if (DIAG && fire) tsreq <= cycles;
-	if (rd_cause & ren) snap <= gen[3:0];
 
 	if (DIAG && dn_v) begin
 		dseen <= dn_q[23:20];
@@ -280,7 +277,7 @@ wire ok = (exp_w == flen_w) & ~bfail;
 always @(*) begin
 	rdata = 32'd0;
 	if (rreg) case (raddr[6:2])
-		5'h00: rdata = pending ? {12'd0, 4'b0001, any ? pst : SDSTAT} : 32'd0;
+		5'h00: rdata = pending ? 32'h0001_0001 : 32'd0;   // {class tag, the event bit}
 		5'h01: rdata = {any, 15'd0, pst};
 		5'h02: rdata = lba;
 		5'h04: begin

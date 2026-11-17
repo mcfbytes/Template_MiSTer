@@ -55,9 +55,6 @@ module lw_sys_window #(
 	input wire         clk,          // clk_100m
 
 	input wire  [20:0] lw_raddr,
-	input wire         lw_ren,
-	input wire         lw_rd_ack,
-	input wire         lw_rd_word,
 	output reg  [31:0] lw_rdata,
 
 	input wire  [20:0] lw_waddr,
@@ -153,12 +150,14 @@ wire        w_sec = w_in && wwin >= SEC_OFF && wwin < SEC_OFF + SEC_SIZE;
 wire        r_osd = r_in && rwin >= OSD_OFF && rwin < OSD_OFF + OSD_SIZE;
 wire        w_osd = w_in && wwin >= OSD_OFF && wwin < OSD_OFF + OSD_SIZE;
 wire        r_sys = r_in && rwin >= SYS_OFF && rwin < SYS_OFF + SYS_SIZE;
+wire        w_sys = w_in && wwin >= SYS_OFF && wwin < SYS_OFF + SYS_SIZE;
 wire        r_lane = LANE_EN && r_in && rwin >= LANE_OFF && rwin < LANE_OFF + LANE_SIZE;
 wire        w_lane = LANE_EN && w_in && wwin >= LANE_OFF && wwin < LANE_OFF + LANE_SIZE;
 wire [20:0] rlane = rwin - LANE_OFF;
 wire [20:0] wlane = wwin - LANE_OFF;
 wire [31:0] lane_rdata;
 wire [20:0] rsys  = rwin - SYS_OFF;
+wire [20:0] wsys  = wwin - SYS_OFF;
 wire [31:0] sys_rdata;
 wire [12:0] rosd  = rwin[12:0];           // OSD_OFF is 8 KB aligned
 wire [12:0] wosd  = wwin[12:0];
@@ -252,7 +251,7 @@ if (SEC_EN) begin : sec
 	            .XSLOT0(MC_SLOT0), .XSLOT1(MC_SLOT1), .XFRAME(MC_FRAME)) sector
 	(
 		.clk(clk),
-		.raddr(rsec[12:0]), .rsel(r_sec), .ren(lw_ren), .rd_ack(lw_rd_ack), .rd_word(lw_rd_word), .rdata(sec_rdata),
+		.raddr(rsec[12:0]), .rsel(r_sec), .rdata(sec_rdata),
 		.waddr(wsec[12:0]), .wsel(w_sec), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
 		.doorbell(doorbell),
 		.clk_sys(clk_sys),
@@ -310,8 +309,8 @@ endgenerate
 lw_sys_status sys_status
 (
 	.clk(clk),
-	.raddr(rsys[9:0]), .rsel(r_sys && rsys < 21'h400), .ren(lw_ren), .rd_ack(lw_rd_ack), .rd_word(lw_rd_word),
-	.rdata(sys_rdata),
+	.raddr(rsys[9:0]), .rsel(r_sys && rsys < 21'h400), .rdata(sys_rdata),
+	.waddr(wsys[9:0]), .wsel(w_sys && wsys < 21'h400), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
 	.irq(sys_irq),
 	.clk_sys(clk_sys), .stflg(st_up[131:128]), .status_req(st_up[127:0])
 );
