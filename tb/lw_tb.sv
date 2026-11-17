@@ -3335,6 +3335,59 @@ task ls10;
 	end
 endtask
 
+`ifdef MISTER_LW_SECTOR_SLOT
+// A BEGIN stored just before a RELEASE, still queued when the link's level falls (clk_sys stopped across both):
+// the half discards it unplayed and the request stands for SPI. The next host claims and stores EN before anyone
+// serves it: the EN rise raises SECTOR's cause, REQ shows the request, and a frame over the bridge serves it.
+integer n_dis = 0;
+always @(posedge clk_sys)
+	if (win.sec.sector.qv && win.sec.sector.fidle && !win.sec.sector.lease_s && win.sec.sector.qt == 2'd1)
+		n_dis = n_dis + 1;
+task ls18;
+	reg [31:0] v;
+	integer d0, n1, t;
+	begin
+		$display("-- lease links: a BEGIN discarded with the lease gone; the next host's EN rise finds its request");
+		lease_up;
+		sec_wr(21'h10, 32'h1); sec_stand(32'h00006E00); if (win.sec_lvl) cause_drain(SEC);
+		check("bound before the BEGIN", blk_dn[18], 1);
+		@(negedge clk_sys); sys_run = 0; repeat (20) @(negedge clk);
+		d0 = n_dis;
+		sec_wr(21'h0C, cd_lba);
+		kp_on = 0;
+		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		repeat (200) @(negedge clk);
+		check("the RELEASE with clk_sys stopped: EN cleared, the BEGIN still queued",
+		      {win.sec.sector.en_lwx, win.sec.sector.rptr != win.sec.sector.wptr}, 2'b01);
+		sys_run = 1;
+		t = 0; while ((n_dis == d0 || blk_dn[18:17] != 0) && t < slow(5000)) begin @(negedge clk); t = t + 1; end
+		check("the BEGIN discarded unplayed", n_dis - d0, 1);
+		check("the slot back on SPI", blk_dn[18:17], 2'b00);
+		settle;
+		check("the request stands for SPI", sd_rd[1], 1);
+		claim_w(KP_ID, 4'd15); wait_open;
+		lease_rd(v); kp_epoch = v[23:16];
+		check("the next host holds the lease", {v[31], v[9:0]}, {1'b1, KP_ID});
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB); kp_t = $realtime; kp_on = 1;
+		rd("after the claim: SECTOR CAUSE clear", SEC, 32'd0);
+		sec_wr(21'h10, 32'h1); settle;
+		rd("EN rises over the standing request: SECTOR CAUSE", SEC, 32'h1);
+		check("its line rises", lines[TB_E_SEC - 1], 1);
+		axi_read(SEC + 21'h04, 0, v, dl, beats);
+		check("REQ shows the request: a read on the primary", {v[31], v[0]}, 2'b11);
+		rd("LBA is the request's", SEC + 21'h08, cd_lba);
+		cause_drain(SEC);
+		n1 = cd_frames;
+		sec_wr(21'h0C, cd_lba);
+		frame_data(cd_lba, 0, TB_FRAME);
+		wait_frame(n1);
+		check_buf("the request served over the bridge, byte-exact", cd_lba, TB_FRAME);
+		cause_drain(SEC); sec_wr(21'h10, 32'h0); settle;
+		sec_spi_clear;
+	end
+endtask
+`endif
+
 // A CLAIM followed at once by work, without waiting for OPEN, after a quiet return, after a lapse and
 // after a takeover. Every lane frame plays whole or was dropped at the gate (stale set); none is popped unplayed.
 // A SECTOR EN store lands or is dropped with stale. A host that waits for OPEN loses nothing.
@@ -5478,6 +5531,9 @@ initial begin
 		ls15;
 		ls17;
 		ls8;
+`ifdef MISTER_LW_SECTOR_SLOT
+		ls18;
+`endif
 		if (TB_SEC) sec7_sweep;
 	end
 	lease_summary(1);
