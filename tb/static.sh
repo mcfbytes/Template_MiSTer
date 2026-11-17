@@ -18,7 +18,7 @@
 #      idle, the window's held). Every other bit of gp_in[27:21] is a constant 0 (all of them without MISTER_LW),
 #      and gp_in is 32 bits wide. Once, in hps_lw_bridge.sv: present is assigned the constant 1 and nothing else,
 #      and idle is lw_axi_regbus's idle_q, a register assigned only on posedge clk. Once, in lw_sys_window.sv
-#      (check 8): held is live_q alone, a register assigned only on posedge clk.
+#      (check 8): held is en_q alone, a register assigned only on posedge clk.
 #   2. f2h_irq: bits 1:0 are upstream's; bits 10:8 are the 3-bit net lw_sys_window's lines output drives, line
 #      ordinal k at bit 7+k, declared with no value and assigned nowhere else; every other bit is a constant 0.
 #   3. Every LW configuration has LW nets to check; the off configuration has none.
@@ -31,7 +31,7 @@
 #      same module, clocked there and not on the destination clock, named *_lwx (GRAY 0) or *_lwgray (GRAY 1),
 #      each declared with a preserve attribute (in lw_cdc.sv, also a cell's own toggles, and lw_arst's chain,
 #      whose rise is asynchronous, into its own clock); every register so named feeds one. An lw_xfer's s_go and s_d are on its s_clk.
-#      An lw_fence's live, claim, drain and fin are on its clk and its rest on its clk_sys.
+#      An lw_fence's hen, take, drain and fin are on its clk and its rest on its clk_sys.
 #   6. Every *_lwgray register is one of the Gray buses and is assigned once, unconditionally, as g <= b ^ (b >> 1).
 #   7. No clocked block outside the cells reads, directly or through nets, a register or an input on another
 #      clock (input clocks from PORTDOM) other than through a cell's output, beside the listed reads
@@ -41,9 +41,9 @@
 #      block B, each localparam in one call. The LINE words name each non-zero ordinal once, a framework kind's
 #      ordinal (kind below 0x8000) in 1-15 and a private kind's in 16-31. line_d is one OR of terms
 #      {3{<b>_lvl & line_en[E_<B>]}} & line_bit(<B>_LINE), one per non-zero ordinal, and line_bit(k) is bit k-1;
-#      PENDING's terms put the same <b>_lvl on its entry's bit E_<B>. The lines and the lease are registers:
-#      lines is line_q alone, line_q is assigned once, on posedge clk, as {3{live_q}} & line_d, and held is
-#      live_q alone, a register assigned only on posedge clk.
+#      PENDING's terms put the same <b>_lvl on its entry's bit E_<B>. The lines and the host enable are registers:
+#      lines is line_q alone, line_q is assigned once, on posedge clk, as {3{en_q}} & line_d, and held is
+#      en_q alone, a register assigned only on posedge clk.
 # Needs Icarus Verilog (for its preprocessor) and python3.
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}/static; mkdir -p "$O" || exit 2
@@ -609,7 +609,7 @@ def domains(M):
     for mod, _, _, con in M['insts']:
         outs = {'lw_sync': [('q', 'clk')], 'lw_xfer': [('d_q', 'd_clk'), ('d_v', 'd_clk'), ('s_busy', 's_clk')],
                 'lw_arst': [('q', 'clk')],
-                'lw_fence': [('lease_s', 'clk_sys'), ('open', 'clk'), ('owned', 'clk'), ('idle', 'clk'),
+                'lw_fence': [('hen_s', 'clk_sys'), ('open', 'clk'), ('owned', 'clk'), ('idle', 'clk'),
                              ('lvl', 'clk'), ('fall', 'clk')]}.get(mod, [])
         for o, c in outs:
             for nm in lhs_names(con.get(o, []))[0]: cell[nm] = ''.join(con.get(c, []))
@@ -703,7 +703,7 @@ for n, M in sorted(mods.items()):
             check(not far, '%s: s_go and s_d read %s, not on s_clk %s' % (where, ' '.join(far), c))
         if mod == 'lw_fence':
             nfence += 1
-            for side, ins in (('clk', ('live', 'claim', 'drain', 'fin')), ('clk_sys', ('rest',))):
+            for side, ins in (('clk', ('hen', 'take', 'drain', 'fin')), ('clk_sys', ('rest',))):
                 c = ''.join(con.get(side, []))
                 src = {x for p_ in ins for m in idents(con.get(p_, [])) for x in sources(M, reg, cell, port, m)}
                 far = sorted('%s (%s)' % x for x in src if x[1] != c)
@@ -765,9 +765,9 @@ for n, M in sorted(mods.items()):
         check(False, '%s: %s on %s reads %s on %s with no cell between' % (n_, t, clk, s, c))
 for a in sorted(XREAD_ALLOW - seen_allow):
     check(False, '%s: the listed read of %s by %s is gone; take it off the list' % (a[0], a[2], a[1]))
-print('crossing structure: %d lw_sync instances, %d source registers, %d lease links, %d listed reads across '
+print('crossing structure: %d lw_sync instances, %d source registers, %d enable links, %d listed reads across '
       'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
-check(nfence == 2, 'lease links: %d lw_fence instances, not one each in lw_sector and lw_lane' % nfence)
+check(nfence == 2, 'enable links: %d lw_fence instances, not one each in lw_sector and lw_lane' % nfence)
 
 # ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
 print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')
@@ -825,14 +825,14 @@ def asg(M, r):
     return [(clk, ' '.join(rhs)) for clk, out in M['blocks'] for lhs, rhs, _, _ in out if lhs_names(lhs)[0] == [r]]
 check(re.search(r'assign lines = line_q ;', wtxt) is not None and len(re.findall(r'assign lines =', wtxt)) == 1,
       'lw_sys_window: lines is not line_q alone')
-check(asg(WM, 'line_q') == [('clk', '{ 3 { live_q } } & line_d')] and 'line_q' in WM['regs'] and
-      'line_q' not in WM['comb'], 'lw_sys_window: line_q is not assigned once, on posedge clk, as {3{live_q}} & line_d: '
+check(asg(WM, 'line_q') == [('clk', '{ 3 { en_q } } & line_d')] and 'line_q' in WM['regs'] and
+      'line_q' not in WM['comb'], 'lw_sys_window: line_q is not assigned once, on posedge clk, as {3{en_q}} & line_d: '
       '%s' % asg(WM, 'line_q'))
-check(re.search(r'assign held = live_q ;', wtxt) is not None and len(re.findall(r'assign held =', wtxt)) == 1,
-      'lw_sys_window: held is not live_q alone')
-lq = asg(WM, 'live_q')
-check(lq and all(c == 'clk' for c, _ in lq) and 'live_q' in WM['regs'] and 'live_q' not in WM['comb'],
-      'lw_sys_window: live_q is not a register assigned only on posedge clk: %s' % lq)
+check(re.search(r'assign held = en_q ;', wtxt) is not None and len(re.findall(r'assign held =', wtxt)) == 1,
+      'lw_sys_window: held is not en_q alone')
+lq = asg(WM, 'en_q')
+check(lq and all(c == 'clk' for c, _ in lq) and 'en_q' in WM['regs'] and 'en_q' not in WM['comb'],
+      'lw_sys_window: en_q is not a register assigned only on posedge clk: %s' % lq)
 check(re.search(r"line_bit = \( ord >= 8'd1 && ord <= 8'd3 \) \? \( 3'd1 << \( ord - 8'd1 \) \) : 3'd0 ;",
                 wtxt) is not None, 'lw_sys_window: line_bit(k) is not bit k-1 of the 3 lines')
 pm = re.search(r'wire \[ 31 : 0 \] pending = (.*?) ;', wtxt)

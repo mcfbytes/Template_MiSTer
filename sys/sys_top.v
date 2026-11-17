@@ -242,7 +242,7 @@ end
 `ifdef MISTER_LW
 // gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it)
 // gp_in[24]     - the firewall holds no transaction (its idle register)
-// gp_in[22]     - an LW lease is held (lw_sys_window's lease register)
+// gp_in[22]     - the LW host enable is set (lw_sys_window's enable register)
 wire        lw_present, lw_idle, lw_held;
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
 `else
@@ -1856,7 +1856,7 @@ wire [131:0] lw_st_up;
 wire        lw_wburst, lw_hrst, lw_idv;
 wire  [1:0] lw_freed;
 
-// GPO[31] = 0, the ID view or the core reset through GPO, as a clk_100m level: it ends the LW lease and refuses one
+// GPO[31] = 0, the ID view or the core reset through GPO, as a clk_100m level: it clears the LW host enable and refuses it
 lw_arst lw_idv_arst
 (
 	.clk(clk_100m),

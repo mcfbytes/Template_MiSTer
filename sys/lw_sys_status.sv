@@ -22,7 +22,7 @@
 // cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG, the four
 // STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
 // CAUSE [15:0] are event bits, STATUS (bit 0) raised by every capture; [31:16] read 0. A full-word store clears
-// each bit written as 1, and a raise in the store's cycle wins. Reads change nothing. A taken CLAIM raises STATUS,
+// each bit written as 1, and a raise in the store's cycle wins. Reads change nothing. A taken ENABLE raises STATUS,
 // so a new host reads the status once whatever its predecessor cleared, and keeps what the word had.
 // clk_sys side: hps_io's stflg as a registered Gray code. clk_100m side: the Gray code through lw_sync
 // (lw_cdc.sv), a capture of status_req on every change of it (SEQ counts captures), the CAUSE word and its line.
@@ -43,7 +43,7 @@ module lw_sys_status
 	input wire         write,
 	input wire  [31:0] wdata,
 	input wire   [3:0] be,
-	input wire         claim,        // a CLAIM is taken in this cycle
+	input wire         take,         // an ENABLE store is taken in this cycle
 
 	output wire        irq,          // level, high while CAUSE != 0
 
@@ -85,7 +85,7 @@ always @(posedge clk) begin
 		seq  <= seq + 16'd1;
 		snap <= status_req;     // quasi-static: stable since the flag's Gray code moved
 	end
-	cause <= (cause & ~clr) | (capture || claim ? C_STATUS : 16'd0);   // a raise beats a clear in the same cycle
+	cause <= (cause & ~clr) | (capture || take ? C_STATUS : 16'd0);   // a raise beats a clear in the same cycle
 end
 
 assign irq = |cause;
