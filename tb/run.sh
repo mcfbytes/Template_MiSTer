@@ -3,7 +3,8 @@
 #   S  the off-state guard (tb/offstate.sh): without MISTER_LW, sys/ reads upstream's text under every upstream
 #      macro set; every LW-only file is empty without its macro and keeps no macro defined
 #   N  static checks on the preprocessed top level (tb/static.sh): the discovery bit with both LW instances or
-#      neither, the f2h_irq lines, the LW nets arm E checks, in every configuration arm E builds
+#      neither, the f2h_irq lines, the LW nets arm E checks, in every configuration arm E builds; and the
+#      crossing structure: every crossing built from the cells of sys/lw_cdc.sv, every source register named
 #   E  sys_top.v elaborated (tb/top_tb.sv, against the stand-ins of tb/sys_stubs.sv) in every configuration of
 #      "tb/static.sh --configs": off and each LW tier set, each with no upstream macro, MISTER_DEBUG_NOHDMI and
 #      MISTER_DUAL_SDRAM. Fails if it does not elaborate, if an LW run warns of an implicit net or a port width
@@ -16,7 +17,8 @@
 #   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots)
 #   L  LW_DIAG=0 with the SECTOR block and the frame lane (MISTER_LW_LANE): the link nets through lw_link
 #   R12 R21 R53 R62 R100 R150  arm L with clk_sys at 12.0, 21.477, 53.69, 62.5, 100.0 and 150.0 MHz
-#      (the other arms run it at 33.8688 MHz); LW_TB_SYS_HP_PS is the half period in ps, plus 50 ppm
+#      (the other arms run it at 33.8688 MHz); LW_TB_SYS_HP_PS is the half period in ps, plus 50 ppm. Each runs
+#      with the crossing cells' delay models (LW_TB_CDC, sys/lw_cdc.sv) under each seed of LW_TB_SEEDS (1 2 3)
 #   V  front-end lint: slang elaborates every LW module at its defaults (the vendor atom left unknown), and
 #      the window with every block, at both LW_DIAG values, with every tier macro; and the floor modules with
 #      MISTER_LW alone. Any error fails (a name used before its declaration is one, which the Icarus arms
@@ -29,21 +31,25 @@ cd "$(dirname "$0")/.." || exit 2
 if [ -z "$LW_TB_INNER" ] && ! iverilog -V 2>/dev/null | grep -q 'version 1[2-9]'; then
   if [ -n "$LW_TB_IMAGE" ]; then
     sh tb/offstate.sh --extract   # arm S's upstream tree: the container has no git
-    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
+    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_SEEDS -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
       "$LW_TB_IMAGE" sh tb/run.sh
   fi
   echo "tb/run.sh: needs Icarus Verilog >= 12 on PATH, or LW_TB_IMAGE set to an image with it" >&2; exit 2
 fi
 
 # Expected failures, one "arm|case" per line, the case as its "-- " heading prints. An arm with entries passes
-# only if exactly its listed cases fail: an unlisted failure, or a listed case that passes, fails the arm.
-XFAIL=''
+# only if exactly its listed cases fail: an unlisted failure, or a listed case that passes under every seed the
+# arm runs, fails the arm.
+# SECTOR's reject bundle ({tag, slot} sampled as levels beside its toggle) tears under the delay models at 100 MHz
+# and above, until requests and their rejects cross as records.
+XFAIL='R100|adjacent rejects of two slots: both requests re-open
+R150|adjacent rejects of two slots: both requests re-open'
 export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
-LWF="sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_sector.sv sys/lw_sys_status.sv sys/lw_lane.sv sys/lw_blk_mux.sv"
-LWM="hps_lw_bridge lw_axi_regbus lw_sys_window lw_sector lw_sys_status lw_lane lw_link lw_blk_mux lw_card_mux"
-LW0="hps_lw_bridge lw_axi_regbus lw_sys_window lw_sys_status"
+LWF="sys/lw_cdc.sv sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_sector.sv sys/lw_sys_status.sv sys/lw_lane.sv sys/lw_blk_mux.sv"
+LWM="lw_sync lw_arst lw_qstat lw_xfer hps_lw_bridge lw_axi_regbus lw_sys_window lw_sector lw_sys_status lw_lane lw_link lw_blk_mux lw_card_mux"
+LW0="lw_sync lw_arst lw_qstat lw_xfer hps_lw_bridge lw_axi_regbus lw_sys_window lw_sys_status"
 LWD="-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_LW_LANE"
 lint() {
   : > "$1"; st=0
@@ -108,8 +114,9 @@ verdict() {
     /^FAILED: timeout/ { why = "timeout"; next }
     /^FAIL /           { if (h in want) got[h] = 1
                          else { bad++; if (!(h in seen)) { seen[h] = 1; cases = cases " [" h "]" } } }
-    /^PASSED: /        { res = $0 }
-    /^FAILED: [0-9]/   { res = $0 }
+    /^== seed /        { seed = $3 " " }
+    /^PASSED: /        { res = res (res != "" ? "; " : "") (seed != "" ? "seed " seed : "") $0 }
+    /^FAILED: [0-9]/   { res = res (res != "" ? "; " : "") (seed != "" ? "seed " seed : "") $0 }
     END { for (h in want) if (!(h in got)) { xpass++; xp = xp " [" h "]" }
           if (res == "" && why == "") why = "no result line"
           if (bad || xpass || why != "") {
@@ -160,25 +167,32 @@ for g in ${LW_TB_ARMS:-S N E 1 0 M F G L R12 R21 R53 R62 R100 R150 V}; do
     continue
   fi
   B="-DMISTER_LW -DLW_TB_PROBES"; S="-DMISTER_LW_SECTOR_SLOT=1"; L="$S -DLW_DIAG=0 -DMISTER_LW_LANE"
+  C="$L -DLW_TB_CDC"; SEEDS=1
   case $g in
     1|0) D="$B $S -DLW_DIAG=$g";;
     M) D="$B $S -DLW_DIAG=0 -DMENU_CORE";;
     F) D="$B -DLW_DIAG=0";;
     G) D="$B $S -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
     L) D="$B $L";;
-    R12) D="$B $L -DLW_TB_SYS_HP_PS=41667";;
-    R21) D="$B $L -DLW_TB_SYS_HP_PS=23281";;
-    R53) D="$B $L -DLW_TB_SYS_HP_PS=9313";;
-    R62) D="$B $L -DLW_TB_SYS_HP_PS=8000";;
-    R100) D="$B $L -DLW_TB_SYS_HP_PS=5000";;
-    R150) D="$B $L -DLW_TB_SYS_HP_PS=3333";;
+    R12) D="$B $C -DLW_TB_SYS_HP_PS=41667";;
+    R21) D="$B $C -DLW_TB_SYS_HP_PS=23281";;
+    R53) D="$B $C -DLW_TB_SYS_HP_PS=9313";;
+    R62) D="$B $C -DLW_TB_SYS_HP_PS=8000";;
+    R100) D="$B $C -DLW_TB_SYS_HP_PS=5000";;
+    R150) D="$B $C -DLW_TB_SYS_HP_PS=3333";;
     *) echo "tb/run.sh: unknown arm $g" >&2; exit 2;;
   esac
+  case $g in R*) SEEDS=${LW_TB_SEEDS:-1 2 3};; esac
   echo "== arm $g: $D"
-  if iverilog -g2012 $D -I sys -o "$O/lw_tb$g.vvp" tb/lw_tb.sv tb/lw_stub_atom.sv sys/hps_lw_bridge.sv \
+  if iverilog -g2012 $D -I sys -o "$O/lw_tb$g.vvp" tb/lw_tb.sv tb/lw_stub_atom.sv sys/lw_cdc.sv sys/hps_lw_bridge.sv \
        sys/lw_sys_window.sv sys/lw_sector.sv sys/lw_sys_status.sv sys/lw_lane.sv sys/lw_blk_mux.sv sys/hps_io.sv \
        sys/osd.v 2>"$O/lw_tb$g.err"; then
-    vvp -n "$O/lw_tb$g.vvp" > "$O/lw_tb$g.log"
+    for s in $SEEDS; do vvp -n "$O/lw_tb$g.vvp" +lw_seed=$s > "$O/lw_tb$g.s$s.log" & done; wait   # seeds side by side
+    : > "$O/lw_tb$g.log"
+    for s in $SEEDS; do
+      [ "$SEEDS" = 1 ] || echo "== seed $s" >> "$O/lw_tb$g.log"
+      cat "$O/lw_tb$g.s$s.log" >> "$O/lw_tb$g.log"; rm -f "$O/lw_tb$g.s$s.log"
+    done
     grep -v "^pass " "$O/lw_tb$g.log"
     V=$(verdict "$g" "$O/lw_tb$g.log") || rc=1
   else

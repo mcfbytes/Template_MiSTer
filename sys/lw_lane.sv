@@ -27,6 +27,8 @@
 // pops with a store to RPOP. Bridge side has no reset and answers every store in fixed cycles: a frame that
 // does not fit is dropped whole at END and counted, a frame without END is never played, and a reply word
 // that finds the reply FIFO full is dropped and counted. Contracts: docs/LW_BRIDGE.md, "LANE block".
+// Crossings, each through lw_sync (lw_cdc.sv): the four Gray pointers of the two FIFOs, each recomputed from its
+// binary pointer in every cycle, and the played and reply-drop toggles.
 
 module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 8)   // GAP: 2..7
 (
@@ -56,8 +58,6 @@ localparam RDEPTH = 1 << RAW;
 localparam [1:0] K_WORD = 2'd0, K_BEGIN = 2'd1, K_END = 2'd2, K_BEGINC = 2'd3;   // kind[0] = a BEGIN
 localparam [AW:0] ROOM = {1'b0, {AW{1'b1}}}; // DEPTH - 1: a frame always keeps one entry for its END
 
-`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
-
 function automatic [AW:0] g2b(input [AW:0] g);
 	integer n;
 	begin
@@ -83,35 +83,40 @@ endfunction
 
 reg  [AW:0] wspec = 0;                      // the open frame's next entry
 reg  [AW:0] wcom  = 0;                      // past the last committed END
-reg  [AW:0] wvis  = 0, wgray = 0;           // steps one entry per clk toward wcom: the gray code moves one bit
-reg  [AW:0] rgray = 0;
-`LW_SYNC reg [AW:0] rg_s0 = 0;
-`LW_SYNC reg [AW:0] rg_s1 = 0;
+reg  [AW:0] wvis  = 0;                      // steps one entry per clk toward wcom: the gray code moves one bit
+(* preserve *) reg [AW:0] lane_w_lwgray = 0;
+(* preserve *) reg [AW:0] lane_r_lwgray = 0;   // clk_sys
+wire [AW:0] rg_s;
 reg         open = 0, ovf = 0;
 reg  [15:0] played = 0, drops = 0;          // free-running, 16-bit
-reg         pt = 0;                         // clk_sys: toggles once per played frame
-`LW_SYNC reg [1:0] pt_s = 0;
+(* preserve *) reg pt_lwx = 0;              // clk_sys: toggles once per played frame
+wire        pt_s;
 reg         pt_d = 0;
 
-reg [RAW:0] rrp = 0, rrgray = 0;            // reply FIFO read pointer
-reg [RAW:0] rwgray = 0;                     // clk_sys: reply FIFO write pointer, gray
-`LW_SYNC reg [RAW:0] rwg_s0 = 0;
-`LW_SYNC reg [RAW:0] rwg_s1 = 0;
+reg [RAW:0] rrp = 0;                        // reply FIFO read pointer
+(* preserve *) reg [RAW:0] lane_rr_lwgray = 0;
+(* preserve *) reg [RAW:0] lane_rw_lwgray = 0;   // clk_sys: reply FIFO write pointer
+wire [RAW:0] rwg_s;
 reg  [15:0] rhead = 0;
 reg  [15:0] rdrops = 0;                     // reply words dropped on a full reply FIFO, free-running
-reg         rdt = 0;                        // clk_sys: toggles once per dropped reply word
-`LW_SYNC reg [1:0] rdt_s = 0;
+(* preserve *) reg rdt_lwx = 0;             // clk_sys: toggles once per dropped reply word
+wire        rdt_s;
 reg         rdt_d = 0;
+
+lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(lane_r_lwgray), .q(rg_s));
+lw_sync #(.W(RAW + 1), .GRAY(1)) rwg_sync (.clk(clk), .d(lane_rw_lwgray), .q(rwg_s));
+lw_sync #(.W(1)) pt_sync (.clk(clk), .d(pt_lwx), .q(pt_s));
+lw_sync #(.W(1)) rdt_sync (.clk(clk), .d(rdt_lwx), .q(rdt_s));
 
 wire        st     = wsel & write & &be;
 wire        w_beg  = st && waddr[11:2] == 10'd0;
 wire        w_wrd  = st && waddr[11:2] == 10'd1 && open;
 wire        w_end  = st && waddr[11:2] == 10'd2 && open;
-wire [AW:0] rbin   = g2b(rg_s1);
+wire [AW:0] rbin   = g2b(rg_s);
 wire [AW:0] used   = (w_beg ? wcom : wspec) - rbin;   // entries in use below the one this store writes
 wire        b_ok   = used < ROOM;           // BEGIN, and its END after it
 wire        w_ok   = ~ovf && used < ROOM;
-wire [RAW:0] rcount = g2r(rwg_s1) - rrp;     // reply words waiting
+wire [RAW:0] rcount = g2r(rwg_s) - rrp;      // reply words waiting
 wire        w_pop  = st && waddr[11:2] == 10'd3 && rcount != 0;
 wire [RAW:0] rrnext = rrp + 1'd1;
 
@@ -138,24 +143,16 @@ always @(posedge clk) if (we) fram[wa] <= wd;
 always @(posedge clk) rhead <= rram[rrp[RAW-1:0]];
 
 always @(posedge clk) begin
-	rg_s0 <= rgray;
-	rg_s1 <= rg_s0;
 	if (wvis != wcom) wvis <= wvis + 1'd1;
-	wgray <= wvis ^ (wvis >> 1);
+	lane_w_lwgray <= wvis ^ (wvis >> 1);
 
-	pt_s <= {pt_s[0], pt};
-	pt_d <= pt_s[1];
-	if (pt_s[1] ^ pt_d) played <= played + 1'd1;
+	pt_d <= pt_s;
+	if (pt_s ^ pt_d) played <= played + 1'd1;
 
-	rwg_s0 <= rwgray;
-	rwg_s1 <= rwg_s0;
-	if (w_pop) begin
-		rrp    <= rrnext;
-		rrgray <= rrnext ^ (rrnext >> 1);
-	end
-	rdt_s <= {rdt_s[0], rdt};
-	rdt_d <= rdt_s[1];
-	if (rdt_s[1] ^ rdt_d) rdrops <= rdrops + 1'd1;
+	if (w_pop) rrp <= rrnext;
+	lane_rr_lwgray <= rrp ^ (rrp >> 1);
+	rdt_d <= rdt_s;
+	if (rdt_s ^ rdt_d) rdrops <= rdrops + 1'd1;
 
 	// BEGIN abandons any open frame: its entries past wcom are overwritten
 	if (w_beg) begin
@@ -189,11 +186,10 @@ end
 
 localparam [2:0] S_IDLE = 3'd0, S_STB = 3'd1, S_ACK = 3'd2, S_NEXT = 3'd3, S_GAP = 3'd4, S_REL = 3'd5;
 
-`LW_SYNC reg [AW:0] wg_s0 = 0;
-`LW_SYNC reg [AW:0] wg_s1 = 0;
-`LW_SYNC reg [RAW:0] rrg_s0 = 0;
-`LW_SYNC reg [RAW:0] rrg_s1 = 0;
-`undef LW_SYNC
+wire [AW:0]  wg_s;
+wire [RAW:0] rrg_s;
+lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(lane_w_lwgray), .q(wg_s));
+lw_sync #(.W(RAW + 1), .GRAY(1)) rrg_sync (.clk(clk_sys), .d(lane_rr_lwgray), .q(rrg_s));
 reg  [AW:0] rptr  = 0;
 reg  [19:0] q     = 0;
 reg         fresh = 0;                      // q holds fram[rptr]
@@ -204,7 +200,7 @@ reg         capf  = 0;                      // the frame playing records its rep
 reg [RAW:0] rwp   = 0;
 
 wire [AW:0] rnext = rptr + 1'd1;
-wire        avail = fresh && rgray != wg_s1;
+wire        avail = fresh && lane_r_lwgray != wg_s;
 wire  [1:0] qk    = q[19:18];
 wire        t_beg = ps == S_IDLE && avail && qk[0] && quiet == 2'd2 && !l_busy;
 wire        t_odd = ps == S_IDLE && avail && !qk[0];
@@ -213,7 +209,7 @@ wire        t_wrd = ps == S_NEXT && avail && qk == K_WORD;
 wire        t_end = ps == S_NEXT && avail && qk == K_END;
 wire        pop   = t_odd | ps == S_STB | t_end;   // q still holds the entry through its strobe cycle
 wire        r_push = t_ack & capf;
-wire [RAW:0] r_used = rwp - g2r(rrg_s1);
+wire [RAW:0] r_used = rwp - g2r(rrg_s);
 wire        r_full = r_used[RAW];
 wire [RAW:0] rwnext = rwp + 1'd1;
 
@@ -222,26 +218,19 @@ assign din = q[15:0];
 always @(posedge clk_sys) if (r_push & ~r_full) rram[rwp[RAW-1:0]] <= l_dout;
 
 always @(posedge clk_sys) begin
-	wg_s0  <= wgray;
-	wg_s1  <= wg_s0;
-	rrg_s0 <= rrgray;
-	rrg_s1 <= rrg_s0;
 	q     <= fram[rptr[AW-1:0]];
 	fresh <= ~pop;
-	if (pop) begin
-		rptr  <= rnext;
-		rgray <= rnext ^ (rnext >> 1);
-	end
+	if (pop) rptr <= rnext;
+	lane_r_lwgray <= rptr ^ (rptr >> 1);
 	quiet <= l_busy ? 2'd0 : (quiet == 2'd2) ? 2'd2 : quiet + 2'd1;
 
-	// the reply to the strobe just acknowledged; the gray pointer moves after the word is in the RAM
+	// the reply to the strobe just acknowledged; the gray pointer follows rwp a cycle later, after the word is in
+	// the RAM
 	if (r_push) begin
-		if (r_full) rdt <= ~rdt;
-		else begin
-			rwp    <= rwnext;
-			rwgray <= rwnext ^ (rwnext >> 1);
-		end
+		if (r_full) rdt_lwx <= ~rdt_lwx;
+		else rwp <= rwnext;
 	end
+	lane_rw_lwgray <= rwp ^ (rwp >> 1);
 
 	case (ps)
 		S_IDLE: if (t_beg) begin
@@ -275,7 +264,7 @@ always @(posedge clk_sys) begin
 		else cnt <= cnt + 1'd1;
 		default: begin
 			hold <= 0;
-			pt   <= ~pt;
+			pt_lwx <= ~pt_lwx;
 			ps   <= S_IDLE;
 		end
 	endcase

@@ -446,6 +446,122 @@ end
 integer fails = 0, checks = 0, lchecks = 0;
 integer wlat_ref = -1, rlat_ref = -1;
 
+// The crossing cells alone (lw_cdc.sv): a 32-bit lw_xfer each way between clk_100m and clk_sys, and a Gray count
+// each way through lw_sync. Each receiver sorts every word: the next one its sender launched, a repeat of the
+// last one, or neither.
+reg         cx_go_a = 0, cx_go_b = 0;
+reg  [31:0] cx_d_a = 0, cx_d_b = 0;
+wire        cx_busy_a, cx_busy_b, cx_v_a, cx_v_b;
+wire [31:0] cx_q_a, cx_q_b;
+lw_xfer #(.W(32)) cx_a(.s_clk(clk), .s_go(cx_go_a), .s_d(cx_d_a), .s_busy(cx_busy_a),
+                       .d_clk(clk_sys), .d_q(cx_q_a), .d_v(cx_v_a));
+lw_xfer #(.W(32)) cx_b(.s_clk(clk_sys), .s_go(cx_go_b), .s_d(cx_d_b), .s_busy(cx_busy_b),
+                       .d_clk(clk), .d_q(cx_q_b), .d_v(cx_v_b));
+function [31:0] cx_pat(input integer k); cx_pat = k[0] ? ~(32'h01010101 * k) : 32'h01010101 * k; endfunction
+integer     cx_ka = 0, cx_kb = 0;                         // words launched
+integer     cx_na = 0, cx_nb = 0, cx_ra = 0, cx_rb = 0, cx_ea = 0, cx_eb = 0;   // next words, repeats, neither
+always @(posedge clk_sys) if (cx_v_a) begin
+	if (cx_q_a === cx_pat(cx_na + 1)) cx_na <= cx_na + 1;
+	else if (cx_q_a === cx_pat(cx_na)) cx_ra <= cx_ra + 1;
+	else cx_ea <= cx_ea + 1;
+end
+always @(posedge clk) if (cx_v_b) begin
+	if (cx_q_b === cx_pat(cx_nb + 1)) cx_nb <= cx_nb + 1;
+	else if (cx_q_b === cx_pat(cx_nb)) cx_rb <= cx_rb + 1;
+	else cx_eb <= cx_eb + 1;
+end
+reg         cg_run = 0;
+reg  [11:0] cg_a = 0, cg_b = 0, cg_ma = 0, cg_mb = 0;     // source counts; the last value each receiver decoded
+reg  [11:0] cg_a_lwgray = 0, cg_b_lwgray = 0;
+wire [11:0] cg_sa, cg_sb;
+integer     cg_ea = 0, cg_eb = 0;                         // decoded values the source never held, or out of order
+always @(posedge clk) begin
+	if (cg_run) cg_a <= cg_a + 12'd1;
+	cg_a_lwgray <= cg_a ^ (cg_a >> 1);
+end
+always @(posedge clk_sys) begin
+	if (cg_run) cg_b <= cg_b + 12'd1;
+	cg_b_lwgray <= cg_b ^ (cg_b >> 1);
+end
+lw_sync #(.W(12), .GRAY(1)) cg_xa(.clk(clk_sys), .d(cg_a_lwgray), .q(cg_sa));
+lw_sync #(.W(12), .GRAY(1)) cg_xb(.clk(clk), .d(cg_b_lwgray), .q(cg_sb));
+function [11:0] cg_bin(input [11:0] g);
+	integer n;
+	begin cg_bin[11] = g[11]; for (n = 10; n >= 0; n = n - 1) cg_bin[n] = cg_bin[n + 1] ^ g[n]; end
+endfunction
+always @(posedge clk_sys) begin
+	if (cg_bin(cg_sa) - cg_ma > cg_a - cg_ma) cg_ea <= cg_ea + 1;
+	cg_ma <= cg_bin(cg_sa);
+end
+always @(posedge clk) begin
+	if (cg_bin(cg_sb) - cg_mb > cg_b - cg_mb) cg_eb <= cg_eb + 1;
+	cg_mb <= cg_bin(cg_sb);
+end
+
+// n words each way, each launched as soon as its sender is not busy
+task cx_send(input integer n);
+	fork
+		repeat (n) begin
+			@(negedge clk); while (cx_busy_a) @(negedge clk);
+			cx_ka = cx_ka + 1; cx_d_a = cx_pat(cx_ka); cx_go_a = 1;
+			@(negedge clk) cx_go_a = 0;
+		end
+		repeat (n) begin
+			@(negedge clk_sys); while (cx_busy_b) @(negedge clk_sys);
+			cx_kb = cx_kb + 1; cx_d_b = cx_pat(cx_kb); cx_go_b = 1;
+			@(negedge clk_sys) cx_go_b = 0;
+		end
+	join
+	repeat (slow(20)) @(negedge clk);
+endtask
+
+// The cells: every word crosses whole and in order. From each of the 64 states of a handshake's toggles and
+// synchroniser stages, each way, it is idle within a bound, delivers nothing but repeats of its held word (at
+// most three: one per edge its forward chain can hold), and the words launched after it cross whole and in
+// order. Every Gray code a receiver samples is one its source held, in order.
+task cdc_cells;
+	integer st, spur, bad, idle, wait_n, r0;
+	begin
+		$display("-- CDC cells: lw_xfer words cross whole and in order, each way");
+		cx_send(200);
+		check("xfer to clk_sys: words received", cx_na, cx_ka);
+		check("xfer to clk_sys: repeated or other words", cx_ra + cx_ea, 0);
+		check("xfer to clk_100m: words received", cx_nb, cx_kb);
+		check("xfer to clk_100m: repeated or other words", cx_rb + cx_eb, 0);
+
+		$display("-- CDC cells: lw_xfer from every state of its toggles converges");
+		bad = 0; spur = 0; idle = 0;
+		for (st = 0; st < 64; st = st + 1) begin
+			@(negedge clk);
+			{cx_a.lwtg_r, cx_a.lwtg_a, cx_a.sync_r.lws0_q, cx_a.sync_r.lws1_q, cx_a.sync_a.lws0_q, cx_a.sync_a.lws1_q} = st;
+			{cx_b.lwtg_r, cx_b.lwtg_a, cx_b.sync_r.lws0_q, cx_b.sync_r.lws1_q, cx_b.sync_a.lws0_q, cx_b.sync_a.lws1_q} = st;
+			wait_n = 0;
+			repeat (slow(4)) @(negedge clk);
+			while ((cx_busy_a || cx_busy_b) && wait_n < slow(40)) begin @(negedge clk); wait_n = wait_n + 1; end
+			if (cx_busy_a || cx_busy_b) idle = idle + 1;
+			repeat (slow(10)) @(negedge clk);
+			if (cx_ra > 3 || cx_rb > 3 || cx_na != cx_ka || cx_nb != cx_kb) spur = spur + 1;
+			r0 = cx_ra + cx_rb;
+			cx_send(3);
+			if (cx_na != cx_ka || cx_nb != cx_kb || cx_ea + cx_eb != 0 || cx_ra + cx_rb != r0) bad = bad + 1;
+			cx_ra = 0; cx_rb = 0;
+		end
+		check("xfer: states not idle within 44 clk_100m cycles (scaled below the default rate)", idle, 0);
+		check("xfer: states that delivered more than three repeats, or a word not launched", spur, 0);
+		check("xfer: states after which three words did not cross whole and in order", bad, 0);
+
+		$display("-- CDC cells: lw_sync Gray counts, each way");
+		cg_run = 1;
+		repeat (3000) @(negedge clk);
+		cg_run = 0;
+		repeat (slow(20)) @(negedge clk);
+		check("Gray to clk_sys: codes out of order or never held", cg_ea, 0);
+		check("Gray to clk_100m: codes out of order or never held", cg_eb, 0);
+		check("Gray to clk_sys: the last count arrives", cg_ma, cg_a);
+		check("Gray to clk_100m: the last count arrives", cg_mb, cg_b);
+	end
+endtask
+
 task check(input string what, input [31:0] got, input [31:0] exp);
 	checks = checks + 1;
 	if (got !== exp) begin
@@ -1069,6 +1185,7 @@ integer f;
 initial begin
 	repeat (4) @(negedge clk);
 	sys_rate;
+	cdc_cells;
 	$display("-- MENU_CORE: the header rows never read the shadow");
 	for (r = 0; r < 19; r = r + 1) spi_osd_row(r, 3);
 	for (r = 0; r < 16; r = r + 1) lw_row(r, 3);
@@ -1090,6 +1207,7 @@ end
 initial begin
 	repeat (4) @(negedge clk);
 	sys_rate;
+	cdc_cells;
 	$display("-- default geometry: a %0d-word primary, 256-word save slots", TB_FRAME);
 	rd("e1 slot/frame 128", 21'h40060, 32'h01000080);
 	rd("e1 w7 card 1 slot/flags/frame 256", 21'h4006C, 32'h02030100);
@@ -1142,6 +1260,7 @@ end
 initial begin
 	repeat (4) @(negedge clk);
 	sys_rate;
+	cdc_cells;
 
 	// `SYS_LW_CAPS carries its own concatenation comma, so it is read inside {} with a closing ";"
 	checks = checks + 1;
@@ -1524,6 +1643,7 @@ initial begin
 	check_buf("next frame after the reset", 32'h0000123C, 588);
 
 	$display("-- TEST mode: SUM only, consumer untouched (LW_DIAG=0: TEST ignored, the BEGIN is rejected)");
+	settle;                                     // the last frame's done event has crossed before FRAMES is read
 	n0 = cd_frames; s0 = cd_strobes;
 	axi_read(SEC + 21'h14, 0, d0, dl, beats);
 	sec_wr(21'h10, 32'h9);
@@ -2345,6 +2465,24 @@ initial begin
 		for (i = 7; i < 14; i = i + 1) rd("lean SECTOR reg", SEC + 4*i, 32'd0);
 		if (TB_SEC) rd("lean ID kept", SEC + 21'h38, 32'h32434553);
 	end
+
+`ifdef LW_TB_CDC
+	// the models moved edges in this run: synchroniser bits, a Gray bus, and no bundle capture took a bit in flight
+	if (!$value$plusargs("lw_seed=%d", i)) i = 1;
+	$display("-- CDC models (seed %0d): edges moved: PAD handshake %0d, status flag %0d, the cell bench's Gray counts %0d",
+	         i, win.pad_x.sync_r.m_n + win.pad_x.sync_a.m_n, win.sys_status.flg_sync.m_n, cg_xa.m_n + cg_xb.m_n);
+	check("models: the PAD handshake's toggles took extra cycles", win.pad_x.sync_r.m_n + win.pad_x.sync_a.m_n > 0, 1);
+	check("models: a Gray bus took an extra cycle", win.sys_status.flg_sync.m_n + cg_xa.m_n + cg_xb.m_n > 0, 1);
+	check("models: captures that took a bit still in flight (PAD, the cell bench)",
+	      win.pad_x.cap.m_n + cx_a.cap.m_n + cx_b.cap.m_n, 0);
+`ifdef MISTER_LW_SECTOR_SLOT
+	check("models: SECTOR's crossings took extra cycles",
+	      win.sec.sector.sys_sync.m_n + win.sec.sector.ctl_sync.m_n > 0, 1);
+`endif
+`ifdef MISTER_LW_LANE
+	check("models: the lane's pointers took extra cycles", win.lane.lane.wg_sync.m_n + win.lane.lane.rg_sync.m_n > 0, 1);
+`endif
+`endif
 
 	$display("fixed latency: BVALID %0d cycles after AWVALID, RVALID %0d cycles after ARVALID", wlat_ref, rlat_ref);
 	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
