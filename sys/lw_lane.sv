@@ -15,6 +15,10 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_LANE
+`default_nettype none
+
 // LANE block (LW directory kind 5, minor 1, "LAN1"): the ordered frame lane, built with MISTER_LW_LANE.
 // Stores on clk_100m queue whole frames (BEGIN, WORDs, END) in a dual-clock FIFO; the clk_sys player replays
 // each committed frame onto the link nets through lw_link, so hps_io, hps_ext, both osd instances and sys_top's
@@ -26,25 +30,25 @@
 
 module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 8)   // GAP: 2..7
 (
-	input             clk,          // clk_100m
+	input wire         clk,          // clk_100m
 
-	input      [11:0] raddr,        // block-relative
-	output reg [31:0] rdata,
-	input      [11:0] waddr,
-	input             wsel,
-	input             write,
-	input      [31:0] wdata,
-	input       [3:0] be,
+	input wire  [11:0] raddr,        // block-relative
+	output reg  [31:0] rdata,
+	input wire  [11:0] waddr,
+	input wire         wsel,
+	input wire         write,
+	input wire  [31:0] wdata,
+	input wire   [3:0] be,
 
-	input             clk_sys,
-	input             l_busy,       // any of the link's own selects
-	input             l_wait,       // io_wait | vs_wait: the term that withholds the link's ack
-	input      [15:0] l_dout,       // the link's reply word (io_dout | io_dout_sys)
-	output reg        own    = 0,   // the player drives the link nets
-	output reg        hold   = 0,   // own, plus one cycle: the link's ack path stays frozen
-	output reg  [3:0] sel    = 0,   // {osd_vga, osd_hdmi, fpga, uio}
-	output reg        strobe = 0,
-	output     [15:0] din           // the head entry's data: held from the cycle before its strobe
+	input wire         clk_sys,
+	input wire         l_busy,       // any of the link's own selects
+	input wire         l_wait,       // io_wait | vs_wait: the term that withholds the link's ack
+	input wire  [15:0] l_dout,       // the link's reply word (io_dout | io_dout_sys)
+	output reg         own    = 0,   // the player drives the link nets
+	output reg         hold   = 0,   // own, plus one cycle: the link's ack path stays frozen
+	output reg   [3:0] sel    = 0,   // {osd_vga, osd_hdmi, fpga, uio}
+	output reg         strobe = 0,
+	output wire [15:0] din           // the head entry's data: held from the cycle before its strobe
 );
 
 localparam DEPTH  = 1 << AW;
@@ -52,7 +56,7 @@ localparam RDEPTH = 1 << RAW;
 localparam [1:0] K_WORD = 2'd0, K_BEGIN = 2'd1, K_END = 2'd2, K_BEGINC = 2'd3;   // kind[0] = a BEGIN
 localparam [AW:0] ROOM = {1'b0, {AW{1'b1}}}; // DEPTH - 1: a frame always keeps one entry for its END
 
-`define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 
 function automatic [AW:0] g2b(input [AW:0] g);
 	integer n;
@@ -81,22 +85,22 @@ reg  [AW:0] wspec = 0;                      // the open frame's next entry
 reg  [AW:0] wcom  = 0;                      // past the last committed END
 reg  [AW:0] wvis  = 0, wgray = 0;           // steps one entry per clk toward wcom: the gray code moves one bit
 reg  [AW:0] rgray = 0;
-`SYNC reg [AW:0] rg_s0 = 0;
-`SYNC reg [AW:0] rg_s1 = 0;
+`LW_SYNC reg [AW:0] rg_s0 = 0;
+`LW_SYNC reg [AW:0] rg_s1 = 0;
 reg         open = 0, ovf = 0;
 reg  [15:0] played = 0, drops = 0;          // free-running, 16-bit
 reg         pt = 0;                         // clk_sys: toggles once per played frame
-`SYNC reg [1:0] pt_s = 0;
+`LW_SYNC reg [1:0] pt_s = 0;
 reg         pt_d = 0;
 
 reg [RAW:0] rrp = 0, rrgray = 0;            // reply FIFO read pointer
 reg [RAW:0] rwgray = 0;                     // clk_sys: reply FIFO write pointer, gray
-`SYNC reg [RAW:0] rwg_s0 = 0;
-`SYNC reg [RAW:0] rwg_s1 = 0;
+`LW_SYNC reg [RAW:0] rwg_s0 = 0;
+`LW_SYNC reg [RAW:0] rwg_s1 = 0;
 reg  [15:0] rhead = 0;
 reg  [15:0] rdrops = 0;                     // reply words dropped on a full reply FIFO, free-running
 reg         rdt = 0;                        // clk_sys: toggles once per dropped reply word
-`SYNC reg [1:0] rdt_s = 0;
+`LW_SYNC reg [1:0] rdt_s = 0;
 reg         rdt_d = 0;
 
 wire        st     = wsel & write & &be;
@@ -185,11 +189,11 @@ end
 
 localparam [2:0] S_IDLE = 3'd0, S_STB = 3'd1, S_ACK = 3'd2, S_NEXT = 3'd3, S_GAP = 3'd4, S_REL = 3'd5;
 
-`SYNC reg [AW:0] wg_s0 = 0;
-`SYNC reg [AW:0] wg_s1 = 0;
-`SYNC reg [RAW:0] rrg_s0 = 0;
-`SYNC reg [RAW:0] rrg_s1 = 0;
-`undef SYNC
+`LW_SYNC reg [AW:0] wg_s0 = 0;
+`LW_SYNC reg [AW:0] wg_s1 = 0;
+`LW_SYNC reg [RAW:0] rrg_s0 = 0;
+`LW_SYNC reg [RAW:0] rrg_s1 = 0;
+`undef LW_SYNC
 reg  [AW:0] rptr  = 0;
 reg  [19:0] q     = 0;
 reg         fresh = 0;                      // q holds fram[rptr]
@@ -283,22 +287,22 @@ endmodule
 // player: while it holds them the link's strobe and ack stay frozen, so a link word is delayed, never lost.
 module lw_link
 (
-	input             clk_sys,
-	input       [3:0] l_sel,        // the link's selects {osd_vga, osd_hdmi, fpga, uio}, as sys_top decodes them
-	input             l_clk,
-	input      [15:0] l_din,
-	input             l_wait,       // io_wait | vs_wait
+	input wire         clk_sys,
+	input wire   [3:0] l_sel,        // the link's selects {osd_vga, osd_hdmi, fpga, uio}, as sys_top decodes them
+	input wire         l_clk,
+	input wire  [15:0] l_din,
+	input wire         l_wait,       // io_wait | vs_wait
 
-	input             p_own,
-	input             p_hold,
-	input       [3:0] p_sel,
-	input             p_strobe,
-	input      [15:0] p_din,
+	input wire         p_own,
+	input wire         p_hold,
+	input wire   [3:0] p_sel,
+	input wire         p_strobe,
+	input wire  [15:0] p_din,
 
-	output      [3:0] io_sel,
-	output            io_strobe,
-	output     [15:0] io_din,
-	output reg        io_ack = 0
+	output wire  [3:0] io_sel,
+	output wire        io_strobe,
+	output wire [15:0] io_din,
+	output reg         io_ack = 0
 );
 
 reg  rack = 0;
@@ -316,3 +320,7 @@ always @(posedge clk_sys) begin
 end
 
 endmodule
+
+`default_nettype wire
+`endif
+`endif

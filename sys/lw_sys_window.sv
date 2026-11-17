@@ -15,6 +15,9 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+`ifdef MISTER_LW
+`default_nettype none
+
 // LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR, OSDBUF and SYS blocks.
 // Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
 // or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a toggle handshake
@@ -31,10 +34,6 @@
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), the analog-drop count (reads 0)
 // and lw_sector's diagnostics; LW_DIAG=1 (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
-
-`ifndef LW_DIAG
-`define LW_DIAG 0
-`endif
 
 module lw_sys_window #(
 	// SECTOR block, as the core declares it (sys_top.v maps the MISTER_LW_SECTOR_* / MISTER_LW_CARD* macros).
@@ -53,47 +52,51 @@ module lw_sys_window #(
 	parameter        LANE_EN   = 0
 )
 (
-	input             clk,          // clk_100m
+	input wire         clk,          // clk_100m
 
-	input      [20:0] lw_raddr,
-	input             lw_ren,
-	input             lw_rd_ack,
-	input             lw_rd_word,
-	output reg [31:0] lw_rdata,
+	input wire  [20:0] lw_raddr,
+	input wire         lw_ren,
+	input wire         lw_rd_ack,
+	input wire         lw_rd_word,
+	output reg  [31:0] lw_rdata,
 
-	input      [20:0] lw_waddr,
-	input             lw_write,
-	input      [31:0] lw_wdata,
-	input       [3:0] lw_be,
+	input wire  [20:0] lw_waddr,
+	input wire         lw_write,
+	input wire  [31:0] lw_wdata,
+	input wire   [3:0] lw_be,
 
-	output            doorbell,     // SECTOR cause level -> f2h_irq[8]
-	output            sys_irq,      // SYS cause level -> f2h_irq[9]
+	output wire        doorbell,     // SECTOR cause level -> f2h_irq[8]
+	output wire        sys_irq,      // SYS cause level -> f2h_irq[9]
 
-	input             clk_sys,
-	output reg [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
-	input      [34:0] blk_up,       // {reset, hps_ack, req, lba[31:0]} on clk_sys, from emu
-	output     [18:0] blk_dn,       // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
-	input      [19:0] card_up,      // {card 1, card 0}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
-	output     [12:0] card_dn,      // {ack1, en_sys1, ack0, en_sys0, addr[8:0]} on clk_sys, to emu
-	input     [131:0] st_up,        // {stflg[3:0], status_req[127:0]} on clk_sys, from hps_io
+	input wire         clk_sys,
+	output reg  [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
+	input wire  [34:0] blk_up,       // {reset, hps_ack, req, lba[31:0]} on clk_sys, from emu
+	output wire [18:0] blk_dn,       // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
+	input wire  [19:0] card_up,      // {card 1, card 0}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
+	output wire [12:0] card_dn,      // {ack1, en_sys1, ack0, en_sys0, addr[8:0]} on clk_sys, to emu
+	input wire [131:0] st_up,        // {stflg[3:0], status_req[127:0]} on clk_sys, from hps_io
 
-	input             lane_busy,    // clk_sys: any of the link's own selects
-	input             lane_wait,    // clk_sys: io_wait | vs_wait
-	input      [15:0] lane_dout,    // clk_sys: the link's reply word, io_dout | io_dout_sys
-	output            lane_own,     // clk_sys: the lane player, to lw_link
-	output            lane_hold,
-	output      [3:0] lane_sel,
-	output            lane_strobe,
-	output     [15:0] lane_din,
+	input wire         lane_busy,    // clk_sys: any of the link's own selects
+	input wire         lane_wait,    // clk_sys: io_wait | vs_wait
+	input wire  [15:0] lane_dout,    // clk_sys: the link's reply word, io_dout | io_dout_sys
+	output wire        lane_own,     // clk_sys: the lane player, to lw_link
+	output wire        lane_hold,
+	output wire  [3:0] lane_sel,
+	output wire        lane_strobe,
+	output wire [15:0] lane_din,
 
-	output            osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image
-	output      [9:0] osd_addr,
-	output     [31:0] osd_data,
-	output      [3:0] osd_be,
-	output      [1:0] osd_ctrl      // {LWSEL & HR, LWSEL}, clk_100m registers; each osd synchronizes them
+	output wire        osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image
+	output wire  [9:0] osd_addr,
+	output wire [31:0] osd_data,
+	output wire  [3:0] osd_be,
+	output wire  [1:0] osd_ctrl      // {LWSEL & HR, LWSEL}, clk_100m registers; each osd synchronizes them
 );
 
+`ifdef LW_DIAG
 localparam        DIAG     = `LW_DIAG;
+`else
+localparam        DIAG     = 0;
+`endif
 
 localparam [20:0] WIN_OFF  = 21'h40000;
 localparam [20:0] WIN_SIZE = 21'h80000;
@@ -240,6 +243,7 @@ always @(*) begin
 end
 
 generate
+`ifdef MISTER_LW_SECTOR_SLOT
 if (SEC_EN) begin : sec
 	// an undeclared card's request lines are held low, so the feeder never serves it
 	wire [1:0] xdecl = {MC_DECL1 ? 1'b1 : 1'b0, MC_DECL0 ? 1'b1 : 1'b0};
@@ -261,6 +265,12 @@ if (SEC_EN) begin : sec
 		.x_en_sys({card_dn[11], card_dn[9]}), .x_ack({card_dn[12], card_dn[10]})
 	);
 end
+`else
+// SEC_EN without the tier macro: lw_sector.sv is empty, so the build stops here, naming the macro
+if (SEC_EN) begin : sec
+	lw_sector_needs_MISTER_LW_SECTOR_SLOT guard();
+end
+`endif
 else begin : nosec
 	assign sec_rdata = 32'd0;
 	assign doorbell  = 1'b0;
@@ -270,6 +280,7 @@ end
 endgenerate
 
 generate
+`ifdef MISTER_LW_LANE
 if (LANE_EN) begin : lane
 	lw_lane #(.AW(LANE_AW), .GAP(LANE_GAP[2:0]), .RAW(LANE_RAW)) lane
 	(
@@ -280,6 +291,12 @@ if (LANE_EN) begin : lane
 		.own(lane_own), .hold(lane_hold), .sel(lane_sel), .strobe(lane_strobe), .din(lane_din)
 	);
 end
+`else
+// LANE_EN without the tier macro: lw_lane.sv is empty, so the build stops here, naming the macro
+if (LANE_EN) begin : lane
+	lw_lane_needs_MISTER_LW_LANE guard();
+end
+`endif
 else begin : nolane
 	assign lane_rdata  = 32'd0;
 	assign lane_own    = 1'b0;
@@ -434,3 +451,6 @@ always @(posedge clk_sys) begin
 end
 
 endmodule
+
+`default_nettype wire
+`endif

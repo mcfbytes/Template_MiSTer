@@ -15,6 +15,10 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+`default_nettype none
+
 // emu side of the LW SECTOR route (lw_sector.sv): one hps_io read slot's consumer is fed either by hps_io
 // or, while sys_top's en_sys is set, by the LW feeder. The consumer's ack/write/data are muxed here, never
 // the shared sd_buff_wr, so an SPI transfer on another slot cannot land in an LW frame. With en_sys set the
@@ -22,19 +26,19 @@
 
 module lw_blk_mux
 (
-	inout  [313:0] HPS_BUS,
+	inout wire [313:0] HPS_BUS,
 
-	input          reset,       // the consumer's reset: zero-fills an open LW frame
-	input          core_req,
-	input   [31:0] core_lba,
-	output         core_ack,
-	output         core_wr,
-	output  [15:0] core_data,
+	input wire         reset,       // the consumer's reset: zero-fills an open LW frame
+	input wire         core_req,
+	input wire  [31:0] core_lba,
+	output wire        core_ack,
+	output wire        core_wr,
+	output wire [15:0] core_data,
 
-	output         hps_req,     // -> hps_io sd_rd[slot]
-	input          hps_ack,     // <- hps_io sd_ack[slot]
-	input          hps_wr,      // <- hps_io sd_buff_wr
-	input   [15:0] hps_data     // <- hps_io sd_buff_dout
+	output wire        hps_req,     // -> hps_io sd_rd[slot]
+	input wire         hps_ack,     // <- hps_io sd_ack[slot]
+	input wire         hps_wr,      // <- hps_io sd_buff_wr
+	input wire  [15:0] hps_data     // <- hps_io sd_buff_dout
 );
 
 wire en = HPS_BUS[113];
@@ -56,22 +60,22 @@ endmodule
 
 module lw_card_mux #(parameter CARD = 0)
 (
-	inout  [313:0] HPS_BUS,
+	inout wire [313:0] HPS_BUS,
 
-	input          core_rd,
-	input          core_wr,
-	input    [6:0] core_lba,
-	output         core_ack,
-	output         core_write,
-	output   [8:0] core_addr,
-	output  [15:0] core_data,
+	input wire         core_rd,
+	input wire         core_wr,
+	input wire   [6:0] core_lba,
+	output wire        core_ack,
+	output wire        core_write,
+	output wire  [8:0] core_addr,
+	output wire [15:0] core_data,
 
-	output         hps_rd,      // -> hps_io sd_rd[slot]
-	output         hps_wr,      // -> hps_io sd_wr[slot]
-	input          hps_ack,     // <- hps_io sd_ack[slot]
-	input          hps_write,   // <- hps_io sd_buff_wr
-	input    [8:0] hps_addr,    // <- hps_io sd_buff_addr
-	input   [15:0] hps_data     // <- hps_io sd_buff_dout
+	output wire        hps_rd,      // -> hps_io sd_rd[slot]
+	output wire        hps_wr,      // -> hps_io sd_wr[slot]
+	input wire         hps_ack,     // <- hps_io sd_ack[slot]
+	input wire         hps_write,   // <- hps_io sd_buff_wr
+	input wire   [8:0] hps_addr,    // <- hps_io sd_buff_addr
+	input wire  [15:0] hps_data     // <- hps_io sd_buff_dout
 );
 
 localparam B = CARD ? 170 : 158;
@@ -89,3 +93,7 @@ assign core_addr  = en ? HPS_BUS[157:149]     : hps_addr;
 assign core_data  = en ? HPS_BUS[110:95]      : hps_data;
 
 endmodule
+
+`default_nettype wire
+`endif
+`endif

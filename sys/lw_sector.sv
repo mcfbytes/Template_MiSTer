@@ -15,6 +15,10 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+`default_nettype none
+
 // SECTOR block (LW directory kind 2, minor 1, "SEC2"): one hps_io read slot (the primary) plus two
 // save slots (X0, X1) served over the LW bridge by ONE feeder. A save slot READ is a BEGIN_S frame of
 // XFRAME words with a strobe address; a save slot WRITE is answered by WACK_S (ack, no strobes): the HPS
@@ -29,46 +33,46 @@
 module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3, parameter AW = 9,
                    parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3, parameter [9:0] XFRAME = 256)
 (
-	input             clk,          // clk_100m
+	input wire        clk,          // clk_100m
 
-	input      [12:0] raddr,        // block-relative
-	input             rsel,
-	input             ren,
-	input             rd_ack,
-	input             rd_word,
+	input wire [12:0] raddr,        // block-relative
+	input wire        rsel,
+	input wire        ren,
+	input wire        rd_ack,
+	input wire        rd_word,
 	output reg [31:0] rdata,
-	input      [12:0] waddr,
-	input             wsel,
-	input             write,
-	input      [31:0] wdata,
-	input       [3:0] be,
+	input wire [12:0] waddr,
+	input wire        wsel,
+	input wire        write,
+	input wire [31:0] wdata,
+	input wire  [3:0] be,
 
-	output            doorbell,     // level, high while CAUSE != 0
+	output wire       doorbell,     // level, high while CAUSE != 0
 
-	input             clk_sys,
-	input             c_reset,      // consumer reset (zero-fills an open frame)
-	input             c_req,
-	input      [31:0] c_lba,
-	input             hps_ack,      // the SPI path's ack for this slot
+	input wire        clk_sys,
+	input wire        c_reset,      // consumer reset (zero-fills an open frame)
+	input wire        c_req,
+	input wire [31:0] c_lba,
+	input wire        hps_ack,      // the SPI path's ack for this slot
 	output reg        en_sys = 0,   // mux state: 1 = this block owns the consumer's ack/write/data
-	output            o_ack,
+	output wire       o_ack,
 	output reg        o_wr   = 0,
 	output reg [15:0] o_dat  = 0,
 	output reg  [8:0] o_adr  = 0,   // save-slot strobe address: {word, half}, hps_io's sd_buff_addr order
 
-	input       [1:0] x_rd,         // save slots X0/X1 (clk_sys): read and write requests, LBA, SPI ack
-	input       [1:0] x_wr,
-	input      [13:0] x_lba,        // {X1, X0}, 7 bits each
-	input       [1:0] x_hps_ack,
+	input wire  [1:0] x_rd,         // save slots X0/X1 (clk_sys): read and write requests, LBA, SPI ack
+	input wire  [1:0] x_wr,
+	input wire [13:0] x_lba,        // {X1, X0}, 7 bits each
+	input wire  [1:0] x_hps_ack,
 	output reg  [1:0] x_en_sys = 0,
-	output      [1:0] x_ack
+	output wire [1:0] x_ack
 );
 
 localparam [15:0] SDSTAT = {1'b1, 6'd0, BLKSZ, SLOT[3:0], 1'b0, 1'b1};
 localparam [3:0]  PSLOT  = SLOT[3:0];
 localparam [1:0]  T_DATA = 2'd0, T_BEGIN = 2'd1, T_ABORT = 2'd2;
 
-`define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 
 // Servable geometry: frames of 1-1023 words; a save-slot frame of at most 256 words (the 9-bit strobe address).
 // synthesis translate_off
@@ -86,10 +90,10 @@ localparam DEPTH = 1 << AW;
 
 reg  [AW:0] wptr = 0, wgray = 0;
 reg  [AW:0] rptr = 0, rgray = 0;
-`SYNC reg [AW:0] rg_s0 = 0;
-`SYNC reg [AW:0] rg_s1 = 0;
-`SYNC reg [AW:0] wg_s0 = 0;
-`SYNC reg [AW:0] wg_s1 = 0;
+`LW_SYNC reg [AW:0] rg_s0 = 0;
+`LW_SYNC reg [AW:0] rg_s1 = 0;
+`LW_SYNC reg [AW:0] wg_s0 = 0;
+`LW_SYNC reg [AW:0] wg_s1 = 0;
 
 function automatic [AW:0] g2b(input [AW:0] g);
 	integer n;
@@ -134,8 +138,8 @@ reg  [19:0] sum = 0;
 
 // clk_sys -> clk_100m: request levels, status bits, event toggles, the rejected answer's {tag, slot}
 wire [16:0] sys_bits;
-`SYNC reg [16:0] sb0 = 0;
-`SYNC reg [16:0] sb1 = 0;
+`LW_SYNC reg [16:0] sb0 = 0;
+`LW_SYNC reg [16:0] sb1 = 0;
 reg  [16:0] sb2 = 0;
 wire        req_s = sb1[0];
 wire        req_rise = sb1[0] & ~sb2[0];
@@ -292,8 +296,8 @@ end
 
 /////////////////////////////// clk_sys: feeder ///////////////////////////
 
-`SYNC reg [3:0] cs0 = 0;
-`SYNC reg [3:0] cs1 = 0;
+`LW_SYNC reg [3:0] cs0 = 0;
+`LW_SYNC reg [3:0] cs1 = 0;
 wire       en_s = cs1[0], test_s = cs1[1];
 wire [1:0] xen_s = cs1[3:2];
 
@@ -447,6 +451,10 @@ always @(posedge clk_sys) begin
 	end
 end
 
-`undef SYNC
+`undef LW_SYNC
 
 endmodule
+
+`default_nettype wire
+`endif
+`endif

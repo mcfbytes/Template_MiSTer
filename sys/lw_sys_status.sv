@@ -15,6 +15,9 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+`ifdef MISTER_LW
+`default_nettype none
+
 // SYS block (LW directory kind 4, "STS1"): the core->host status back-channel (hps_io's 0x29) as a
 // cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG, the four
 // STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
@@ -25,26 +28,26 @@
 
 module lw_sys_status
 (
-	input             clk,          // clk_100m
+	input wire         clk,          // clk_100m
 
-	input       [9:0] raddr,        // block-relative, bytes
-	input             rsel,
-	input             ren,
-	input             rd_ack,
-	input             rd_word,
-	output reg [31:0] rdata,
+	input wire   [9:0] raddr,        // block-relative, bytes
+	input wire         rsel,
+	input wire         ren,
+	input wire         rd_ack,
+	input wire         rd_word,
+	output reg  [31:0] rdata,
 
-	output            irq,          // level, high while CAUSE != 0
+	output wire        irq,          // level, high while CAUSE != 0
 
-	input             clk_sys,
-	input       [3:0] stflg,        // hps_io's status flag, clk_sys
-	input     [127:0] status_req    // hps_io's snapshot, clk_sys; changes only with stflg
+	input wire         clk_sys,
+	input wire   [3:0] stflg,        // hps_io's status flag, clk_sys
+	input wire [127:0] status_req    // hps_io's snapshot, clk_sys; changes only with stflg
 );
 
 localparam [31:0] TAG_SYS   = 32'h0010_0000;   // cause word [23:16] one-hot: bit 20 = SYS
 localparam [15:0] C_STATUS  = 16'h0001;
 
-`define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 
 /////////////////////////////// clk_sys ///////////////////////////////////
 
@@ -53,8 +56,8 @@ always @(posedge clk_sys) st_g <= stflg ^ (stflg >> 1);
 
 /////////////////////////////// clk_100m //////////////////////////////////
 
-`SYNC reg [3:0] g_s0 = 0;
-`SYNC reg [3:0] g_s1 = 0;
+`LW_SYNC reg [3:0] g_s0 = 0;
+`LW_SYNC reg [3:0] g_s1 = 0;
 
 function automatic [3:0] g2b(input [3:0] g);
 	g2b = {g[3], ^g[3:2], ^g[3:1], ^g[3:0]};
@@ -101,6 +104,9 @@ always @(*) begin
 	endcase
 end
 
-`undef SYNC
+`undef LW_SYNC
 
 endmodule
+
+`default_nettype wire
+`endif

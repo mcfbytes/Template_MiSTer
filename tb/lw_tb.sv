@@ -18,8 +18,9 @@
 // LW bridge framework testbench: hps_lw_bridge, lw_sys_window (directory, PAD, SECTOR, OSDBUF, SYS), hps_io's
 // LW write path and both osd shadows, driven through a stand-in for the HPS LW bridge atom (lw_stub_atom.sv).
 // The reference configuration is a CD-style core: a 588-word primary frame on hps_io slot 1 and two 1 KB memory
-// cards on slots 2 and 3, each card image in DDR. LW_TB_NOSEC builds the window without a SECTOR block (the
-// Template's own configuration) and checks that the directory, the block and the doorbell are silent.
+// cards on slots 2 and 3, each card image in DDR. Without MISTER_LW_SECTOR_SLOT the window has no SECTOR block and
+// the consumers meet hps_io directly (the Template's own configuration); the directory, the block's addresses and
+// the doorbell must then be silent.
 // LW_TB_DEFGEOM runs the SECTOR block at the documented default geometry instead (a 128-word primary frame,
 // 256-word save-slot frames): a save-slot frame longer than the primary's must complete.
 // MISTER_LW_LANE adds the frame lane: every decoder then reads the link nets through lw_link, as sys_top wires
@@ -162,10 +163,10 @@ hps_lw_bridge bridge
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be)
 );
 
-`ifdef LW_TB_NOSEC
-localparam TB_SEC = 0;
-`else
+`ifdef MISTER_LW_SECTOR_SLOT
 localparam TB_SEC = 1;
+`else
+localparam TB_SEC = 0;
 `endif
 `ifdef LW_TB_DEFGEOM
 localparam TB_FRAME = 128;
@@ -348,7 +349,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 	.sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .sd_buff_addr(sd_buff_addr)
 );
 
-// Two memory cards on hps_io slots 2 and 3, each behind an lw_card_mux.
+// Two memory cards on hps_io slots 2 and 3, each behind an lw_card_mux when the SECTOR block is built.
 wire        mc1_ack, mc1_write, mc2_ack, mc2_write;
 wire  [8:0] mc1_addr, mc2_addr;
 wire [15:0] mc1_din, mc2_din;
@@ -356,6 +357,7 @@ mc_model mc1(.clk(clk_sys), .reset(cd_reset), .ack(mc1_ack), .write(mc1_write), 
              .haddr(sd_buff_addr));
 mc_model mc2(.clk(clk_sys), .reset(cd_reset), .ack(mc2_ack), .write(mc2_write), .addr(mc2_addr), .din(mc2_din),
              .haddr(sd_buff_addr));
+`ifdef MISTER_LW_SECTOR_SLOT
 lw_card_mux #(.CARD(0)) mc1_lw
 (
 	.HPS_BUS(hps_bus),
@@ -373,13 +375,21 @@ lw_card_mux #(.CARD(1)) mc2_lw
 	.hps_data(sd_buff_dout)
 );
 
-// The CD on hps_io slot 1, behind an lw_blk_mux.
+// The CD on hps_io slot 1, behind an lw_blk_mux when the SECTOR block is built.
 lw_blk_mux cd_lw
 (
 	.HPS_BUS(hps_bus), .reset(cd_reset),
 	.core_req(cd_req), .core_lba(cd_lba), .core_ack(cd_ack), .core_wr(cd_wr), .core_data(cd_data),
 	.hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
 );
+`else
+// No SECTOR block, so no mux: each consumer meets hps_io directly, as in a core that declares none.
+assign sd_rd[2] = mc1.rd, sd_wr[2] = mc1.wr, mc1_ack = sd_ack[2], mc1_write = sd_buff_wr, mc1_addr = sd_buff_addr;
+assign mc1_din  = sd_buff_dout;
+assign sd_rd[3] = mc2.rd, sd_wr[3] = mc2.wr, mc2_ack = sd_ack[3], mc2_write = sd_buff_wr, mc2_addr = sd_buff_addr;
+assign mc2_din  = sd_buff_dout;
+assign sd_rd[1] = cd_req, cd_ack = sd_ack[1], cd_wr = sd_buff_wr, cd_data = sd_buff_dout;
+`endif
 
 // A CD fetch FSM: req with the LBA, drop req on ack, then exactly 2 x TB_FRAME strobes, low half then high
 // half, into one staging buffer. It consumes ANY strobe.
@@ -1155,7 +1165,7 @@ initial begin
 	rd("e0 bitmap w1", 21'h40024, 32'h20000000);
 	for (i = 2; i < 8; i = i + 1) rd("e0 bitmap wN", 21'h40020 + 4*i, 32'd0);
 	for (i = 0; i < 4; i = i + 1) rd("e0 reserved", 21'h40040 + 4*i, 32'd0);
-`ifdef LW_TB_NOSEC
+`ifndef MISTER_LW_SECTOR_SLOT
 	for (i = 0; i < 16; i = i + 1) rd("e1 empty (no SECTOR)", 21'h40050 + 4*i, 32'd0);
 `else
 	rd("e1 kind SECTOR", 21'h40050, 32'd2);
@@ -1320,7 +1330,7 @@ initial begin
 	check("analog_0 last left queued lands on restart", {16'd0, ana0}, 32'h0000000A);
 	check("right analog_0 last queued lands on restart", {16'd0, rana0}, 32'h00000010);
 
-`ifdef LW_TB_NOSEC
+`ifndef MISTER_LW_SECTOR_SLOT
 	$display("-- no SECTOR block: its addresses read 0, stores are ignored, no doorbell");
 	rd("SECTOR CAUSE reads 0", 21'h041000, 32'd0);
 	rd("SECTOR ID reads 0", 21'h041038, 32'd0);
