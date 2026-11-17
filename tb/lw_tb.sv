@@ -66,7 +66,7 @@ always @(posedge clk) begin
 end
 endmodule
 
-// The checker bound to each lease link (lw_fence): its level rises only on an acknowledge of rest, and falls only
+// The checker bound to each enable link (lw_fence): its level rises only on an acknowledge of rest, and falls only
 // after the acknowledge has read 0 since its rise; the acknowledge never reads 0 in IDLE (off: a case that
 // scrambles or forces a link); no store strobe reaches the block outside OPEN. Sampled at every clk_100m negedge.
 module fence_chk(input clk, input off, input [2:0] st, input lvl, input ack_s, input stb);
@@ -75,7 +75,7 @@ reg     lvl_p = 0, ack_p = 0, seen0 = 0, init = 0;
 task bad(input string what);
 	begin
 		n_bad = n_bad + 1;
-		if (n_bad <= 6) $display("   lease link %m at %0t: %s", $time, what);
+		if (n_bad <= 6) $display("   enable link %m at %0t: %s", $time, what);
 	end
 endtask
 always @(negedge clk) begin
@@ -234,18 +234,12 @@ localparam TB_LANE = 1;
 `else
 localparam TB_LANE = 0;
 `endif
-// The lease unit: 2^TB_LU clk_100m cycles (the RTL's default is 25).
-`ifdef LW_TB_LEASE_LOG2
-localparam TB_LU = `LW_TB_LEASE_LOG2;
-`else
-localparam TB_LU = 12;
-`endif
 
 lw_sys_window #(
 	.SEC_EN(TB_SEC), .SEC_SLOT(8'd1), .SEC_FRAME(TB_FRAME), .BLKSZ(3'd3),
 	.MC_SLOT0(4'd2), .MC_WSRC0(32'h30100000), .MC_EXT0(32'h00020000),
 	.MC_SLOT1(4'd3), .MC_WSRC1(32'h30200000), .MC_EXT1(32'h00020000), .MC_FRAME(10'd256),
-	.LANE_EN(TB_LANE), .LEASE_UNIT_LOG2(TB_LU)
+	.LANE_EN(TB_LANE)
 ) win
 (
 	.clk(clk),
@@ -381,12 +375,12 @@ end
 always @(fw_idle) if ($realtime > 0 && $realtime != fw_tpos) fw_glitch = fw_glitch + 1;
 
 // GPI as sys_top builds it, for the host models: the core magic in the ID view; in the I/O view bit 31 clear, bit
-// 25 the firewall's present, 24 its idle, 22 the window's held. Bit 22 is compared with live_q in every cycle.
+// 25 the firewall's present, 24 its idle, 22 the window's held. Bit 22 is compared with en_q in every cycle.
 wire [31:0] tb_gpi = !gpo31 ? 32'h5CA623A4 : {6'd0, fw_present, fw_idle, 1'b0, lw_held, 22'd0};
 integer gpi22_n = 0, gpi22_bad = 0, gpi22_on = 0;
 always @(negedge clk) begin
 	gpi22_n = gpi22_n + 1;
-	if (gpo31 && tb_gpi[22] !== win.live_q) gpi22_bad = gpi22_bad + 1;
+	if (gpo31 && tb_gpi[22] !== win.en_q) gpi22_bad = gpi22_bad + 1;
 	if (gpo31 && tb_gpi[22] === 1'b1) gpi22_on = gpi22_on + 1;
 end
 
@@ -630,7 +624,7 @@ task pure_view(input do_cmp, output integer nbad);
 		nbad = 0;
 		for (m = 0; m < PURE_N; m = m + 1) begin
 			axi_read(pure_addr(m), 0, v, vl, nb);
-			if (pure_addr(m) == 21'h41030 || pure_addr(m) == LEASE) v = 0;
+			if (pure_addr(m) == 21'h41030 || pure_addr(m) == ENA) v = 0;
 			if (do_cmp && v !== pure_v[m]) begin
 				if (nbad == 0) $display("     view: %06h was %08h, now %08h", pure_addr(m), pure_v[m], v);
 				nbad = nbad + 1;
@@ -813,91 +807,18 @@ task lat_check(input string what, input integer lat, inout integer ref_lat);
 	end
 endtask
 
-// ---- The lease, and the bench's own host ----
-// LEASE store: {key, id[15:6], verb[5:4], ttl[3:0]}; verbs 1 CLAIM, 2 RENEW, 3 RELEASE.
+// ---- The host enable, and the bench's own host ----
+// ENABLE store: one full word, the key and bit 0. Nothing but an ID view, a core reset through GPO or an HPS reset
+// clears it: the bench's host ends its enable with an ID view (host_end), as its successor's start would.
 localparam [20:0] SYSB = 21'h43000;               // the SYS block
-localparam [20:0] LEASE = 21'h40018, OWNEDA = 21'h40024, OPENA = 21'h4002C, LINEN = 21'h40030, RESETSA = 21'h40034;
-function [31:0] lease_w(input [9:0] id, input [1:0] verb, input [3:0] ttl); lease_w = {16'h4C57, id, verb, ttl}; endfunction
-// The bench's host claims the lease with its id before its first store, enables every line, and keeps it: when a
-// quarter of its TTL has passed, the next access it makes is preceded by a RENEW and a read of LEASE (held, its
-// own id, the epoch of its claim). A lapse while it keeps the lease fails the arm.
-localparam [9:0] KP_ID  = 10'h2A7;
-localparam [3:0] KP_TTL = 4'd15;
-localparam real  KP_NS  = 10.0 * (2.0 ** TB_LU) * 15.0 / 4.0;
-reg      kp_on = 0, kp_in = 0, kp_live_d = 0;
-reg [7:0] kp_epoch = 0;
-realtime kp_t = 0;
-integer  kp_n = 0, kp_lost = 0, kp_lapse = 0;
-always @(posedge clk) begin
-	if (kp_on && kp_live_d && !win.live_q) begin
-		kp_lapse = kp_lapse + 1;
-		$display("   the bench's lease ended at %0t while its keeper held it (end %0d)", $time, win.lend);
-	end
-	kp_live_d <= win.live_q;
-end
-
-// One store and one read with no keeper step: the keeper's own accesses.
-task raw_write(input [20:0] a, input [31:0] d);
-	integer n;
-	reg aw_hs, w_hs;
-	begin
-		@(negedge clk);
-		awaddr = a; awlen = 0; awsize = 2; awvalid = 1;
-		wdata = d; wstrb = 4'hF; wlast = 1; wvalid = 1;
-		n = 0;
-		while (!bvalid && n <= 64) begin
-			aw_hs = awvalid & awready; w_hs = wvalid & wready;
-			@(negedge clk); n = n + 1;
-			if (aw_hs) awvalid = 0;
-			if (w_hs) wvalid = 0;
-		end
-		awvalid = 0; wvalid = 0;
-		if (!bvalid) begin $display("FAIL write %06h: no BVALID", a); fails = fails + 1; end
-		lat_check("BVALID", n, wlat_ref);
-		@(negedge clk);
-	end
-endtask
-task raw_read(input [20:0] a, output [31:0] d);
-	integer n;
-	reg ar_hs;
-	begin
-		@(negedge clk);
-		araddr = a; arlen = 0; arsize = 2; arvalid = 1;
-		n = 0;
-		while (!rvalid && n <= 64) begin
-			ar_hs = arvalid & arready;
-			@(negedge clk); n = n + 1;
-			if (ar_hs) arvalid = 0;
-		end
-		arvalid = 0;
-		if (!rvalid) begin $display("FAIL read %06h: no RVALID", a); fails = fails + 1; end
-		lat_check("RVALID", n, rlat_ref);
-		d = rdata;
-		@(negedge clk);
-	end
-endtask
-task kp_renew;
-	reg [31:0] v;
-	begin
-		kp_in = 1;
-		raw_write(LEASE, lease_w(KP_ID, 2'd2, KP_TTL));
-		raw_read(LEASE, v);
-		if (!(v[31] && v[9:0] == KP_ID && v[23:16] == kp_epoch)) begin
-			kp_lost = kp_lost + 1;
-			$display("   the bench's RENEW at %0t found LEASE %08h", $time, v);
-		end
-		kp_t = $realtime; kp_n = kp_n + 1;
-		kp_in = 0;
-	end
-endtask
-task kp_tick; if (kp_on && !kp_in && $realtime - kp_t > KP_NS) kp_renew; endtask
-// The keeper also renews while the bench waits with the bus idle: the bus tasks hold bus_busy and wait for it.
+localparam [20:0] ENA = 21'h40018, OWNEDA = 21'h40024, OPENA = 21'h4002C, LINEN = 21'h40030, RESETSA = 21'h40034;
+localparam [31:0] ENA_W = 32'h4C570001;
 reg bus_busy = 0;
-task bus_get; begin while (kp_in) @(negedge clk); bus_busy = 1; end endtask
-initial forever begin
-	@(negedge clk); #0.001;
-	if (kp_on && !kp_in && !bus_busy && $realtime - kp_t > KP_NS) kp_renew;
-end
+task bus_get; bus_busy = 1; endtask
+// A program's identification of the core: the ID view for n clk_100m cycles, then the I/O view again.
+task identify(input integer n); begin @(negedge clk); gpo31 = 0; repeat (n) @(negedge clk); gpo31 = 1; repeat (6) @(negedge clk); end endtask
+// The end of a host's enable: the next program's ID view.
+task host_end; identify(4); endtask
 
 // Drive at negedge, sample at negedge: cycles from VALID asserted to BVALID/RVALID seen.
 task axi_write(input [20:0] a, input [31:0] d, input [3:0] s);
@@ -905,7 +826,6 @@ task axi_write(input [20:0] a, input [31:0] d, input [3:0] s);
 	reg aw_hs, w_hs;
 	begin
 		bus_get;
-		kp_tick;
 		@(negedge clk);
 		awaddr = a; awlen = 0; awsize = 2; awvalid = 1;
 		wdata = d; wstrb = s; wlast = 1; wvalid = 1;
@@ -933,7 +853,6 @@ task axi_read(input [20:0] a, input [3:0] len, output [31:0] d0, output [31:0] d
 	reg ar_hs, done;
 	begin
 		bus_get;
-		kp_tick;
 		@(negedge clk);
 		araddr = a; arlen = len; arsize = rsize; arvalid = 1;
 		n = 0; beats = 0;
@@ -1073,25 +992,25 @@ task cause_drain(input [20:0] a);
 	begin axi_read(a, 0, c, cl, nb); axi_write(a, c, 4'hF); end
 endtask
 
-// The entries with a lease link (SECTOR, LANE): a store to one needs its OPEN bit.
+// The entries with an enable link (SECTOR, LANE): a store to one needs its OPEN bit.
 localparam TB_E_SEC = 1, TB_E_SYS = TB_SEC ? 3 : 2, TB_E_LANE = TB_E_SYS + 1;
 localparam [31:0] TB_LINKED = (TB_SEC ? 32'd1 << TB_E_SEC : 32'd0) | (TB_LANE ? 32'd1 << TB_E_LANE : 32'd0);
-// The host's step before a CLAIM: LEASE read until quiet, for a bound (a stopped clk_sys never answers).
+// The host's step before an ENABLE: ENABLE read until quiet, for a bound (a stopped clk_sys never answers).
 task wait_quiet;
 	reg [31:0] v;
 	integer n;
 	begin
 		n = 0;
-		axi_read(LEASE, 0, v, dl, beats);
+		axi_read(ENA, 0, v, dl, beats);
 		while (!v[30] && n < slow(4000)) begin
 			repeat (6) @(negedge clk); n = n + 10;
-			axi_read(LEASE, 0, v, dl, beats);
+			axi_read(ENA, 0, v, dl, beats);
 		end
 	end
 endtask
-// A CLAIM stored once the lease links let it through.
-task claim_w(input [9:0] id, input [3:0] ttl); begin wait_quiet; axi_write(LEASE, lease_w(id, 2'd1, ttl), 4'hF); end endtask
-// The host's step after a CLAIM: OPEN read until the linked entries' bits are set, for a bound.
+// An ENABLE stored once the enable links let it through.
+task ena_w; begin wait_quiet; axi_write(ENA, ENA_W, 4'hF); end endtask
+// The host's step after an ENABLE: OPEN read until the linked entries' bits are set, for a bound.
 task wait_open;
 	reg [31:0] v;
 	integer n;
@@ -1104,62 +1023,54 @@ task wait_open;
 		end
 	end
 endtask
-// The bench's host takes the lease (releasing whoever holds it first, then waiting for quiet), waits for its
-// linked entries to open, with no keeper and no line.
-task lease_take;
+// The bench's host enables (ending any enable first with an ID view, then waiting for quiet) and waits for its
+// linked entries to open, with no line.
+task ena_take;
 	reg [31:0] v;
 	begin
-		kp_on = 0;
-		axi_read(LEASE, 0, v, dl, beats);
-		if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
-		claim_w(KP_ID, KP_TTL);
-		axi_read(LEASE, 0, v, dl, beats);
-		check("the bench's host holds the lease", {v[31], v[9:0]}, {1'b1, KP_ID});
-		kp_epoch = v[23:16];
+		axi_read(ENA, 0, v, dl, beats);
+		if (v[31]) host_end;
+		ena_w;
+		axi_read(ENA, 0, v, dl, beats);
+		check("the bench's host holds the enable", v[31], 1);
 		wait_open;
 	end
 endtask
-// The same, then every line enabled, the status read once (the claim raised STATUS) and the lease kept.
-task lease_up;
-	begin
-		lease_take;
-		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
-		cause_drain(SYSB);
-		kp_t = $realtime; kp_on = 1;
-	end
-endtask
-// The bench's host stops keeping the lease and releases it.
-task lease_off;
+// The same, then every line enabled.
+task ena_short; begin ena_take; axi_write(LINEN, 32'hFFFFFFFF, 4'hF); end endtask
+// The same, then the status read once (the ENABLE raised STATUS).
+task ena_up; begin ena_short; cause_drain(SYSB); end endtask
+// The bench's host's enable ended by the next program's ID view.
+task ena_off;
 	reg [31:0] v;
 	begin
-		kp_on = 0;
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-		axi_read(LEASE, 0, v, dl, beats);
-		check("the bench's host released the lease", v[31], 0);
+		host_end;
+		axi_read(ENA, 0, v, dl, beats);
+		check("the ID view ended the bench's enable", v[31], 0);
 	end
 endtask
-task lease_rd(output [31:0] v); axi_read(LEASE, 0, v, dl, beats); endtask
+task ena_rd(output [31:0] v); axi_read(ENA, 0, v, dl, beats); endtask
 
-// ---- The lease links: the checker on each, the bench's own rest predicate, claims against it ----
+// ---- The enable links: the checker on each, the bench's own rest predicate, ENABLEs against it ----
 reg fc_off = 0;                    // a case scrambles or forces a link
 `ifdef MISTER_LW_SECTOR_SLOT
-fence_chk fc_sec(.clk(clk), .off(fc_off), .st(win.sec.sector.fence.st), .lvl(win.sec.sector.fence.lease_lwx),
+fence_chk fc_sec(.clk(clk), .off(fc_off), .st(win.sec.sector.fence.st), .lvl(win.sec.sector.fence.hen_lwx),
                  .ack_s(win.sec.sector.fence.ack_s), .stb(win.sec.sector.wsel & win.sec.sector.write));
 `endif
 `ifdef MISTER_LW_LANE
-fence_chk fc_lane(.clk(clk), .off(fc_off), .st(win.lane.lane.fence.st), .lvl(win.lane.lane.fence.lease_lwx),
+fence_chk fc_lane(.clk(clk), .off(fc_off), .st(win.lane.lane.fence.st), .lvl(win.lane.lane.fence.hen_lwx),
                   .ack_s(win.lane.lane.fence.ack_s), .stb(win.lane.lane.wsel & win.lane.lane.write));
 `endif
 function [10:0] tb_g2b(input [10:0] g);
 	integer n;
 	begin tb_g2b[10] = g[10]; for (n = 9; n >= 0; n = n - 1) tb_g2b[n] = tb_g2b[n + 1] ^ g[n]; end
 endfunction
-// Each linked half at rest, as the bench reads its registers: the lease level low, the machine idle with idle
+// Each linked half at rest, as the bench reads its registers: the enable level low, the machine idle with idle
 // outputs, the queue empty against the synchronised write pointer, the Gray sources current, every EN and mux
 // (SECTOR) on SPI. rh_*: the predicate at the last four clk_sys edges.
 wire tr_sec, tr_lane;
 `ifdef MISTER_LW_SECTOR_SLOT
-assign tr_sec = !win.sec.sector.lease_s && win.sec.sector.cs1 == 0 && !win.sec.sector.en_sys &&
+assign tr_sec = !win.sec.sector.hen_s && win.sec.sector.cs1 == 0 && !win.sec.sector.en_sys &&
                 win.sec.sector.x_en_sys == 0 && (win.sec.sector.fs == 0 || win.sec.sector.fs == 4) &&
                 !win.sec.sector.qv && !win.sec.sector.em && win.sec.sector.fack == 0 && !win.sec.sector.o_wr &&
                 {1'b0, win.sec.sector.rptr} == tb_g2b({1'b0, win.sec.sector.wg_s}) &&
@@ -1168,7 +1079,7 @@ assign tr_sec = !win.sec.sector.lease_s && win.sec.sector.cs1 == 0 && !win.sec.s
 assign tr_sec = 1'b1;
 `endif
 `ifdef MISTER_LW_LANE
-assign tr_lane = !win.lane.lane.lease_s && win.lane.lane.ps == 0 && !win.lane.lane.own && !win.lane.lane.hold &&
+assign tr_lane = !win.lane.lane.hen_s && win.lane.lane.ps == 0 && !win.lane.lane.own && !win.lane.lane.hold &&
                  !win.lane.lane.strobe && win.lane.lane.sel == 0 && win.lane.lane.rptr == tb_g2b(win.lane.lane.wg_s) &&
                  win.lane.lane.lane_r_lwgray == (win.lane.lane.rptr ^ (win.lane.lane.rptr >> 1)) &&
                  win.lane.lane.lane_rw_lwgray == (win.lane.lane.rwp ^ (win.lane.lane.rwp >> 1));
@@ -1178,11 +1089,11 @@ assign tr_lane = 1'b1;
 reg [3:0] rh_sec = 0, rh_lane = 0;
 always @(posedge clk_sys) begin rh_sec <= {rh_sec[2:0], tr_sec}; rh_lane <= {rh_lane[2:0], tr_lane}; end
 integer n_claims = 0, n_offrest = 0;
-always @(posedge clk) if (win.l_claim) begin
+always @(posedge clk) if (win.e_take) begin
 	n_claims = n_claims + 1;
 	if (!(tr_sec && tr_lane && &rh_sec && &rh_lane)) begin
 		n_offrest = n_offrest + 1;
-		if (n_offrest <= 4) $display("   a CLAIM taken at %0t with a half off rest: SECTOR %b %b, LANE %b %b", $time,
+		if (n_offrest <= 4) $display("   an ENABLE taken at %0t with a half off rest: SECTOR %b %b, LANE %b %b", $time,
 		                             tr_sec, rh_sec, tr_lane, rh_lane);
 	end
 end
@@ -1202,7 +1113,7 @@ always @(posedge clk) if (lw_write && &lw_be) begin
 	if (lw_waddr == 21'h43000) t_wsys = $realtime;
 end
 
-// LEASE moves with time (`left`, a RENEW) and with the bench's own stores (`burst`): word comparisons leave it out.
+// ENABLE moves with the bench's own stores (`burst`, `stale`): word comparisons leave it out.
 function [31:0] lmask(input [20:0] a, input [31:0] v); lmask = (a == 21'h40018) ? 32'd0 : v; endfunction
 
 // The word a beat of a read burst must carry: wref[] holds the single-read words of 0x40000 .. 0x400FC.
@@ -1820,7 +1731,7 @@ task fw_case(input integer kind, input integer off, input integer pol, inout int
 	string     w;
 	reg [31:0] lv;
 	begin
-		lease_take;                                    // the reset ends it
+		ena_take;                                    // the reset ends it
 		axi_read(FW_CTRL, 0, oc, dl, beats);
 		v  = {30'd0, ~oc[1:0]};
 		id = 12'h800 | (kind << 8) | (pol << 4) | ((off + 4) & 15);
@@ -1915,16 +1826,16 @@ task fw_case(input integer kind, input integer off, input integer pol, inout int
 		end
 		if (kind != 0 && n_lwwr - nw0 == 1)
 			check({w, ": the store on the bus, its address and data"}, {fw_wa == a, fw_wd == v}, 2'b11);
-		// the reset ended the lease, so the store had no effect: OSD CTRL reads 0 without one
-		lease_rd(lv);
-		check({w, ": the lease ended, by the HPS reset"}, {lv[31], lv[13:12]}, {1'b0, 2'd2});
+		// the reset ended the enable, so the store had no effect: OSD CTRL reads 0 without one
+		ena_rd(lv);
+		check({w, ": the enable ended, by the HPS reset"}, lv[31], 0);
 		axi_read(FW_CTRL, 0, rv, dl, beats);
-		check({w, ": OSD CTRL, with no lease"}, rv, 0);
+		check({w, ": OSD CTRL, with no enable"}, rv, 0);
 		// the next accesses are answered in the fixed latency (axi_read and axi_write check it)
 		rd({w, ": a read after"}, 21'h40000, FW_MAGIC);
-		lease_take;
+		ena_take;
 		axi_write(FW_CTRL, v, 4'hF);
-		rd({w, ": a store after, under a new lease"}, FW_CTRL, v);
+		rd({w, ": a store after, under a new enable"}, FW_CTRL, v);
 		axi_write(FW_CTRL, oc, 4'hF);
 	end
 endtask
@@ -1957,7 +1868,7 @@ task fw_reset_cases;
 			end
 
 		$display("-- firewall, HPS reset: a read and a store accepted while it is held complete across the release");
-		lease_take;
+		ena_take;
 		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
 		rready = 0; bready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n;
 		hps_rst_n = 0; fw_wait_high;
@@ -1978,7 +1889,7 @@ task fw_reset_cases;
 		check("the store's response: ID", fb_id, 12'h0C4);
 		check("nothing freed", (n_fr - fr0) + (n_fw - fw0), 0);
 		check("the store reached the bus with its address and data", {fw_wa == FW_CTRL, fw_wd == v}, 2'b11);
-		rd("the store had no effect: the reset ended the lease", FW_CTRL, 32'd0);
+		rd("the store had no effect: the reset ended the enable", FW_CTRL, 32'd0);
 
 		$display("-- firewall, HPS reset: a 16-beat read carried across the whole reset, beats taken during it");
 		axi_read(21'h40000, 15, d, dl, beats);
@@ -2002,23 +1913,22 @@ task fw_reset_cases;
 		for (j = 0; j < 16; j = j + 1)
 			if ((j != 6 && j != 9 && j != 11 && j != 12 && j != 13 && fr_log[(nr0 + j) % 32] !== ref16[j]) || fr_idlog[(nr0 + j) % 32] !== 12'h0D1 ||
 			    fr_lastlog[(nr0 + j) % 32] !== (j == 15)) n = n + 1;
-		check("beats that differ from a plain 16-beat read (data but LEASE, OWNED, OPEN, LINE_EN and RESETS, which the reset moves; ID, RLAST)", n, 0);
+		check("beats that differ from a plain 16-beat read (data but ENABLE, OWNED, OPEN, LINE_EN and RESETS, which the reset moves; ID, RLAST)", n, 0);
 		check("nothing freed", n_fr - fr0, 0);
 		rd("a read after", 21'h40000, FW_MAGIC);
 
 		$display("-- firewall, HPS reset held low while reads and stores run: every access answers, nothing is freed");
-		lease_take;
+		ena_take;
 		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
 		fr0 = n_fr; fw0 = n_fw;
 		hps_rst_n = 0; fw_wait_high;
 		for (j = 0; j < 4; j = j + 1) begin
 			rd("magic, reset held", 21'h40000, FW_MAGIC);
 			axi_write(FW_CTRL, v, 4'hF);
-			rd("a store, reset held: dropped, no lease", FW_CTRL, 32'd0);
-			axi_write(LEASE, lease_w(KP_ID, 2'd1, KP_TTL), 4'hF);
-			axi_read(LEASE, 0, oc, dl, beats);
-			check("a CLAIM, reset held: not taken, hrst shown, the lease ended by the reset",
-			      {oc[31], oc[15], oc[13:12]}, {1'b0, 1'b1, 2'd2});
+			rd("a store, reset held: dropped, no enable", FW_CTRL, 32'd0);
+			axi_write(ENA, ENA_W, 4'hF);
+			axi_read(ENA, 0, oc, dl, beats);
+			check("an ENABLE, reset held: not taken, hrst shown", {oc[31], oc[15]}, 2'b01);
 			check("a store, reset held: stale", oc[29], 1);
 		end
 		oc = 0;
@@ -2070,7 +1980,7 @@ task fw_reset_cases;
 		check("the held AR answered after the release: data", fr_d, FW_MAGIC);
 
 		$display("-- firewall, a master revived before the release (records): idle reads 0 throughout");
-		lease_take;
+		ena_take;
 		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
 		rready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n; nw0 = n_lwwr;
 		@(negedge clk); fw_ar(21'h000100, 0, 12'h0A1);
@@ -2108,7 +2018,7 @@ task fw_reset_cases;
 		check("records: the next beat completes the accepted AW (ID)", fb_id, 12'h0B2);
 		check("idle after", fw_idle, 1);
 		check("the next beat's store on the bus: OSD CTRL's address, its data", {fw_wa == FW_CTRL, fw_wd == oc}, 2'b11);
-		rd("OSD CTRL: no lease after the reset", FW_CTRL, 32'd0);
+		rd("OSD CTRL: no enable after the reset", FW_CTRL, 32'd0);
 
 		$display("-- firewall, the fabric reset held low with an orphan: idle and the mark stay until the net rises");
 		rready = 0; fr0 = n_fr; fw0 = n_fw;
@@ -2185,7 +2095,7 @@ task dm_build;
 		end
 		em_n = e;
 		dm[0] = 32'h5244574C; dm[1] = 32'h00020000; dm[2] = 32'h00800040; dm[3] = e;
-		dm[4] = 32'h00040000; dm[5] = 32'h00080000; dm[6] = 32'h40000000; dm[7] = {TB_LU[7:0], 24'd100000};
+		dm[4] = 32'h00040000; dm[5] = 32'h00080000; dm[6] = 32'h40000000; dm[7] = 32'd0;
 	end
 endtask
 
@@ -2323,8 +2233,8 @@ task dir_cases;
 		rd("VERSION 2.0",                DIRB + 21'h04, 32'h00020000);
 		rd("LAYOUT {stride 0x80, header 0x40}", DIRB + 21'h08, 32'h00800040);
 		rd("COUNT: one entry per block built", DIRB + 21'h0C, em_n);
-		rd("LEASE: none held, quiet",    DIRB + 21'h18, 32'h40000000);
-		rd("TIMEBASE",                   DIRB + 21'h1C, {TB_LU[7:0], 24'd100000});
+		rd("ENABLE: not set, quiet",     DIRB + 21'h18, 32'h40000000);
+		rd("0x1C reserved: 0",           DIRB + 21'h1C, 32'd0);
 		rd("PENDING: no cause",          DIRB + 21'h20, 32'd0);
 		rd("OWNED: nothing",             DIRB + 21'h24, 32'd0);
 		rd("SCRATCH reset",              SCR,           32'd0);
@@ -2514,18 +2424,14 @@ task decode_sweep;
 	end
 endtask
 
-// ---- The lease: the gate, the verbs, the ends, the lines, two hosts and the start order ----
-// live_q's edges, the cycle a RENEW is taken, and the lines against their definition in every cycle: line k is the
-// register of live_q & its entry's LINE_EN bit & its entry's CAUSE word non-zero (SECTOR ordinal 1, SYS 2).
-realtime t_lrise = 0, t_lfall = 0, t_renew = 0;
-integer  n_lrise = 0, n_lfall = 0, n_renew0 = 0;
-always @(win.live_q) if ($realtime > 0) begin
-	if (win.live_q) begin t_lrise = $realtime; n_lrise = n_lrise + 1; end
+// ---- The host enable: the gate, the store, the ends, the lines and the start order ----
+// en_q's edges, and the lines against their definition in every cycle: line k is the register of en_q & its
+// entry's LINE_EN bit & its entry's CAUSE word non-zero (SECTOR ordinal 1, SYS 2).
+realtime t_lrise = 0, t_lfall = 0;
+integer  n_lrise = 0, n_lfall = 0;
+always @(win.en_q) if ($realtime > 0) begin
+	if (win.en_q) begin t_lrise = $realtime; n_lrise = n_lrise + 1; end
 	else begin t_lfall = $realtime; n_lfall = n_lfall + 1; end
-end
-always @(posedge clk) if (win.l_renew) begin
-	t_renew = $realtime;
-	if (win.lcnt == 0) n_renew0 = n_renew0 + 1;           // a RENEW in the last live cycle
 end
 reg  [2:0] lm_q = 0;
 integer    lm_n = 0, lm_bad = 0, lm_fall_c = 0, lm_fall_e = 0, lm_fall_l = 0, lm_rises = 0, lm_falls = 0;
@@ -2533,9 +2439,9 @@ always @(posedge clk) begin : line_model
 	reg [2:0] en, lv, nx;
 	en = {1'b0, win.line_en[TB_E_SYS], win.line_en[TB_E_SEC]};
 	lv = {1'b0, win.sys_lvl, win.sec_lvl};
-	nx = {3{win.live_q}} & en & lv;
+	nx = {3{win.en_q}} & en & lv;
 	for (i_lm = 0; i_lm < 2; i_lm = i_lm + 1) if (lm_q[i_lm] && !nx[i_lm]) begin
-		if (!win.live_q) lm_fall_l = lm_fall_l + 1;
+		if (!win.en_q) lm_fall_l = lm_fall_l + 1;
 		else if (!en[i_lm]) lm_fall_e = lm_fall_e + 1;
 		else lm_fall_c = lm_fall_c + 1;
 	end
@@ -2554,142 +2460,113 @@ always @(negedge clk) begin
 	end
 end
 
-// The lease ends by itself: the bench's host stops renewing, and the bench waits for live_q to fall.
-task wait_lapse(input integer ttl);
-	integer n;
-	reg [31:0] v;
-	begin
-		kp_on = 0;
-		n = 0;
-		while (win.live_q && n < (ttl + 1) * (1 << TB_LU) + 100) begin @(negedge clk); n = n + 1; end
-		lease_rd(v);
-		check("the lease ran out", {v[31], v[13:12]}, {1'b0, 2'd1});
-	end
-endtask
-// The bench's host claims for ttl units with every line enabled, and does not renew.
-task lease_short(input [3:0] ttl);
-	reg [31:0] v;
-	begin
-		kp_on = 0;
-		axi_read(LEASE, 0, v, dl, beats);
-		if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
-		claim_w(KP_ID, ttl);
-		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
-		axi_read(LEASE, 0, v, dl, beats);
-		check("a short lease taken", {v[31], v[9:0]}, {1'b1, KP_ID});
-		wait_open;
-	end
-endtask
-
 // A second host's look before it touches the link: the GPO value as left (the bench's gpo31), then one GPI sample.
-// 1: a lease is held (store nothing); 0: go on.
+// 1: an LW host holds the enable (store nothing); 0: go on.
 function look_held;
 	look_held = gpo31 && tb_gpi[31] == 1'b0 && tb_gpi[25] && tb_gpi[22];
 endfunction
-// A program's identification of the core: the ID view for n clk_100m cycles, then the I/O view again.
-task identify(input integer n); begin @(negedge clk); gpo31 = 0; repeat (n) @(negedge clk); gpo31 = 1; repeat (6) @(negedge clk); end endtask
 
-localparam [9:0] ID_B = 10'h155;
-
-task lease_cases;
-	reg [31:0] v, v0, oc, lc0;
-	integer k, n, j, e0, nw0, nr, nf, tt;
-	realtime t0;
+task ena_cases;
+	reg [31:0] v, v0;
+	integer k, n, j, nw0;
 	begin
-		$display("-- lease: without it every store but LEASE is dropped and sets stale");
-		kp_on = 0;
-		claim_w(KP_ID, 4'd15);                                       // a claim clears stale and burst
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		$display("-- enable: without it every store but ENABLE is dropped and sets stale");
+		ena_w;                                                        // an ENABLE clears stale and burst
+		host_end;
 		wait_quiet;
-		lease_rd(v);
-		e0 = v[23:16];
-		check("released: none held, quiet, nothing stale, left 0, end 0, the last owner", v,
-		      {8'h40, e0[7:0], 6'd0, KP_ID});
+		ena_rd(v);
+		check("ended: not enabled, quiet, nothing stale", v, 32'h40000000);
 		rd("OPEN: no block takes stores", OPENA, 32'd0);
 		rd("OWNED: nothing owned", OWNEDA, 32'd0);
 		check("GPI[22] reads 0", tb_gpi[22], 0);
 		nw0 = n_lwwr;
 		v0 = win.scratch;   // what earlier cases left (0 without LW_DIAG)
 		axi_write(SCR, 32'h12345678, 4'hF);
-		rd("no lease: SCRATCH unchanged", SCR, v0);
+		rd("no enable: SCRATCH unchanged", SCR, v0);
 		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
-		rd("no lease: LINE_EN unchanged", LINEN, 32'd0);
+		rd("no enable: LINE_EN unchanged", LINEN, 32'd0);
 		n = n_padwe; axi_write(pad_addr(8'h02, 0), 32'h00005555, 4'hF); settle;
-		check("no lease: a pad store is dropped, nothing reaches hps_io", n_padwe - n, 0);
+		check("no enable: a pad store is dropped, nothing reaches hps_io", n_padwe - n, 0);
 		axi_write(OSD + 21'h1000, 32'h3, 4'hF);
-		rd("no lease: OSD CTRL unchanged", OSD + 21'h1000, 32'd0);
+		rd("no enable: OSD CTRL unchanged", OSD + 21'h1000, 32'd0);
 		n = n_osdwe; axi_write(OSD, 32'hFFFFFFFF, 4'hF);
-		check("no lease: an image store does not reach the osds", n_osdwe - n, 0);
+		check("no enable: an image store does not reach the osds", n_osdwe - n, 0);
 		st_req(st_pat(900)); settle;
 		axi_write(SYSB, 32'h1, 4'hF);
-		rd("no lease: a W1C store on SYS CAUSE is dropped, the cause stands", SYSB, 32'h1);
+		rd("no enable: a W1C store on SYS CAUSE is dropped, the cause stands", SYSB, 32'h1);
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1);
-			rd("no lease: SECTOR CTRL unchanged", SEC + 21'h10, 32'd0);
+			rd("no enable: SECTOR CTRL unchanged", SEC + 21'h10, 32'd0);
 		end
 		if (TB_LANE) begin
 			axi_read(21'h46010, 0, v0, dl, beats);
 			axi_write(21'h46000, 32'h0000001E, 4'hF); axi_write(21'h46008, 32'h0, 4'hF);
 			repeat (slow(200)) @(negedge clk);
-			rd("no lease: no frame committed, none played (PLAYED)", 21'h46010, v0);
-			check("no lease: the lane's write pointers unmoved", win.lane.lane.wcom == win.lane.lane.wspec, 1);
+			rd("no enable: no frame committed, none played (PLAYED)", 21'h46010, v0);
+			check("no enable: the lane's write pointers unmoved", win.lane.lane.wcom == win.lane.lane.wspec, 1);
 		end
-		check("no lease: every store reached the bus", n_lwwr - nw0, 6 + TB_SEC + 2 * TB_LANE);
-		lease_rd(v);
-		check("no lease: stale set, nothing else", v, {8'h60, e0[7:0], 6'd0, KP_ID});
+		check("no enable: every store reached the bus", n_lwwr - nw0, 6 + TB_SEC + 2 * TB_LANE);
+		ena_rd(v);
+		check("no enable: stale set, nothing else", v, 32'h60000000);
 
-		$display("-- lease: a wrong key, VERB 0, TTL 0, partial strobes and RENEW or RELEASE without a lease do nothing");
-		axi_write(LEASE, {16'h4C56, KP_ID, 2'd1, 4'd15}, 4'hF);
-		axi_write(LEASE, lease_w(KP_ID, 2'd0, 4'd15), 4'hF);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd0), 4'hF);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'h7);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hE);
-		axi_write(LEASE, lease_w(KP_ID, 2'd2, 4'd15), 4'hF);
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-		lease_rd(v);
-		check("refused stores: LEASE unchanged (stale set before)", v, {8'h60, e0[7:0], 6'd0, KP_ID});
+		$display("-- enable: a wrong key, a wrong bit, any other word and partial strobes do nothing");
+		axi_write(ENA, 32'h4C560001, 4'hF);
+		axi_write(ENA, 32'h4C570000, 4'hF);
+		axi_write(ENA, 32'h4C570003, 4'hF);
+		axi_write(ENA, 32'h4C575551, 4'hF);                          // a CLAIM of the withdrawn lease
+		axi_write(ENA, 32'hFFFFFFFF, 4'hF);
+		axi_write(ENA, ENA_W, 4'h7);
+		axi_write(ENA, ENA_W, 4'hE);
+		ena_rd(v);
+		check("refused stores: ENABLE unchanged (stale set before)", v, 32'h60000000);
 		axi_wburst(SCR, 4'd1, 2'b01, n);
-		lease_rd(v);
-		check("a burst write without the lease: burst set", v[28], 1);
+		ena_rd(v);
+		check("a burst write without the enable: burst set", v[28], 1);
 
-		$display("-- lease: CLAIM sets held, owner and the epoch, clears stale and burst; stores take effect");
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-		lease_rd(v);
-		check("CLAIM: {held, stale, burst}", {v[31], v[29:28]}, 3'b100);
-		check("CLAIM: quiet only with no lease link", v[30], TB_LINKED == 0);
-		check("CLAIM: left, epoch, hrst, end, idv, owner", {v[27:24], v[23:16], v[15:11], v[9:0]},
-		      {4'd14, e0[7:0] + 8'd1, 5'b00000, KP_ID});
-		check("GPI[22] shows the lease", tb_gpi[22], 1);
+		$display("-- enable: ENABLE sets it, clears stale and burst; stores take effect");
+		axi_write(ENA, ENA_W, 4'hF);
+		ena_rd(v);
+		check("ENABLE: {en, stale, burst}", {v[31], v[29:28]}, 3'b100);
+		check("ENABLE: quiet only with no enable link", v[30], TB_LINKED == 0);
+		check("ENABLE: no other bit", v & 32'h0FFFFFFF, 0);
+		check("GPI[22] shows the enable", tb_gpi[22], 1);
+		axi_write(ENA, ENA_W, 4'hF);
+		ena_rd(v);
+		check("a second ENABLE: changes nothing", v[31], 1);
 		wait_open;
 		rd("OPEN: every listed block", OPENA, (32'd1 << em_n) - 1);
 		rd("OWNED: none", OWNEDA, 32'd0);
 		axi_write(SCR, 32'h12345678, 4'hF);
-		rd("under the lease: SCRATCH", SCR, dg(32'h12345678));
+		rd("enabled: SCRATCH", SCR, dg(32'h12345678));
 		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
-		rd("under the lease: LINE_EN holds the listed entries' bits", LINEN, (32'd1 << em_n) - 1);
+		rd("enabled: LINE_EN holds the listed entries' bits", LINEN, (32'd1 << em_n) - 1);
 		axi_write(pad_addr(8'h02, 0), 32'h00005555, 4'hF); settle;
-		check("under the lease: the pad store lands", joy0, 32'h00005555);
+		check("enabled: the pad store lands", joy0, 32'h00005555);
 		axi_write(pad_addr(8'h02, 0), 32'h00000000, 4'hF); settle;
 		axi_write(SYSB, 32'h1, 4'hF);
-		rd("under the lease: the W1C clears SYS CAUSE", SYSB, 32'd0);
+		rd("enabled: the W1C clears SYS CAUSE", SYSB, 32'd0);
 		axi_wburst(SCR, 4'd3, 2'b01, n);
-		lease_rd(v);
-		check("a burst write under the lease: burst set, stale clear", v[29:28], 2'b01);
+		ena_rd(v);
+		check("a burst write while enabled: burst set, stale clear", v[29:28], 2'b01);
 		axi_write(SCR, 32'h0, 4'hF);
+		$display("-- enable: no timer: it holds for as long as the bench waits, with no store");
+		repeat (slow(20000)) @(negedge clk);
+		ena_rd(v);
+		check("still enabled after 20,000 cycles and more with no store", v[31], 1);
 		if (TB_LINKED != 0) begin
-			$display("-- lease: a store to a linked block before its OPEN bit is dropped and sets stale");
-			axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+			$display("-- enable: a store to a linked block before its OPEN bit is dropped and sets stale");
+			host_end;
 			wait_quiet;
 			sys_run = 0; repeat (20) @(negedge clk);       // the far halves cannot answer the rise
-			axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-			lease_rd(v);
-			check("clk_sys stopped: the CLAIM is taken, not quiet, nothing stale", {v[31:29]}, 3'b100);
+			axi_write(ENA, ENA_W, 4'hF);
+			ena_rd(v);
+			check("clk_sys stopped: the ENABLE is taken, not quiet, nothing stale", {v[31:29]}, 3'b100);
 			rd("clk_sys stopped: OPEN shows the unlinked entries only", OPENA, ((32'd1 << em_n) - 1) & ~TB_LINKED);
-			rd("clk_sys stopped: OWNED none (the links rise under a held lease)", OWNEDA, 32'd0);
+			rd("clk_sys stopped: OWNED none (the links rise under a held enable)", OWNEDA, 32'd0);
 			n = n_lwwr;
 			if (TB_SEC) sec_wr(21'h10, 32'h1);
 			if (TB_LANE) axi_write(LANE, 32'h0000001E, 4'hF);
-			lease_rd(v);
+			ena_rd(v);
 			check("a store to a linked block, not open: stale set", v[29], 1);
 			if (TB_SEC) check("not open: SECTOR's EN unchanged", win.sec.sector.en_lwx, 0);
 			if (TB_LANE) check("not open: the lane's frame not begun", win.lane.lane.open, 0);
@@ -2708,145 +2585,46 @@ task lease_cases;
 			end
 		end
 
-		$display("-- lease: RELEASE ends it at its response, end 0; the next CLAIM bumps the epoch");
-		store_read(LEASE, lease_w(KP_ID, 2'd3, 4'd0), LEASE, v);
-		check("RELEASE: held clear at its response, end 0", {v[31], v[13:12]}, {1'b0, 2'd0});
-		check("RELEASE: live_q fell in the store's bus cycle", (t_lfall > t_whs - 1.0) && (t_lfall < t_whs + 21.0), 1);
-		rd("no lease: LINE_EN reads 0", LINEN, 32'd0);
-		rd("no lease: OPEN reads 0", OPENA, 32'd0);
-		check("GPI[22] clear", tb_gpi[22], 0);
-		claim_w(KP_ID, 4'd1);
-		lease_rd(v);
-		check("CLAIM again: the epoch moved by one", {v[31], v[23:16]}, {1'b1, e0[7:0] + 8'd2 + (TB_LINKED != 0)});
-		rd("after a claim: LINE_EN reads 0", LINEN, 32'd0);
-
-		$display("-- lease: expiry at TTL 1, 2 and 15, each exactly TTL units and one cycle; left counts down");
-		for (k = 0; k < 3; k = k + 1) begin
-			tt = (k == 0) ? 1 : (k == 1) ? 2 : 15;
-			if (win.live_q) axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-			claim_w(KP_ID, tt[3:0]);
-			t0 = t_lrise;
-			if (tt == 15)
-				for (j = 0; j < 15; j = j + 1) begin
-					while ($realtime < t0 + 10.0 * (2.0 ** TB_LU) * (j + 0.5)) @(negedge clk);
-					lease_rd(v);
-					checks = checks + 1;
-					if (v[27:24] !== 14 - j) begin
-						fails = fails + 1; $display("FAIL TTL 15: left %0d after %0d.5 units", v[27:24], j);
-					end
-				end
-			n = 0; while (win.live_q && n < 20 * (1 << TB_LU)) begin @(negedge clk); n = n + 1; end
-			check($sformatf("TTL %0d: live for TTL units and one cycle", tt), $rtoi((t_lfall - t0) / 10.0 + 0.5),
-			      tt * (1 << TB_LU) + 1);
-			lease_rd(v);
-			check($sformatf("TTL %0d: end 1, the counter ran out", tt), {v[31], v[13:12]}, {1'b0, 2'd1});
-		end
-		$display("-- lease: RENEW restarts the count from its own cycle");
-		claim_w(KP_ID, 4'd2);
-		t0 = t_lrise;
-		while ($realtime < t0 + 10.0 * (2.0 ** TB_LU) * 1.5) @(negedge clk);
-		axi_write(LEASE, lease_w(KP_ID, 2'd2, 4'd1), 4'hF);
-		n = 0; while (win.live_q && n < 4 * (1 << TB_LU)) begin @(negedge clk); n = n + 1; end
-		check("RENEW at 1.5 units with TTL 1: live one unit and one cycle past the RENEW",
-		      $rtoi((t_lfall - t_renew) / 10.0 + 0.5), (1 << TB_LU) + 1);
-
-		$display("-- lease: a RENEW swept across the last live cycle keeps the lease whole or finds it gone, never both");
-		st_req(st_pat(901)); settle;                       // SYS cause pending: its line follows the lease
-		nr = 0; nf = 0; n_renew0 = 0;
-		for (k = -10; k <= 10; k = k + 1) begin
-			if (win.live_q) axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-			repeat (4) @(negedge clk);
-			wait_quiet;
-			e0 = n_lrise + n_lfall; j = lm_rises + lm_falls;
-			axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd1), 4'hF);
-			axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
-			t0 = t_lrise;
-			// the RENEW's data beat reaches the bus 3 cycles after its first negedge
-			while ($realtime < t0 + 10.0 * ((1 << TB_LU) + k) - 30.0) @(negedge clk);
-			axi_write(LEASE, lease_w(KP_ID, 2'd2, 4'd1), 4'hF);
-			n = (t_renew > t0) ? 1 : 0;
-			nr = nr + n; nf = nf + (1 - n);
-			checks = checks + 1;
-			if (n != (t_whs <= t0 + 10.0 * ((1 << TB_LU) + 1) + 5.0)) begin
-				fails = fails + 1; $display("FAIL renew sweep %0d: taken %0d, its beat at %0t, the lease from %0t", k, n, t_whs, t0);
-			end
-			n = 0; while (win.live_q && n < 3 * (1 << TB_LU)) begin @(negedge clk); n = n + 1; end
-			repeat (4) @(negedge clk);
-			check($sformatf("renew sweep %0d: held rose once and fell once", k), n_lrise + n_lfall - e0, 2);
-			check($sformatf("renew sweep %0d: the SYS line rose once and fell once", k), lm_rises + lm_falls - j, 2);
-		end
-		$display("     renewed %0d, too late %0d, a RENEW taken in the last live cycle %0d times", nr, nf, n_renew0);
-		check("renew sweep: both outcomes, and a RENEW in the last live cycle", {nr > 0, nf > 0, n_renew0 > 0}, 3'b111);
-
-		$display("-- lease: the ends, each with its code: an HPS reset (2), GPO[31] low for one cycle (3) and long (3)");
-		lease_take;
+		$display("-- enable: its ends: an HPS reset, GPO[31] low for one cycle and long; none taken in the ID view");
+		ena_take;
 		@(negedge clk); hps_rst_n = 0; repeat (3) @(negedge clk); hps_rst_n = 1;
 		fw_wait_fall; repeat (2) @(negedge clk);
-		lease_rd(v);
-		check("an HPS reset: end 2", {v[31], v[13:12]}, {1'b0, 2'd2});
-		lease_take;
+		ena_rd(v);
+		check("an HPS reset: ended", v[31], 0);
+		rd("no enable: LINE_EN reads 0", LINEN, 32'd0);
+		rd("no enable: OPEN reads 0", OPENA, 32'd0);
+		check("GPI[22] clear", tb_gpi[22], 0);
+		ena_take;
 		@(negedge clk); #2 gpo31 = 0; #10 gpo31 = 1;
 		repeat (8) @(negedge clk);
-		lease_rd(v);
-		check("GPO[31] low for one clk_100m cycle: end 3", {v[31], v[13:12]}, {1'b0, 2'd3});
-		lease_take;
+		ena_rd(v);
+		check("GPO[31] low for one clk_100m cycle: ended", v[31], 0);
+		ena_take;
 		@(negedge clk); gpo31 = 0; repeat (8) @(negedge clk);
 		check("GPO[31] low: GPI[22] reads 0 in the ID view", tb_gpi[22], 0);
-		for (j = 0; j < 3; j = j + 1) axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-		lease_rd(v);
-		check("GPO[31] held low: no CLAIM taken, idv shown, end 3", {v[31], v[11], v[13:12]}, {1'b0, 1'b1, 2'd3});
+		for (j = 0; j < 3; j = j + 1) axi_write(ENA, ENA_W, 4'hF);
+		ena_rd(v);
+		check("GPO[31] held low: no ENABLE taken, idv shown", {v[31], v[11]}, 2'b01);
 		repeat (200) @(negedge clk);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-		check("GPO[31] held low for 200 cycles more: still none", win.live_q, 0);
+		axi_write(ENA, ENA_W, 4'hF);
+		check("GPO[31] held low for 200 cycles more: still none", win.en_q, 0);
 		gpo31 = 1; repeat (6) @(negedge clk);
-		lease_take;
-		check("GPO[31] high again: a CLAIM is taken", win.live_q, 1);
+		ena_take;
+		check("GPO[31] high again: an ENABLE is taken", win.en_q, 1);
+		rd("after an ENABLE: LINE_EN reads 0", LINEN, 32'd0);
 
-		$display("-- lease: two hosts: another id's RELEASE and RENEW do nothing; one owner; a takeover on purpose");
-		lease_rd(v0);
-		repeat (2 * 1024) @(negedge clk);
-		lc0 = win.lcnt;
-		axi_write(LEASE, lease_w(ID_B, 2'd3, 4'd0), 4'hF);
-		axi_write(LEASE, lease_w(ID_B, 2'd2, 4'd15), 4'hF);
-		lease_rd(v);
-		check("B's RELEASE and RENEW: A's lease, owner and epoch kept", {v[31], v[23:16], v[9:0]}, {1'b1, v0[23:16], KP_ID});
-		check("B's RENEW did not reload A's counter", win.lcnt < lc0, 1);
-		axi_write(LEASE, lease_w(ID_B, 2'd1, 4'd15), 4'hF);
-		lease_rd(v);
-		check("B's CLAIM over A's lease: refused", {v[31], v[23:16], v[9:0]}, {1'b1, v0[23:16], KP_ID});
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-		wait_quiet;
-		// back to back: B first, then A; each reads who won
-		axi_write(LEASE, lease_w(ID_B, 2'd1, 4'd15), 4'hF);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-		lease_rd(v);
-		check("two CLAIMs back to back: one owner, the first", {v[31], v[9:0]}, {1'b1, ID_B});
-		check("A learns from owner that it lost", v[9:0] != KP_ID, 1);
-		e0 = v[23:16];
-		// A takes over on purpose: RELEASE with the owner it read, then quiet, then its CLAIM
-		axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
-		wait_quiet;
-		lease_rd(v);
-		check("the takeover's RELEASE with the owner read: held clear, quiet", v[31:30], 2'b01);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-		lease_rd(v);
-		check("the takeover's CLAIM: A owns it, the epoch moved", {v[31], v[9:0], v[23:16]}, {1'b1, KP_ID, e0[7:0] + 8'd1});
-		axi_write(LEASE, lease_w(ID_B, 2'd2, 4'd15), 4'hF);
-		lease_rd(v);
-		check("B's next refresh fails: the owner is not B", v[9:0] != ID_B, 1);
-
-		$display("-- lines: low without the lease whatever the causes; PENDING shows them either way; LINE_EN per entry");
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		$display("-- lines: low without the enable whatever the causes; PENDING shows them either way; LINE_EN per entry");
+		host_end;
 		st_req(st_pat(902)); settle;
 		if (TB_SEC) begin cd_request(32'h00007E00); settle; end
 		axi_read(DIRB + 21'h20, 0, v, dl, beats);
-		check("no lease: PENDING shows SYS (and SECTOR)", v, (TB_SEC ? 32'd1 << TB_E_SEC : 0) | 32'd1 << TB_E_SYS);
-		check("no lease: every line low", lines, 0);
+		check("no enable: PENDING shows SYS (and SECTOR)", v, (TB_SEC ? 32'd1 << TB_E_SEC : 0) | 32'd1 << TB_E_SYS);
+		check("no enable: every line low", lines, 0);
 		rd("OWNED reads 0", OWNEDA, 32'd0);
-		lease_take;
+		ena_take;
 		settle;
-		check("a lease, LINE_EN 0: every line low", lines, 0);
-		rd("PENDING under the lease: SYS's (SECTOR's word cleared at the claim)", DIRB + 21'h20, 32'd1 << TB_E_SYS);
+		check("enabled, LINE_EN 0: every line low", lines, 0);
+		rd("PENDING when enabled: SYS's (SECTOR's word cleared at the ENABLE)", DIRB + 21'h20, 32'd1 << TB_E_SYS);
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1); settle;
 			rd("an EN rise raises SECTOR's cause for its standing request", DIRB + 21'h20, v);
@@ -2862,16 +2640,16 @@ task lease_cases;
 		axi_write(LINEN, ~((32'd1 << TB_E_SEC) | (32'd1 << TB_E_SYS)), 4'hF); settle;
 		check("the other bits: no line", lines, 0);
 		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); settle;
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-		rd("LINE_EN reads 0 after the lease ends", LINEN, 32'd0);
-		check("the lease ended: every line low", lines, 0);
-		lease_take;
-		rd("LINE_EN reads 0 after a claim", LINEN, 32'd0);
+		host_end;
+		rd("LINE_EN reads 0 after the ID view", LINEN, 32'd0);
+		check("the enable ended: every line low", lines, 0);
+		ena_take;
+		rd("LINE_EN reads 0 after an ENABLE", LINEN, 32'd0);
 		if (TB_SEC) begin
 			$display("-- lines: a host that skips SECTOR is never woken by it; the block takes nothing from SPI");
 			axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF);
 			cause_drain(SYSB); settle;
-			check("after the claim: SECTOR's cause clear, its request standing", {win.sec_lvl, sd_rd[1]}, 2'b01);
+			check("after the ENABLE: SECTOR's cause clear, its request standing", {win.sec_lvl, sd_rd[1]}, 2'b01);
 			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0;
 			cd_request(32'h00007E00); settle;
 			check("a new request: SECTOR's cause pending", win.sec_lvl, 1);
@@ -2891,7 +2669,7 @@ task lease_cases;
 			cause_drain(SYSB); cause_drain(SEC);
 		end
 		else cause_drain(SYSB);
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 	end
 endtask
 
@@ -2921,7 +2699,7 @@ task line_cases;
 	realtime tw;
 	begin
 		$display("-- lines are levels: a raise swept across the store-back's cycle; where it wins, no low cycle");
-		lease_up;
+		ena_up;
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF);
 		same = 0;
 		// 2.5 ns steps over a window scaled with clk_sys: a step scaled with it, at 12 MHz, could straddle the one
@@ -2973,20 +2751,19 @@ task line_cases;
 		$display("     %0d events, %0d wakes", nev, wakes);
 		check("every event served: the last SEQ the host read is the block's", seq_seen, v[31:16]);
 		check("quiescent: the cause clear, the line low", {win.sys_lvl, lines[1]}, 2'b00);
-		lease_off;
+		ena_off;
 	end
 endtask
 
-// Look before identifying. A second host model reads the GPO value as left and one GPI sample; a held
-// lease makes it store nothing. It waits the lease out, or takes over on purpose by identifying; a stock start,
-// GPO = 0 first, ends a live host's lease too.
+// Look before identifying. A second host model reads the GPO value as left and one GPI sample; an enable held
+// makes it store nothing. A takeover on purpose is an identification; a stock start, GPO = 0 first, ends a live
+// host's enable too.
 task look_cases;
-	reg [31:0] v, v0, p, dr, oc;
+	reg [31:0] v, v0, p, dr;
 	integer n, nw0;
-	realtime t0;
 	begin
-		$display("-- the start order: a second host looks at GPO and GPI[22] first, sees the lease and stores nothing");
-		lease_up;
+		$display("-- the start order: a second host looks at GPO and GPI[22] first, sees the enable and stores nothing");
+		ena_up;
 		if (TB_SEC) sec_wr(21'h10, 32'h1);
 		axi_write(OSD + 21'h1000, 32'h1, 4'hF);
 		axi_write(OSD, 32'h5A5AA5A5, 4'hF);
@@ -2997,14 +2774,12 @@ task look_cases;
 		lane_send(1); lane_send(1);
 		repeat (slow(100)) @(negedge clk);
 `endif
-		lease_rd(v0);
 		nw0 = n_lwwr;
-		check("second host: the GPO value it reads is the I/O view, and GPI says a lease is held", look_held(), 1);
+		check("second host: the GPO value it reads is the I/O view, and GPI says an LW host is enabled", look_held(), 1);
 		repeat (50) @(negedge clk);                         // it stops: no store, no GPO change
 		check("second host: stored nothing", n_lwwr - nw0, 0);
-		lease_rd(v);
-		check("the first host's lease, owner and epoch as they were", {v[31], v[23:16], v[9:0]},
-		      {1'b1, v0[23:16], KP_ID});
+		ena_rd(v);
+		check("the first host's enable as it was", v[31], 1);
 		if (TB_SEC) rd("the first host's SECTOR binding as it was", SEC + 21'h10, 32'h1);
 		rd("the first host's OSD CTRL as it was", OSD + 21'h1000, 32'h1);
 		check("the first host's image word as it was", hdmi_osd.lw_buf0[0], 8'hA5);
@@ -3014,58 +2789,122 @@ task look_cases;
 		io_enable = 0;
 		lane_wait(p + 2);
 `endif
-		n = kp_lost;
-		kp_renew;
-		check("the first host's next refresh succeeds", kp_lost - n, 0);
-
-		$display("-- the start order: the first host stops; GPI[22] falls within the TTL; the second host then starts");
-		lease_short(4'd2);
-		t0 = $realtime;
-		n = 0; while (look_held() && n < 3 * (1 << TB_LU)) begin @(negedge clk); n = n + 1; end
-		check("GPI[22] fell within the TTL", ($realtime - t0) < 10.0 * (2.0 * (1 << TB_LU) + 10), 1);
-		identify(20);
-		claim_w(ID_B, 4'd15);
-		lease_rd(v);
-		check("the second host claims", {v[31], v[9:0]}, {1'b1, ID_B});
 		axi_write(SCR, 32'h0B0B0B0B, 4'hF);
-		rd("the second host's store lands", SCR, dg(32'h0B0B0B0B));
-		axi_write(LEASE, lease_w(ID_B, 2'd3, 4'd0), 4'hF);
+		rd("the first host's next store lands", SCR, dg(32'h0B0B0B0B));
 
-		$display("-- the start order: a takeover on purpose: the second host identifies at once; end 3; the first stops");
-		lease_take;
+		$display("-- the start order: a takeover on purpose: the second host identifies at once; the first host's stores drop");
 		identify(4);
-		lease_rd(v);
-		check("the identification ended the lease: end 3", {v[31], v[13:12]}, {1'b0, 2'd3});
-		axi_write(LEASE, lease_w(KP_ID, 2'd2, 4'd15), 4'hF);
-		lease_rd(v);
-		check("the first host's refresh fails: not held", v[31], 0);
+		ena_rd(v);
+		check("the identification ended the enable", v[31], 0);
+		axi_write(SCR, 32'h0A0A0A0A, 4'hF);
+		ena_rd(v);
+		check("the first host's next store: dropped, stale", {v[31], v[29]}, 2'b01);
+		rd("SCRATCH not stored", SCR, dg(32'h0B0B0B0B));
+		ena_w;
+		check("the second host enables", win.en_q, 1);
 
-		$display("-- the start order: a stock start (GPO = 0 first) beside a live host: its lease ends, its stores drop");
-		lease_take;
+		$display("-- the start order: a stock start (GPO = 0 first) beside a live host: its enable ends, its stores drop");
 		axi_write(OSD + 21'h1000, 32'h2, 4'hF);
 		@(negedge clk); gpo31 = 0;                            // the stock first act: GPO = 0, then the ID view
 		repeat (40) @(negedge clk);
 		axi_write(OSD + 21'h1000, 32'h1, 4'hF);              // the live host goes on storing
 		gpo31 = 1; repeat (6) @(negedge clk);                 // the stock program speaks in the I/O view
 		axi_write(SCR, 32'h0C0C0C0C, 4'hF);
-		lease_rd(v);
-		check("a stock start: the lease ended, end 3, stale set", {v[31], v[13:12], v[29]}, {1'b0, 2'd3, 1'b1});
-		rd("a stock start: the live host's stores dropped (OSD CTRL cleared with the lease)", OSD + 21'h1000, 32'd0);
+		ena_rd(v);
+		check("a stock start: the enable ended, stale set", {v[31], v[29]}, 2'b01);
+		rd("a stock start: the live host's stores dropped (OSD CTRL cleared with the enable)", OSD + 21'h1000, 32'd0);
 		rd("a stock start: SCRATCH not stored", SCR, dg(32'h0B0B0B0B));
-		axi_write(LEASE, lease_w(KP_ID, 2'd2, 4'd15), 4'hF);
-		lease_rd(v);
-		check("a stock start: the live host's next refresh fails", v[31], 0);
 		if (TB_SEC) check("a stock start: SECTOR's EN gone", blk_dn[18], 0);
-		$display("     GPI[22] compared with live_q in %0d cycles, %0d of them held", gpi22_n, gpi22_on);
+		$display("     GPI[22] compared with en_q in %0d cycles, %0d of them held", gpi22_n, gpi22_on);
+	end
+endtask
+
+// A new host starts from stock. The bench's host enables and binds every block: SECTOR EN with a frame begun and
+// half stored, OSD LWSEL and HR with an image word, lane frames queued behind a held select, every line. Its
+// successor (any program: a stock Main, a swapped binary, the same one re-executed) starts with the core running:
+// GPO = 0, the ID view for its identification, then the I/O view. With no store to the window, it then finds the
+// fabric off and the core on stock SPI: ENABLE and GPI[22] 0, every line low with causes pending, OSD CTRL 0 and
+// neither osd selecting the shadow, the SECTOR frame completed and the slot SPI's, an SPI frame serving the next
+// request, the successor's link words intact with no queued frame strobed, and an SPI OSD row shown.
+task fresh_cases;
+	reg [31:0] v, p, dr, lba;
+	integer k, n1, pl0;
+	begin
+		$display("-- a new host starts from stock: every block bound, then the successor's ID view");
+`ifdef MISTER_LW_LANE
+		f_set(0, 16'h001E, 2); fw[0] = 16'h4E01; fw[1] = 16'h4E02;
+		trk_clear; link_send; trk_save;                    // the successor's own link frame, the reference
+		f_set(0, 16'h001E, 2); fw[0] = 16'h0000; fw[1] = 16'h0000; link_send;
+`endif
+		ena_up;
+		axi_write(OSD + 21'h1000, 32'h3, 4'hF);              // LWSEL and HR
+		axi_write(OSD, 32'h5A5AA5A5, 4'hF);
+		repeat (slow(50)) @(negedge clk);
+		check("bound: both osds select the shadow", {hdmi_osd.lwsel_v1, vga_osd.lwsel_v1}, 2'b11);
+		if (TB_SEC) begin
+			sec_wr(21'h10, 32'h1);
+			sec_stand(32'h00004E00); lba = cd_lba; if (win.sec_lvl) cause_drain(SEC);
+			n1 = cd_frames;
+			sec_wr(21'h0C, lba);
+			frame_data(lba, 0, 20);                         // the frame begun, its words not all stored
+`ifdef MISTER_LW_SECTOR_SLOT
+			k = 0; while ((win.sec.sector.fs == 3'd0 || win.sec.sector.fs == 3'd4) && k < slow(2000)) begin
+				@(negedge clk); k = k + 1; end
+`endif
+			check("bound: SECTOR's slot on LW, its frame open", {blk_dn[18], k < slow(2000)}, 2'b11);
+		end
+`ifdef MISTER_LW_LANE
+		@(negedge clk_sys); io_enable = 1;                 // the dying host's select: frames queue behind it
+		f_set(0, 16'h001E, 2);
+		for (k = 0; k < 3; k = k + 1) begin fw[0] = 16'h4D00 + k; fw[1] = 16'h4D80 + k; lane_send(1); end
+		repeat (slow(100)) @(negedge clk);
+		pl0 = n_play;
+`endif
+		st_req(st_pat(990)); settle;
+		check("bound: SYS's line high", lines[1], 1);
+		// the successor: GPO = 0 (the select drops, the ID view), its identification, then the I/O view
+		@(negedge clk_sys); gpo31 = 0;
+`ifdef MISTER_LW_LANE
+		io_enable = 0;
+`endif
+		repeat (slow(2000)) @(negedge clk);
+		gpo31 = 1; repeat (2) @(negedge clk_sys); repeat (6) @(negedge clk);
+		ena_rd(v);
+		check("the successor finds ENABLE 0", v[31], 0);
+		check("the successor finds GPI[22] 0", tb_gpi[22], 0);
+		check("every line low, the SYS cause still pending", {lines, win.sys_lvl}, 4'b0001);
+		rd("OSD CTRL 0", OSD + 21'h1000, 32'd0);
+		repeat (slow(50)) @(negedge clk);
+		check("neither osd selects the shadow, neither is in the shadow's highres",
+		      {hdmi_osd.lwsel_v1, vga_osd.lwsel_v1, hdmi_osd.lwhr_s1, vga_osd.lwhr_s1}, 4'b0000);
+		if (TB_SEC) begin
+			wait_frame(n1);
+			check_buf("the frame begun completes, filled from its first missing word", lba, 20);
+			k = 0; while ((blk_dn[18] || blk_dn[17]) && k < slow(5000)) begin @(negedge clk); k = k + 1; end
+			check("SECTOR's slot back on SPI, its ack done", blk_dn[18:17], 2'b00);
+			sec_stand(32'h00004E10);
+			n1 = cd_frames; spi_frame(cd_lba); wait_frame(n1);
+			check_buf("a stock SPI frame serves the next request", cd_lba, TB_FRAME);
+		end
+`ifdef MISTER_LW_LANE
+		trk_clear; f_set(0, 16'h001E, 2); fw[0] = 16'h4E01; fw[1] = 16'h4E02; link_send;
+		repeat (slow(400)) @(negedge clk);
+		trk_cmp("the successor's link words intact, no queued frame strobed");
+		check("no queued frame played", n_play - pl0, 0);
+`endif
+		wait_quiet;
+		ena_rd(v);
+		check("every block returned: quiet, OWNED clear", {v[30], v[31]}, 2'b10);
+		rd("OWNED clear", OWNEDA, 32'd0);
 	end
 endtask
 
 `ifdef MISTER_LW_SECTOR_SLOT
-// SECTOR when its lease runs out, in each state of the primary slot, with clk_sys running or
-// stopped across the expiry. The ack completes, en_sys drops, the slot is SPI's again, and an SPI frame serves it.
-integer sx_fs = -1;     // the feeder's state in the cycle the lease ended
-always @(negedge win.live_q) sx_fs = win.sec.sector.fs;
-task sec_expiry(input integer sc, input stopped);
+// SECTOR at the next program's ID view, in each state of the primary slot, with clk_sys running or stopped
+// across it. The ack completes, en_sys drops, the slot is SPI's again, and an SPI frame serves it.
+integer sx_fs = -1;     // the feeder's state in the cycle the enable fell
+always @(negedge win.en_q) sx_fs = win.sec.sector.fs;
+task sec_view(input integer sc, input stopped);
 	reg [31:0] lba, v;
 	integer nst, n, t;
 	string  w;
@@ -3079,9 +2918,9 @@ task sec_expiry(input integer sc, input stopped);
 			default: w = "FIFO full";
 		endcase
 		w = {w, stopped ? ", clk_sys stopped across it" : ", clk_sys running"};
-		$display("-- SECTOR at the lease's expiry: %s", w);
+		$display("-- SECTOR at an ID view: %s", w);
 		lba = 32'h00007A00 + {sc[3:0], stopped, 4'd0};
-		lease_short((sc == 5) ? 4'd6 : 4'd3);
+		ena_short;
 		sec_wr(21'h10, 32'h1); settle;
 		check({w, ": bound"}, blk_dn[18], 1);
 		n0 = cd_frames; nst = 0;
@@ -3090,22 +2929,23 @@ task sec_expiry(input integer sc, input stopped);
 		if (sc == 3) begin frame_data(lba, 0, 294); nst = 294; end
 		if (sc == 4) begin
 			frame_data(lba, 0, 20); nst = 20;
-			while (win.lcnt > 300) @(negedge clk);
-			sec_wr(21'h10, 32'h3);                          // CTRL.ABORT: the fill runs across the expiry
+			repeat (12000) @(negedge clk);                  // the 20 words played, the frame waits for more
+			sec_wr(21'h10, 32'h3);                          // CTRL.ABORT: the fill runs across the ID view
+			repeat (295) @(negedge clk);
 		end
 		if (sc == 5) begin
 			sys_run = 0; repeat (20) @(negedge clk);
 			frame_data(lba, 0, TB_FRAME);
 			axi_read(SEC + 21'h18, 0, v, dl, beats); nst = v[9:0];
 			check({w, ": the FIFO filled, stores dropped"}, v[25:16] != 0, 1);
-			while (win.lcnt > 200) @(negedge clk);
 			if (!stopped) sys_run = 1;
+			repeat (200) @(negedge clk);
 		end
 		if (stopped && sc != 5) begin sys_run = 0; repeat (20) @(negedge clk); end
-		n = 0; while (win.live_q && n < 4 * (1 << TB_LU)) begin @(negedge clk); n = n + 1; end
-		lease_rd(v);
-		check({w, ": the lease ran out"}, {v[31], v[13:12]}, {1'b0, 2'd1});
-		if (sc == 4 && !stopped) check({w, ": the fill was running at the expiry"}, sx_fs, 3);
+		host_end;
+		ena_rd(v);
+		check({w, ": the ID view ended the enable"}, v[31], 0);
+		if (sc == 4 && !stopped) check({w, ": the fill was running at the ID view"}, sx_fs, 3);
 		if (stopped) begin
 			repeat (200) @(negedge clk);
 			check({w, ": EN cleared on clk_100m while clk_sys is stopped"}, win.sec.sector.en_lwx, 0);
@@ -3124,57 +2964,57 @@ task sec_expiry(input integer sc, input stopped);
 		spi_frame(lba);
 		wait_frame(n0);
 		check_buf({w, ": an SPI frame serves it"}, lba, TB_FRAME);
-		lease_take; cause_drain(SEC); axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		ena_take; cause_drain(SEC); host_end;
 	end
 endtask
-task sec_expiry_cases;
+task sec_view_cases;
 	integer sc;
 	begin
-		for (sc = 0; sc < 6; sc = sc + 1) sec_expiry(sc, 1'b0);
-		sec_expiry(1, 1'b1);
-		sec_expiry(3, 1'b1);
-		sec_expiry(5, 1'b1);
+		for (sc = 0; sc < 6; sc = sc + 1) sec_view(sc, 1'b0);
+		sec_view(1, 1'b1);
+		sec_view(3, 1'b1);
+		sec_view(5, 1'b1);
 	end
 endtask
 `endif
 
 `ifdef MISTER_LW_LANE
-// The lane when its lease runs out, with a frame open, three queued and one held mid-play by the link's
+// The lane at the next program's ID view, with a frame open, three queued and one held mid-play by the link's
 // wait: the one in flight completes, the queued never strobe, the open one is abandoned, a link word after is
-// intact. A capture frame cut mid-play: its replies land after the lease and are discarded.
-task lane_expiry_cases;
+// intact. A capture frame cut mid-play: its replies land after the enable fell and are discarded.
+task lane_view_cases;
 	reg [31:0] p, dr, rs;
 	integer b0, k;
 	begin
-		$display("-- LANE at the lease's expiry: one frame mid-play, three queued, one open");
+		$display("-- LANE at an ID view: one frame mid-play, three queued, one open");
 		f_set(0, 16'h001E, 4);
 		for (k = 0; k < 4; k = k + 1) fw[k] = 16'h7100 + k;
 		trk_clear; link_send; trk_save;                    // the reference for the link frame sent after
-		lease_short(4'd3);
+		ena_short;
 		lane_count(p, dr);
 		ioctl_wait = 1;
 		lane_send(1);
 		repeat (slow(200)) @(negedge clk);
-		check("expiry: the first frame holds after its first strobe", {lane_own, bus_n[7:0] - t_ref[0][7:0]}, {1'b1, 8'd1});
+		check("ID view: the first frame holds after its first strobe", {lane_own, bus_n[7:0] - t_ref[0][7:0]}, {1'b1, 8'd1});
 		for (k = 0; k < 3; k = k + 1) begin fw[0] = 16'h7200 + k; lane_send(1); end
 		fw[0] = 16'h7300; lane_send(0);                    // open: BEGIN and its words, no END
 		fw[0] = 16'h7100;
 		b0 = bus_n;
-		wait_lapse(3);
-		check("expiry: the open frame abandoned", win.lane.lane.wspec, win.lane.lane.wcom);
+		host_end;
+		check("ID view: the open frame abandoned", win.lane.lane.wspec, win.lane.lane.wcom);
 		@(negedge clk_sys); ioctl_wait = 0;
 		lane_wait(p + 1);
 		repeat (slow(400)) @(negedge clk);
-		check("expiry: the frame in flight completed its strobes", bus_n - b0, 4);
-		check("expiry: the queued frames were popped, none strobed", {lane_own, win.lane.lane.rptr == win.lane.lane.wcom},
+		check("ID view: the frame in flight completed its strobes", bus_n - b0, 4);
+		check("ID view: the queued frames were popped, none strobed", {lane_own, win.lane.lane.rptr == win.lane.lane.wcom},
 		      2'b01);
 		lane_count(v_l, dr);
-		check("expiry: PLAYED counts the one frame", v_l, p + 1);
+		check("ID view: PLAYED counts the one frame", v_l, p + 1);
 		trk_clear; link_send;
-		trk_cmp("expiry: a link frame after");
+		trk_cmp("ID view: a link frame after");
 
-		$display("-- LANE at the lease's expiry: a capture frame cut mid-play; its replies are discarded");
-		lease_short(4'd3);
+		$display("-- LANE at an ID view: a capture frame cut mid-play; its replies are discarded");
+		ena_short;
 		lane_count(p, dr);
 		lane_rstat(rs); rd0 = rs[31:16];
 		f_set(0, 16'h0029, 8);
@@ -3182,25 +3022,25 @@ task lane_expiry_cases;
 		ioctl_wait = 1;
 		lane_send_c(1, 1'b1);
 		repeat (slow(200)) @(negedge clk);
-		wait_lapse(3);
+		host_end;
 		rw0 = win.lane.lane.rwp;
-		lease_rd(rs);
+		ena_rd(rs);
 		check("cut capture, held by the link's wait: not quiet", rs[30], 0);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-		check("cut capture, held: a CLAIM is refused", win.live_q, 0);
+		axi_write(ENA, ENA_W, 4'hF);
+		check("cut capture, held: an ENABLE is refused", win.en_q, 0);
 		@(negedge clk_sys); ioctl_wait = 0;
 		lane_wait(p + 1);
 		repeat (slow(400)) @(negedge clk);
-		check("cut capture: its replies landed after the lease", win.lane.lane.rwp != rw0, 1);
+		check("cut capture: its replies landed after the enable fell", win.lane.lane.rwp != rw0, 1);
 		lane_rstat(rs);
 		check("cut capture: RSTAT shows none waiting", rs[15:0], 0);
 		wait_quiet;
-		lease_rd(rs);
+		ena_rd(rs);
 		check("cut capture: quiet returns once the player is at rest", rs[30], 1);
-		lease_up;
-		check("cut capture: a CLAIM is then taken", win.live_q, 1);
+		ena_up;
+		check("cut capture: an ENABLE is then taken", win.en_q, 1);
 		lane_rstat(rs);
-		check("cut capture: RSTAT under the new lease: none waiting, no drop counted", rs, {rd0, 16'd0});
+		check("cut capture: RSTAT under the new enable: none waiting, no drop counted", rs, {rd0, 16'd0});
 	end
 endtask
 reg [31:0] v_l;
@@ -3208,12 +3048,12 @@ reg  [8:0] rw0;
 reg [15:0] rd0;
 `endif
 
-// ---- The lease links: a claim waits for every linked half's rest; stores wait for its acknowledge ----
-// A CLAIM stored again and again, as fast as the bus allows, until one is taken or max stores were made.
-task claim_hammer(input [9:0] id, input integer max, output integer tries);
+// ---- The enable links: an ENABLE waits for every linked half's rest; stores wait for its acknowledge ----
+// An ENABLE stored again and again, as fast as the bus allows, until one is taken or max stores were made.
+task ena_hammer(input integer max, output integer tries);
 	begin
 		tries = 0;
-		while (!win.live_q && tries < max) begin axi_write(LEASE, lease_w(id, 2'd1, 4'd15), 4'hF); tries = tries + 1; end
+		while (!win.en_q && tries < max) begin axi_write(ENA, ENA_W, 4'hF); tries = tries + 1; end
 	end
 endtask
 // The link states as the bench reads them, 7 where a block is not built.
@@ -3243,16 +3083,16 @@ task sec_spi_clear;
 	end
 endtask
 
-// RELEASE with a lane frame held mid-play and two queued, and a SECTOR frame begun with no data; then a
-// CLAIM stored as fast as the bus allows. None is taken while a half is off rest (the claim monitor, and quiet
+// An ID view with a lane frame held mid-play and two queued, and a SECTOR frame begun with no data; then an
+// ENABLE stored as fast as the bus allows. None is taken while a half is off rest (the ENABLE monitor, and quiet
 // read 0 while the frame is held); the one taken finds REQ 0; the frame in flight completes, the queued ones
 // never strobe, the SECTOR frame is zero-filled.
 task ls6;
 	reg [31:0] v, p, dr;
 	integer tries, b0, c0, n1, k;
 	begin
-		$display("-- lease links: RELEASE, then CLAIMs as fast as the bus allows: none before every half is at rest");
-		lease_up;
+		$display("-- enable links: an ID view, then ENABLEs as fast as the bus allows: none before every half is at rest");
+		ena_up;
 		c0 = n_claims;
 `ifdef MISTER_LW_LANE
 		lane_count(p, dr);
@@ -3268,27 +3108,26 @@ task ls6;
 			sec_wr(21'h10, 32'h1); sec_stand(32'h00006600); cause_drain(SEC);
 			n1 = cd_frames;
 			sec_wr(21'h0C, cd_lba);
-			// RELEASE once the half has popped the BEGIN and opened its frame (it would discard one still queued)
+			// the ID view once the half has popped the BEGIN and opened its frame (it would discard one still queued)
 `ifdef MISTER_LW_SECTOR_SLOT
 			k = 0; while ((win.sec.sector.fs == 3'd0 || win.sec.sector.fs == 3'd4) && k < slow(2000)) begin
 				@(negedge clk); k = k + 1; end
-			check("the BEGIN popped and its frame open before the RELEASE", k < slow(2000), 1);
+			check("the BEGIN popped and its frame open before the ID view", k < slow(2000), 1);
 `endif
 		end
-		kp_on = 0;
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 `ifdef MISTER_LW_LANE
-		claim_hammer(KP_ID, 60, tries);
-		lease_rd(v);
-		check("a lane frame held by the link's wait: 60 CLAIMs refused, quiet 0", {win.live_q, v[30]}, 2'b00);
+		ena_hammer(60, tries);
+		ena_rd(v);
+		check("a lane frame held by the link's wait: 60 ENABLEs refused, quiet 0", {win.en_q, v[30]}, 2'b00);
 		@(negedge clk_sys); ioctl_wait = 0;
 `endif
-		claim_hammer(KP_ID, slow(4000), tries);
-		$display("     taken after %0d CLAIM stores", tries);
-		check("a CLAIM is taken once every half is at rest", win.live_q, 1);
-		check("taken claims, every half at rest", n_offrest, 0);
+		ena_hammer(slow(4000), tries);
+		$display("     taken after %0d ENABLE stores", tries);
+		check("an ENABLE is taken once every half is at rest", win.en_q, 1);
+		check("taken ENABLEs, every half at rest", n_offrest, 0);
 		if (TB_SEC) begin
-			rd("the claim finds REQ 0", SEC + 21'h04, 32'd0);
+			rd("the ENABLE finds REQ 0", SEC + 21'h04, 32'd0);
 			wait_frame(n1);
 			check_buf("the SECTOR frame begun with no data: zero-filled", cd_lba, 0);
 		end
@@ -3300,29 +3139,28 @@ task ls6;
 		check("the player idle", {lane_own, lane_hold}, 2'b00);
 `endif
 		wait_open;
-		lease_rd(v); kp_epoch = v[23:16];
-		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB); kp_t = $realtime; kp_on = 1;
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB);
 		if (TB_SEC) begin cause_drain(SEC); sec_wr(21'h10, 32'h0); sec_spi_clear; end
 	end
 endtask
 
-// A predecessor read and cleared the causes and died with nothing served; the next CLAIM reloads them.
+// A predecessor read and cleared the causes and died with nothing served; the next ENABLE reloads them.
 task ls10;
 	reg [31:0] v;
 	begin
-		$display("-- lease links: at a claim SYS raises STATUS and SECTOR's word is clear until EN rises over a request");
-		lease_short(4'd1);
+		$display("-- enable links: at an ENABLE SYS raises STATUS and SECTOR's word is clear until EN rises over a request");
+		ena_short;
 		st_req(st_pat(950)); settle;
 		cause_drain(SYSB);
 		if (TB_SEC) begin sec_stand(32'h00006A00); if (win.sec_lvl) cause_drain(SEC); end
-		wait_lapse(1);
-		claim_w(KP_ID, 4'd15); wait_open;
-		rd("after the claim: SYS CAUSE shows STATUS", SYSB, 32'h1);
+		host_end;
+		ena_w; wait_open;
+		rd("after the ENABLE: SYS CAUSE shows STATUS", SYSB, 32'h1);
 		check("LINE_EN 0: no line", lines, 0);
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF); settle;
 		check("SYS's LINE_EN bit: its line rises", lines[1], 1);
 		if (TB_SEC) begin
-			rd("after the claim: SECTOR CAUSE clear, its request standing", SEC, 32'd0);
+			rd("after the ENABLE: SECTOR CAUSE clear, its request standing", SEC, 32'd0);
 			check("the request stands", sd_rd[1] | cd_req, 1);
 			sec_wr(21'h10, 32'h1); settle;
 			rd("EN rises over the standing request: SECTOR CAUSE", SEC, 32'h1);
@@ -3330,34 +3168,33 @@ task ls10;
 			cause_drain(SEC); sec_wr(21'h10, 32'h0);
 		end
 		cause_drain(SYSB);
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 		if (TB_SEC) sec_spi_clear;
 	end
 endtask
 
 `ifdef MISTER_LW_SECTOR_SLOT
-// A BEGIN stored just before a RELEASE, still queued when the link's level falls (clk_sys stopped across both):
-// the half discards it unplayed and the request stands for SPI. The next host claims and stores EN before anyone
+// A BEGIN stored just before an ID view, still queued when the link's level falls (clk_sys stopped across both):
+// the half discards it unplayed and the request stands for SPI. The next host enables and stores EN before anyone
 // serves it: the EN rise raises SECTOR's cause, REQ shows the request, and a frame over the bridge serves it.
 integer n_dis = 0;
 always @(posedge clk_sys)
-	if (win.sec.sector.qv && win.sec.sector.fidle && !win.sec.sector.lease_s && win.sec.sector.qt == 2'd1)
+	if (win.sec.sector.qv && win.sec.sector.fidle && !win.sec.sector.hen_s && win.sec.sector.qt == 2'd1)
 		n_dis = n_dis + 1;
 task ls18;
 	reg [31:0] v;
 	integer d0, n1, t;
 	begin
-		$display("-- lease links: a BEGIN discarded with the lease gone; the next host's EN rise finds its request");
-		lease_up;
+		$display("-- enable links: a BEGIN discarded with the enable gone; the next host's EN rise finds its request");
+		ena_up;
 		sec_wr(21'h10, 32'h1); sec_stand(32'h00006E00); if (win.sec_lvl) cause_drain(SEC);
 		check("bound before the BEGIN", blk_dn[18], 1);
 		@(negedge clk_sys); sys_run = 0; repeat (20) @(negedge clk);
 		d0 = n_dis;
 		sec_wr(21'h0C, cd_lba);
-		kp_on = 0;
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 		repeat (200) @(negedge clk);
-		check("the RELEASE with clk_sys stopped: EN cleared, the BEGIN still queued",
+		check("the ID view with clk_sys stopped: EN cleared, the BEGIN still queued",
 		      {win.sec.sector.en_lwx, win.sec.sector.rptr != win.sec.sector.wptr}, 2'b01);
 		sys_run = 1;
 		t = 0; while ((n_dis == d0 || blk_dn[18:17] != 0) && t < slow(5000)) begin @(negedge clk); t = t + 1; end
@@ -3365,11 +3202,11 @@ task ls18;
 		check("the slot back on SPI", blk_dn[18:17], 2'b00);
 		settle;
 		check("the request stands for SPI", sd_rd[1], 1);
-		claim_w(KP_ID, 4'd15); wait_open;
-		lease_rd(v); kp_epoch = v[23:16];
-		check("the next host holds the lease", {v[31], v[9:0]}, {1'b1, KP_ID});
-		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB); kp_t = $realtime; kp_on = 1;
-		rd("after the claim: SECTOR CAUSE clear", SEC, 32'd0);
+		ena_w; wait_open;
+		ena_rd(v);
+		check("the next host holds the enable", v[31], 1);
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB);
+		rd("after the ENABLE: SECTOR CAUSE clear", SEC, 32'd0);
 		sec_wr(21'h10, 32'h1); settle;
 		rd("EN rises over the standing request: SECTOR CAUSE", SEC, 32'h1);
 		check("its line rises", lines[TB_E_SEC - 1], 1);
@@ -3388,38 +3225,36 @@ task ls18;
 endtask
 `endif
 
-// A CLAIM followed at once by work, without waiting for OPEN, after a quiet return, after a lapse and
-// after a takeover. Every lane frame plays whole or was dropped at the gate (stale set); none is popped unplayed.
+// An ENABLE followed at once by work, without waiting for OPEN, after an ID view and after an HPS reset. Every
+// lane frame plays whole or was dropped at the gate (stale set); none is popped unplayed.
 // A SECTOR EN store lands or is dropped with stale. A host that waits for OPEN loses nothing.
 task ls11;
 	reg [31:0] v, en;
 	integer k, j, c0, p0, b0, s0;
 	string  w;
 	begin
-		for (k = 0; k < 3; k = k + 1) begin
-			w = (k == 0) ? "after a quiet return" : (k == 1) ? "after a lapse" : "after a takeover";
-			$display("-- lease links: a CLAIM followed at once by work, %s", w);
-			kp_on = 0;
-			if (k == 1) begin lease_short(4'd1); wait_lapse(1); end
-			if (k == 2) begin
-				lease_rd(v); if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
-				claim_w(ID_B, 4'd15);
-				lease_rd(v); axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);   // the takeover's RELEASE
+		for (k = 0; k < 2; k = k + 1) begin
+			w = (k == 0) ? "after an ID view" : "after an HPS reset";
+			$display("-- enable links: an ENABLE followed at once by work, %s", w);
+			ena_rd(v); if (!v[31]) ena_w;
+			if (k == 0) host_end;
+			else begin
+				@(negedge clk); hps_rst_n = 0; repeat (3) @(negedge clk); hps_rst_n = 1;
+				fw_wait_fall; repeat (2) @(negedge clk);
 			end
-			if (k == 0) begin lease_rd(v); if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF); end
 			wait_quiet;
 `ifdef MISTER_LW_LANE
 			c0 = n_commit; p0 = n_play; b0 = bus_n;
 `endif
-			axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-			check({w, ": the CLAIM is taken"}, win.live_q, 1);
+			axi_write(ENA, ENA_W, 4'hF);
+			check({w, ": the ENABLE is taken"}, win.en_q, 1);
 `ifdef MISTER_LW_LANE
 			f_set(0, 16'h001E, 2);
 			for (j = 0; j < 4; j = j + 1) begin fw[0] = 16'h1100 + j; fw[1] = 16'h1180 + j; lane_send(1); end
 `endif
 			if (TB_SEC) sec_wr(21'h10, 32'h1);
 			wait_open;
-			lease_rd(v);
+			ena_rd(v);
 			if (TB_SEC) begin
 				axi_read(SEC + 21'h10, 0, en, dl, beats);
 				check({w, ": the EN store landed, or was dropped with stale"}, en[0] | v[29], 1);
@@ -3436,7 +3271,7 @@ task ls11;
 `endif
 			if (TB_SEC) sec_wr(21'h10, 32'h0);
 		end
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 	end
 endtask
 
@@ -3451,13 +3286,13 @@ task ls12_view(input integer v);
 	begin
 		w = (v == 0) ? "the selects and bit 31 together" : (v == 1) ? "bit 31 a cycle first" :
 		    (v == 2) ? "the selects a cycle first" : "clk_sys stopped across the GPO store";
-		$display("-- lease links, the view: a dead host's select and queued frames; a stock successor (%s)", w);
+		$display("-- enable links, the view: a dead host's select and queued frames; a stock successor (%s)", w);
 `ifdef MISTER_LW_LANE
 		f_set(0, 16'h001E, 2); fw[0] = 16'h3E01; fw[1] = 16'h3E02;
 		trk_clear; link_send; trk_save;                    // the successor's own link frame, the reference
 		f_set(0, 16'h001E, 2); fw[0] = 16'h0000; fw[1] = 16'h0000; link_send;
 `endif
-		lease_up;
+		ena_up;
 		if (TB_SEC) sec_wr(21'h10, 32'h1);
 `ifdef MISTER_LW_LANE
 		@(negedge clk_sys); io_enable = 1;                 // the dead host's select
@@ -3466,7 +3301,6 @@ task ls12_view(input integer v);
 		repeat (slow(100)) @(negedge clk);
 		pl0 = n_play;
 `endif
-		kp_on = 0;                                         // the host is dead
 		if (v == 3) begin
 			@(negedge clk_sys); sys_run = 0; repeat (20) @(negedge clk);
 			gpo31 = 0; io_enable = 0; repeat (40) @(negedge clk); sys_run = 1;
@@ -3485,8 +3319,8 @@ task ls12_view(input integer v);
 		trk_cmp({w, ": the successor's link words intact, no queued frame strobed"});
 		check({w, ": no queued frame played"}, n_play - pl0, 0);
 `endif
-		lease_rd(lv);
-		check({w, ": the lease ended by the view, end 3"}, {lv[31], lv[13:12]}, {1'b0, 2'd3});
+		ena_rd(lv);
+		check({w, ": the view ended the enable"}, lv[31], 0);
 		if (TB_SEC) begin
 			check({w, ": SECTOR's slot back on SPI"}, blk_dn[18], 0);
 			sec_stand(32'h00006C00 + v);
@@ -3496,65 +3330,38 @@ task ls12_view(input integer v);
 	end
 endtask
 task ls12;
-	reg [31:0] p, dr, lv;
-	integer v, pl0, k;
+	integer v;
 	begin
 		for (v = 0; v < 4; v = v + 1) ls12_view(v);
-`ifdef MISTER_LW_LANE
-		$display("-- lease links, the view: a successor that never leaves the I/O view (recorded)");
-		lease_short(4'd2);
-		@(negedge clk_sys); io_enable = 1;
-		f_set(0, 16'h001E, 2);
-		for (k = 0; k < 2; k = k + 1) begin fw[0] = 16'h3F00 + k; fw[1] = 16'h3F80 + k; lane_send(1); end
-		pl0 = n_play;
-		@(negedge clk_sys); io_enable = 0;                 // the successor drops the select, stays in the I/O view
-		f_set(0, 16'h0029, 0); link_send;
-		wait_lapse(2);
-		$display("     %0d queued frames played in the successor's gaps before the lease ran out", n_play - pl0);
-		check("recorded: the queued frames played while the lease lasted", n_play - pl0, 2);
-		lane_count(p, dr);
-		repeat (slow(400)) @(negedge clk);
-		lane_count(lv, dr);
-		check("none after the lease", lv, p);
-`endif
 	end
 endtask
 
-// A lease that ends inside the rise. The lease is ended by RELEASE, by GPO[31] low and by an HPS reset,
-// k clk_100m cycles after the CLAIM's store took effect, k from the claim's own cycle to twenty cycles past the
-// last OPEN bit. Then CLAIMs as fast as the bus allows; the one taken is followed at once by lane frames and a
-// SECTOR EN and BEGIN. The link checker, the claim monitor, and: every lane frame plays or was dropped with stale;
+// An enable that ends inside the rise. It is ended by GPO[31] low and by an HPS reset, k clk_100m cycles after
+// the ENABLE's store took effect, k from before the store's own cycle to twenty cycles past the last OPEN bit.
+// Then ENABLEs as fast as the bus allows; the one taken is followed at once by lane frames and a
+// SECTOR EN and BEGIN. The link checker, the ENABLE monitor, and: every lane frame plays or was dropped with stale;
 // the BEGIN is served or its request stands.
 integer l15_rise = 0, l15_open = 0;
 reg     l15_on = 0;
-always @(negedge win.live_q) if (l15_on) begin
+always @(negedge win.en_q) if (l15_on) begin
 	if (lk_sec == 3'd2 || lk_lane == 3'd2) l15_rise = l15_rise + 1;
 	if (lk_sec == 3'd3 || lk_lane == 3'd3) l15_open = l15_open + 1;
 end
 task ls15;
 	reg [31:0] v;
-	integer kind, k, kmin, past, tries, c0, p0, n1, s0, bad_p, bad_s, nit, r0, o0;
-	realtime tr;
+	integer kind, k, past, tries, c0, p0, n1, s0, bad_p, bad_s, nit, r0, o0;
 	string  w;
 	begin
-		for (kind = 0; kind < 3; kind = kind + 1) begin
-			w = (kind == 0) ? "RELEASE" : (kind == 1) ? "GPO[31] low" : "an HPS reset";
-			$display("-- lease links: a lease ended inside its rise by %s, in every cycle to twenty past OPEN", w);
-			kmin = (kind == 0) ? 0 : -3;
+		for (kind = 1; kind < 3; kind = kind + 1) begin
+			w = (kind == 1) ? "GPO[31] low" : "an HPS reset";
+			$display("-- enable links: an enable ended inside its rise by %s, in every cycle to twenty past OPEN", w);
 			past = 0; bad_p = 0; bad_s = 0; nit = 0; r0 = l15_rise; o0 = l15_open;
-			for (k = kmin; past < 20 && k < slow(400); k = k + 1) begin
-				kp_on = 0;
-				lease_rd(v); if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
+			for (k = -3; past < 20 && k < slow(400); k = k + 1) begin
+				ena_rd(v); if (v[31]) host_end;
 				wait_quiet;
 				l15_on = 1;
-				if (kind == 0) begin
-					axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
-					tr = t_lrise;
-					while ($realtime < tr + 10.0 * k - 30.0) @(negedge clk);
-					axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-				end
-				else fork
-					axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
+				fork
+					axi_write(ENA, ENA_W, 4'hF);
 					begin
 						// the store takes effect 3 cycles after its first negedge; the end lands about 3 later
 						repeat (k + 3 > 0 ? k + 3 : 0) @(negedge clk);
@@ -3566,13 +3373,13 @@ task ls15;
 				repeat (8) @(negedge clk);
 				l15_on = 0;
 				past = l15_open - o0;
-				if (win.live_q) axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
-				// the next claim, and work at once
+				if (win.en_q) host_end;
+				// the next ENABLE, and work at once
 `ifdef MISTER_LW_LANE
 				c0 = n_commit; p0 = n_play;
 `endif
 				if (TB_SEC) sec_stand(32'h00007500 + k[7:0]);
-				claim_hammer(KP_ID, slow(4000), tries);
+				ena_hammer(slow(4000), tries);
 `ifdef MISTER_LW_LANE
 				f_set(0, 16'h001E, 2); fw[0] = 16'h5100 + k; fw[1] = 16'h5180 + k; lane_send(1); lane_send(1);
 `endif
@@ -3585,68 +3392,67 @@ task ls15;
 				wait_open;
 `ifdef MISTER_LW_LANE
 				s0 = 0; while (n_play - p0 < n_commit - c0 && s0 < slow(4000)) begin @(negedge clk); s0 = s0 + 1; end
-				lease_rd(v);
+				ena_rd(v);
 				if (n_play - p0 != n_commit - c0 || (n_commit - c0 != 2 && !v[29])) bad_p = bad_p + 1;
 `endif
 				if (TB_SEC) begin
 					s0 = 0; while (cd_frames == n1 && s0 < slow(4000)) begin @(negedge clk); s0 = s0 + 1; end
 					sec_wr(21'h10, 32'h0);
-					axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+					host_end;
 					s0 = 0; while ((blk_dn[18] || blk_dn[17]) && s0 < slow(4000)) begin @(negedge clk); s0 = s0 + 1; end
 					settle;
 					if (cd_frames == n1 && !sd_rd[1]) bad_s = bad_s + 1;   // neither served nor standing for SPI
 					sec_spi_clear;
 				end
-				else axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+				else host_end;
 				nit = nit + 1;
 			end
 			$display("     %0d ends, %0d with a link in RISE and %0d in OPEN at the end", nit, l15_rise - r0, l15_open - o0);
-			if (kind != 0) check({w, ": ends inside the rise were reached"}, l15_rise - r0 > 0, 1);
+			check({w, ": ends inside the rise were reached"}, l15_rise - r0 > 0, 1);
 			check({w, ": ends in OPEN, twenty"}, past >= 20, 1);
 			check({w, ": every lane frame played or dropped with stale"}, bad_p, 0);
 			check({w, ": every BEGIN served, or its request standing for SPI"}, bad_s, 0);
 		end
-		check("lease links: CLAIMs taken with a half off rest", n_offrest, 0);
+		check("enable links: ENABLEs taken with a half off rest", n_offrest, 0);
 
-		$display("-- lease links: clk_sys stopped from before a claim to after its end: the link waits in RISE, OWNED set");
-		lease_rd(v); if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
+		$display("-- enable links: clk_sys stopped from before an ENABLE to after its end: the link waits in RISE, OWNED set");
+		ena_rd(v); if (v[31]) host_end;
 		wait_quiet;
 		sys_run = 0; repeat (20) @(negedge clk);
-		axi_write(LEASE, lease_w(KP_ID, 2'd1, 4'd15), 4'hF);
+		axi_write(ENA, ENA_W, 4'hF);
 		repeat (20) @(negedge clk);
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 		repeat (40) @(negedge clk);
 		if (TB_SEC) check("stopped: SECTOR's link in RISE", lk_sec, 3'd2);
 		if (TB_LANE) check("stopped: the lane's link in RISE", lk_lane, 3'd2);
 		rd("stopped: OWNED shows the linked entries", OWNEDA, TB_LINKED);
-		lease_rd(v);
+		ena_rd(v);
 		check("stopped: not quiet", v[30], TB_LINKED == 0);
-		claim_hammer(KP_ID, 8, tries);
-		check("stopped: no CLAIM taken", win.live_q, 0);
+		ena_hammer(8, tries);
+		check("stopped: no ENABLE taken", win.en_q, 0);
 		sys_run = 1;
 		wait_quiet;
 		rd("restarted: the return completes, OWNED clear", OWNEDA, 32'd0);
-		claim_w(KP_ID, 4'd15);
-		check("restarted: a CLAIM is taken", win.live_q, 1);
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		ena_w;
+		check("restarted: an ENABLE is taken", win.en_q, 1);
+		host_end;
 	end
 endtask
 
-// One link's acknowledge forced high across a claim (a half that never answers): that entry never opens,
+// One link's acknowledge forced high across an ENABLE (a half that never answers): that entry never opens,
 // the others do and work, its requests are served over SPI, and with the force gone a late bind works. Forced low
-// after a lease (a half that cannot return): quiet stays 0, OWNED names it alone, no CLAIM is taken, SPI works.
+// after an enable (a half that cannot return): quiet stays 0, OWNED names it alone, no ENABLE is taken, SPI works.
 task ls17;
 	reg [31:0] v, p, dr;
 	integer tries, n1;
 	begin
 `ifdef MISTER_LW_SECTOR_SLOT
-		$display("-- lease links: a SECTOR half that never answers costs only SECTOR");
-		kp_on = 0;
-		lease_rd(v); if (v[31]) axi_write(LEASE, lease_w(v[9:0], 2'd3, 4'd0), 4'hF);
+		$display("-- enable links: a SECTOR half that never answers costs only SECTOR");
+		ena_rd(v); if (v[31]) host_end;
 		wait_quiet;
 		fc_off = 1;
 		force win.sec.sector.fence.ack_lwx = 1'b1;
-		claim_w(KP_ID, 4'd15);
+		ena_w;
 		repeat (slow(600)) @(negedge clk);
 		rd("OPEN: every entry but SECTOR's", OPENA, ((32'd1 << em_n) - 1) & ~(32'd1 << TB_E_SEC));
 		sec_wr(21'h10, 32'h1);
@@ -3661,31 +3467,30 @@ task ls17;
 		check_buf("the unanswered block's request served over SPI", cd_lba, TB_FRAME);
 		release win.sec.sector.fence.ack_lwx;
 		wait_open;
-		rd("the force removed under the same lease: OPEN every entry", OPENA, (32'd1 << em_n) - 1);
+		rd("the force removed under the same enable: OPEN every entry", OPENA, (32'd1 << em_n) - 1);
 		sec_wr(21'h10, 32'h1);
 		rd("a late bind works: EN", SEC + 21'h10, 32'h1);
 		sec_wr(21'h10, 32'h0);
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 
-		$display("-- lease links: a SECTOR half that cannot return holds the shared gate (recorded)");
+		$display("-- enable links: a SECTOR half that cannot return holds the shared gate (recorded)");
 		repeat (slow(200)) @(negedge clk);
 		force win.sec.sector.fence.ack_lwx = 1'b0;
 		repeat (slow(200)) @(negedge clk);
-		lease_rd(v);
+		ena_rd(v);
 		check("not quiet", v[30], 0);
 		rd("OWNED names SECTOR alone", OWNEDA, 32'd1 << TB_E_SEC);
-		claim_hammer(KP_ID, 10, tries);
-		claim_hammer(ID_B, 10, tries);
-		check("no host's CLAIM is taken", win.live_q, 0);
+		ena_hammer(20, tries);
+		check("no ENABLE is taken", win.en_q, 0);
 		sec_stand(32'h00007701);
 		n1 = cd_frames; spi_frame(cd_lba); wait_frame(n1);
 		check_buf("SPI works", cd_lba, TB_FRAME);
 		release win.sec.sector.fence.ack_lwx;
-		claim_w(KP_ID, 4'd15);
-		check("the force removed: a CLAIM is taken", win.live_q, 1);
+		ena_w;
+		check("the force removed: an ENABLE is taken", win.en_q, 1);
 		fc_off = 0;
 `ifdef MISTER_LW_LANE
-		$display("-- lease links: a host that skips SECTOR waits on the lane's OPEN bit alone");
+		$display("-- enable links: a host that skips SECTOR waits on the lane's OPEN bit alone");
 		tries = 0;
 		axi_read(OPENA, 0, v, dl, beats);
 		while (!v[TB_E_LANE] && tries < 100) begin tries = tries + 1; axi_read(OPENA, 0, v, dl, beats); end
@@ -3693,15 +3498,15 @@ task ls17;
 		f_set(0, 16'h001E, 2); fw[0] = 16'h1703; fw[1] = 16'h1704; lane_send(1);
 		lane_wait(p + 1);
 `endif
-		axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+		host_end;
 `endif
 	end
 endtask
 
-// Random values in every clk_sys register of the lane, SECTOR, PAD, SYS and osd halves, and in each lease
-// link's clk_sys registers. Pass 1 mid-lease, then RELEASE and CLAIMs as fast as the bus allows: none taken
-// before every half is at rest (the claim monitor), a stock SPI transfer before the claim, and a frame of each
-// block correct under the new lease. Pass 2 during the return: the links converge and a later lease works.
+// Random values in every clk_sys register of the lane, SECTOR, PAD, SYS and osd halves, and in each enable
+// link's clk_sys registers. Pass 1 mid-enable, then an ID view and ENABLEs as fast as the bus allows: none taken
+// before every half is at rest (the ENABLE monitor), a stock SPI transfer before the ENABLE, and a frame of each
+// block correct under the new enable. Pass 2 during the return: the links converge and a later enable works.
 task scramble;
 	begin
 		@(negedge clk_sys);
@@ -3723,7 +3528,7 @@ task scramble;
 		win.sec.sector.ctl_sync.lws0_q = $random; win.sec.sector.ctl_sync.lws1_q = $random;
 		win.sec.sector.wg_sync.lws0_q = $random; win.sec.sector.wg_sync.lws1_q = $random;
 		win.sec.sector.fence.rest_n = $random; win.sec.sector.fence.ack_lwx = $random;
-		win.sec.sector.fence.lease_sync.lws0_q = $random; win.sec.sector.fence.lease_sync.lws1_q = $random;
+		win.sec.sector.fence.hen_sync.lws0_q = $random; win.sec.sector.fence.hen_sync.lws1_q = $random;
 `endif
 `ifdef MISTER_LW_LANE
 		win.lane.lane.rptr = $random; win.lane.lane.q = $random; win.lane.lane.fresh = $random;
@@ -3735,7 +3540,7 @@ task scramble;
 		win.lane.lane.wg_sync.lws0_q = $random; win.lane.lane.wg_sync.lws1_q = $random;
 		win.lane.lane.rrg_sync.lws0_q = $random; win.lane.lane.rrg_sync.lws1_q = $random;
 		win.lane.lane.fence.rest_n = $random; win.lane.lane.fence.ack_lwx = $random;
-		win.lane.lane.fence.lease_sync.lws0_q = $random; win.lane.lane.fence.lease_sync.lws1_q = $random;
+		win.lane.lane.fence.hen_sync.lws0_q = $random; win.lane.lane.fence.hen_sync.lws1_q = $random;
 `endif
 	end
 endtask
@@ -3747,20 +3552,19 @@ task ls8;
 		vs_auto = 1;
 `endif
 		for (pass = 0; pass < 4; pass = pass + 1) begin
-			$display("-- lease links: every clk_sys register scrambled mid-lease (seed %0d); then RELEASE and CLAIMs", pass);
-			lease_up;
+			$display("-- enable links: every clk_sys register scrambled mid-enable (seed %0d); then an ID view and ENABLEs", pass);
+			ena_up;
 			if (TB_SEC) sec_wr(21'h10, 32'h1);
 			fc_off = 1;
 			for (j = 0; j < 3; j = j + 1) begin scramble; repeat (slow(30)) @(negedge clk); end
 			repeat (slow(200)) @(negedge clk);
-			kp_on = 0;
-			axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+			host_end;
 			if (pass[0]) begin
-				// CLAIMs as fast as the bus allows from the RELEASE on: the claim monitor checks the one taken
-				claim_hammer(KP_ID, slow(20000), tries);
-				$display("     taken after %0d CLAIM stores", tries);
-				check("after the scramble: a CLAIM is taken", win.live_q, 1);
-				check("after the scramble: CLAIMs taken with a half off rest", n_offrest, 0);
+				// ENABLEs as fast as the bus allows from the ID view on: the ENABLE monitor checks the one taken
+				ena_hammer(slow(20000), tries);
+				$display("     taken after %0d ENABLE stores", tries);
+				check("after the scramble: an ENABLE is taken", win.en_q, 1);
+				check("after the scramble: ENABLEs taken with a half off rest", n_offrest, 0);
 				fc_off = 0;
 			end
 			else begin
@@ -3777,15 +3581,14 @@ task ls8;
 				if (TB_SEC) begin
 					sec_stand(32'h00007800 + pass);
 					n1 = cd_frames; spi_frame(cd_lba); wait_frame(n1);
-					check_buf("a stock SPI transfer before the claim", cd_lba, TB_FRAME);
+					check_buf("a stock SPI transfer before the ENABLE", cd_lba, TB_FRAME);
 				end
-				claim_hammer(KP_ID, slow(4000), tries);
-				check("a CLAIM is taken", win.live_q, 1);
+				ena_hammer(slow(4000), tries);
+				check("an ENABLE is taken", win.en_q, 1);
 			end
-			wait_open; lease_rd(v); kp_epoch = v[23:16];
-			axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB); kp_t = $realtime; kp_on = 1;
+			wait_open; 			axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB);
 			axi_write(pad_addr(8'h02, 0), 32'h00C0FFEE ^ pass, 4'hF); settle;
-			check("a pad store lands under the new lease", joy0, 32'h00C0FFEE ^ pass);
+			check("a pad store lands under the new enable", joy0, 32'h00C0FFEE ^ pass);
 			st_req(st_pat(970 + pass)); settle;
 			check("a status capture raises SYS's line", lines[1], 1);
 			cause_drain(SYSB);
@@ -3804,36 +3607,35 @@ task ls8;
 				cause_drain(SEC); sec_wr(21'h10, 32'h0);
 			end
 		end
-		$display("-- lease links: the clk_sys registers scrambled during the return: the links converge, a lease works");
+		$display("-- enable links: the clk_sys registers scrambled during the return: the links converge, an enable works");
 		for (pass = 0; pass < 8; pass = pass + 1) begin
-			lease_up;
+			ena_up;
 `ifdef MISTER_LW_LANE
 			@(negedge clk_sys); io_enable = 1;
 			f_set(0, 16'h001E, 2); fw[0] = 16'h8900; fw[1] = 16'h8901; lane_send(1); lane_send(1);
 `endif
-			kp_on = 0;
 			fc_off = 1;
 			fork
-				axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+				host_end;
 				begin repeat (2 + 3 * pass) @(negedge clk); scramble; end
 			join
 `ifdef MISTER_LW_LANE
 			@(negedge clk_sys); io_enable = 0;
 `endif
 			t = 0; while (t < slow(20000)) begin
-				axi_read(LEASE, 0, v, dl, beats); if (v[30]) t = slow(20000); else t = t + 10;
+				axi_read(ENA, 0, v, dl, beats); if (v[30]) t = slow(20000); else t = t + 10;
 			end
 			check($sformatf("scrambled in the return (%0d): quiet again", pass), v[30], 1);
 			repeat (slow(50)) @(negedge clk);
 			fc_off = 0;
-			lease_up;
+			ena_up;
 `ifdef MISTER_LW_LANE
 			lane_count(p, dr);
 			f_set(0, 16'h001E, 2); fw[0] = 16'h8A00 + pass; fw[1] = 16'h8A80 + pass; lane_send(1);
 			lane_wait(p + 1);
 `endif
 			if (TB_SEC) begin
-				sec_wr(21'h10, 32'h1); rd("a later lease: SECTOR's EN lands", SEC + 21'h10, 32'h1); sec_wr(21'h10, 32'h0);
+				sec_wr(21'h10, 32'h1); rd("a later enable: SECTOR's EN lands", SEC + 21'h10, 32'h1); sec_wr(21'h10, 32'h0);
 				sec_spi_clear;
 			end
 		end
@@ -3841,28 +3643,27 @@ task ls8;
 		vs_auto = 0;
 		@(negedge clk_sys); tb_vsync = 0;
 `endif
-		lease_off;
+		ena_off;
 	end
 endtask
 
-// SECTOR's sweep: a primary frame stored in full, the lease ended by RELEASE at each offset from the last store's
+// SECTOR's sweep: a primary frame stored in full, the enable ended by an ID view at each offset from the last store's
 // response to after the frame's last strobe (every cycle for the first 24, then a stride): byte-exact every time.
 task sec7_sweep;
 	reg [31:0] lba;
 	integer off, n1, n_bef, n_aft, stride;
 	begin
-		$display("-- SECTOR: a frame stored in full, the lease ended at each offset to its last strobe: byte-exact");
+		$display("-- SECTOR: a frame stored in full, the enable ended at each offset to its last strobe: byte-exact");
 		n_bef = 0; n_aft = 0; stride = 1;
 		for (off = 0; n_aft < 2 && off < slow(20000); off = off + stride) begin
-			lease_up;
+			ena_up;
 			sec_wr(21'h10, 32'h1);
 			sec_stand(32'h00007C00 + off); lba = cd_lba; if (win.sec_lvl) cause_drain(SEC);
 			n1 = cd_frames;
 			sec_wr(21'h0C, lba);
 			frame_data(lba, 0, TB_FRAME);
 			repeat (off) @(negedge clk);
-			kp_on = 0;
-			axi_write(LEASE, lease_w(KP_ID, 2'd3, 4'd0), 4'hF);
+			host_end;
 			if (cd_frames == n1) n_bef = n_bef + 1; else n_aft = n_aft + 1;
 			wait_frame(n1);
 			check_buf($sformatf("ended %0d cycles after the last store: byte-exact", off), lba, TB_FRAME);
@@ -3871,8 +3672,9 @@ task sec7_sweep;
 		end
 		$display("     %0d ends landed before the frame's last strobe, %0d after", n_bef, n_aft);
 		check("ends landed after the frame's last strobe", n_aft > 0, 1);
-		// at 150 MHz a frame can drain before the earliest RELEASE takes effect: recorded, not required
-		if (`LW_TB_SYS_HP_PS >= 5000) check("ends landed while the frame still played", n_bef > 0, 1);
+		// from 100 MHz a frame can drain before the earliest ID view takes effect (it lands a few bridge cycles
+		// after the last store's response, through GPO[31]'s synchroniser): recorded, not required
+		if (`LW_TB_SYS_HP_PS > 5000) check("ends landed while the frame still played", n_bef > 0, 1);
 	end
 endtask
 
@@ -3904,19 +3706,17 @@ task resets_cases;
 	end
 endtask
 
-// The lease's every-cycle checks, at the end of an arm: the bench's own lease never lapsed under its keeper, GPI[22]
-// was live_q, the lines were their definition, and each of a line's three reasons to fall was seen.
-task lease_summary(input cov_on);
+// The enable's every-cycle checks, at the end of an arm: GPI[22]
+// was en_q, the lines were their definition, and each of a line's three reasons to fall was seen.
+task ena_summary(input cov_on);
 	begin
-		$display("-- lease: the bench's keeper, GPI[22] and the lines' definition over the whole run");
-		$display("     %0d renews, %0d cycles GPI[22] compared (%0d held), %0d cycles the lines compared", kp_n, gpi22_n,
-		         gpi22_on, lm_n);
-		$display("     line falls: %0d by its cause, %0d by LINE_EN, %0d by the lease's end", lm_fall_c, lm_fall_e, lm_fall_l);
-		check("the bench's lease lapsed or was lost under its keeper", kp_lapse + kp_lost, 0);
-		check("cycles in which GPI[22] differs from live_q", gpi22_bad, 0);
+		$display("-- enable: GPI[22] and the lines' definition over the whole run");
+		$display("     %0d cycles GPI[22] compared (%0d enabled), %0d cycles the lines compared", gpi22_n, gpi22_on, lm_n);
+		$display("     line falls: %0d by its cause, %0d by LINE_EN, %0d by the enable's end", lm_fall_c, lm_fall_e, lm_fall_l);
+		check("cycles in which GPI[22] differs from en_q", gpi22_bad, 0);
 		check("cycles in which a line differs from its definition", lm_bad, 0);
-		$display("     lease links: %0d CLAIMs taken, %0d with a half off rest", n_claims, n_offrest);
-		check("CLAIMs taken with a linked half off rest (the bench's own predicate, now and four clk_sys cycles before)",
+		$display("     enable links: %0d ENABLEs taken, %0d with a half off rest", n_claims, n_offrest);
+		check("ENABLEs taken with a linked half off rest (the bench's own predicate, now and four clk_sys cycles before)",
 		      n_offrest, 0);
 `ifdef MISTER_LW_SECTOR_SLOT
 		$display("     SECTOR's link: %0d rises, %0d falls, %0d store strobes", fc_sec.n_rise, fc_sec.n_fall, fc_sec.n_stb);
@@ -3937,7 +3737,7 @@ initial begin
 	repeat (4) @(negedge clk);
 	sys_rate;
 	cdc_cells;
-	lease_up;
+	ena_up;
 	$display("-- MENU_CORE: the header rows never read the shadow");
 	for (r = 0; r < 19; r = r + 1) spi_osd_row(r, 3);
 	for (r = 0; r < 16; r = r + 1) lw_row(r, 3);
@@ -3950,7 +3750,7 @@ initial begin
 	check("header steps with LWSEL seen", hdr_n > 0, 1);
 	check("the shadow was read elsewhere", shd_n > 0, 1);
 	check("header bytes all from osd_buffer", hdr_bad, 0);
-	lease_summary(0);
+	ena_summary(0);
 	$display("%s: %0d checks, %0d failures", fails ? "FAILED" : "PASSED", checks, fails);
 	$finish;
 end
@@ -3961,7 +3761,7 @@ initial begin
 	repeat (4) @(negedge clk);
 	sys_rate;
 	cdc_cells;
-	lease_up;
+	ena_up;
 	$display("-- default geometry: a %0d-word primary, 256-word save slots", TB_FRAME);
 	rd("SECTOR K0 slot/frame 128", 21'h400E0, 32'h01000080);
 	rd("SECTOR K3 card 1 slot/flags/frame 256", 21'h400EC, 32'h02030100);
@@ -4005,7 +3805,7 @@ initial begin
 	check_buf("primary frame 0x101 after the card", 32'h00000101, 128);
 	rd("REQ idle", SEC + 21'h04, 32'd0);
 	check("no ring left", doorbell, 0);
-	lease_summary(0);
+	ena_summary(0);
 
 	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
 	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
@@ -4018,7 +3818,7 @@ initial begin
 	cdc_cells;
 
 	dir_cases;
-	lease_up;
+	ena_up;
 
 	$display("-- scratch");
 	axi_write(SCR, 32'hA5A55A5A, 4'hF);
@@ -4754,8 +4554,8 @@ initial begin
 		check("SUM never changed without FRAMES", sum_alone, 0);
 	end
 
-	sec_expiry_cases;
-	lease_up;
+	sec_view_cases;
+	ena_up;
 `endif
 
 	$display("-- SYS: the status back-channel (hps_io 0x29) as a cause, a line and a snapshot");
@@ -5316,7 +5116,7 @@ initial begin
 		check("lane 16: drained", rs[15:0], 0);
 	end
 
-	lane_expiry_cases;
+	lane_view_cases;
 `endif
 
 	$display("-- a store is in effect at its response: a read issued after it sees it, one accepted before its beat may not");
@@ -5487,7 +5287,7 @@ initial begin
 	dir_causes;
 	fw_reset_cases;
 	resets_cases;
-	lease_up;
+	ena_up;
 
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");
@@ -5519,10 +5319,11 @@ initial begin
 `endif
 `endif
 
-	lease_off;
-	lease_cases;
+	ena_off;
+	ena_cases;
 	line_cases;
 	look_cases;
+	fresh_cases;
 	ls10;
 	if (TB_LINKED != 0) begin
 		ls6;
@@ -5536,7 +5337,7 @@ initial begin
 `endif
 		if (TB_SEC) sec7_sweep;
 	end
-	lease_summary(1);
+	ena_summary(1);
 
 	$display("-- firewall: idle is a register, 1 exactly while both state machines are idle (the model, every cycle)");
 	$display("     %0d cycles compared with the model of the marks, the machines freed and idle", fm_cycles);

@@ -80,8 +80,8 @@ window exists before it touches it:
   so no bitstream without it can show 1. Stock bitstreams leave it 0, and the stock Main never reads bits 21-27.
 - **GPI bit 24** is the firewall's idle state, a register: 1 while it holds no transaction on either channel. It
   toggles with every access, so it means something only to a host that knows it has none of its own in flight.
-- **GPI bit 22** is the window's lease register (below): 1 while a host holds the lease. Reading it changes nothing
-  and can hang nothing, so a program looks here before it takes the link (see "The lease").
+- **GPI bit 22** is the window's host enable (below): 1 while an LW host has the window enabled. Reading it
+  changes nothing and can hang nothing, so a program looks here before it takes the link (see "The host enable").
 - **The directory** at the window's first word: MAGIC `LWDR`, a directory major the host knows (2), and WIN_BASE
   and WIN_SIZE equal to the token's two numbers; then the entries.
 
@@ -146,13 +146,13 @@ inside the window or outside it, and an unassigned offset inside a block reads 0
 | `0x0C` | COUNT | entries present, one per block built, at most 31 |
 | `0x10` | WIN_BASE | `0x00040000`: the window's absolute LW offset; equals the token's |
 | `0x14` | WIN_SIZE | `0x00080000`; equals the token's |
-| `0x18` | LEASE | read/write: the lease (below) |
-| `0x1C` | TIMEBASE | `0x190186A0`: `[23:0]` the bridge clock in kHz (100,000); `[31:24]` = 25, the log2 of a time unit in bridge clocks (2^25 cycles, about 0.34 s) |
-| `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero, with or without a lease |
-| `0x24` | OWNED | bit *i* = entry *i*'s block has not yet returned from a lease: its core-clock half has not acknowledged rest since the last lease ended (or since configuration), or a lease ended before the half answered its start; only blocks with a lease link (SECTOR, LANE) ever set it |
-| `0x28` | SCRATCH | read/write with `LW_DIAG=1` (under the lease, like every store); 0 otherwise |
-| `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now: the lease for a block without a lease link, and for SECTOR and LANE the lease and the block's core-clock half having answered its start; a store to a linked block before its bit is set is dropped and sets `stale` |
-| `0x30` | LINE_EN | read/write under the lease: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever no lease is held |
+| `0x18` | ENABLE | read/write: the host enable (below) |
+| `0x1C` | - | 0, reserved |
+| `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero, enabled or not |
+| `0x24` | OWNED | bit *i* = entry *i*'s block has not yet returned to SPI: its core-clock half has not acknowledged rest since the enable last fell (or since configuration), or the enable fell before the half answered its rise; only blocks with an enable link (SECTOR, LANE) ever set it |
+| `0x28` | SCRATCH | read/write with `LW_DIAG=1` (while enabled, like every store); 0 otherwise |
+| `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now: the enable for a block without an enable link, and for SECTOR and LANE the enable and the block's core-clock half having answered its rise; a store to a linked block before its bit is set is dropped and sets `stale` |
+| `0x30` | LINE_EN | read/write while enabled: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever the enable does |
 | `0x34` | RESETS | `{freed[15:8], hrst[7:0]}`: the firewall's state machines freed at a reset's release, and the HPS resets the fabric saw; each counts from configuration and stops at 255 |
 | `0x38`-`0x3C` | - | 0, reserved |
 
@@ -195,82 +195,65 @@ A minor revision only adds: reserved words that read 0 today, a larger header or
 never reused; a kind's major changes only if one of its registers changes meaning. Reserved bits read 0 and are
 written 0.
 
-### The lease
+### The host enable
 
-**No store has effect without the lease, except a store to LEASE itself.** Every other store, to any block or
-header word, is answered and dropped, and LEASE's `stale` bit records it. One program holds the lease at a time,
-and with it the window and the link.
+**No store has effect without the host enable, except a store to ENABLE itself.** Every other store, to any block
+or header word, is answered and dropped, and ENABLE's `stale` bit records it. Every block is off until a host that
+knows this window enables it and then binds each block with its own stores, so a stock program that never touches
+the window meets a stock core. One program owns the window at a time, and with it the link.
 
-A store to LEASE is a single full-word store `{0x4C57[31:16], id[15:6], verb[5:4], ttl[3:0]}`; any other store to
-it is ignored. `id` is the storing program's own 10-bit lease id; `ttl` 1-15 holds the lease for `ttl` time units
-(TIMEBASE: 2^25 bridge clocks, 0.34 s each, so 0.34 s to 5.03 s); `ttl` 0 or `verb` 0 makes the store ignored.
+**ENABLE** is set by a single full-word store of exactly `0x4C570001`; any other store to it is ignored. The store
+is taken only while the enable is clear, `quiet` is 1, no HPS reset is seen and GPO bit 31 is 1. Then the enable is
+set, `stale` and `burst` clear, LINE_EN reads 0, and the causes are reloaded (below).
 
-| verb | effect |
-|---|---|
-| 1 CLAIM | taken only while no lease is held, `quiet` is 1, no HPS reset is seen and GPO bit 31 is 1: `owner` = `id`, `epoch` + 1, the count starts, `stale` and `burst` clear, LINE_EN reads 0, and the causes are reloaded (below) |
-| 2 RENEW | restarts the count, only if the lease is held by `id` |
-| 3 RELEASE | ends the lease now, only if it is held by `id`; `ttl` is ignored |
+**Nothing times it and no host clears it.** It clears only when the fabric sees an HPS reset, or GPO bit 31 = 0:
+the ID view, which every program on this link (the stock Main among them) selects to identify the core when it
+starts, or the core reset through GPO. So a host that dies is recovered by whatever comes next: a reset of the SoC,
+or the next program's start, which finds every block off and the core on stock SPI, with nothing of the old host's
+left to run. While a host runs, nothing in the fabric takes a block from it.
 
-For id `0x155`: claim for 1 s `0x4C575553`, renew `0x4C575563`, release `0x4C575570`.
-
-A read returns `{held[31], quiet[30], stale[29], burst[28], left[27:24], epoch[23:16], hrst[15], 0, end[13:12],
-idv[11], 0, owner[9:0]}`:
+A read returns `{en[31], quiet[30], stale[29], burst[28], 12'd0, hrst[15], 3'd0, idv[11], 11'd0}`:
 
 | field | meaning |
 |---|---|
-| `held` | a lease is held; GPI bit 22 shows the same register |
-| `quiet` | every lease link is at rest: a CLAIM may be taken. A block that cannot return (a stopped core clock, or a core that never answers the link) holds it at 0 for every host; OWNED names it |
-| `stale` | a store other than to LEASE was dropped since the last CLAIM taken |
-| `burst` | a beat of a burst write was dropped since the last CLAIM taken |
-| `left` | the count's top four bits: whole time units left |
-| `epoch` | CLAIMs taken since configuration, modulo 256 |
-| `hrst` | the fabric sees the HPS reset now; no CLAIM is taken while it is 1 |
-| `end` | why the last lease ended: 0 none yet, or a RELEASE; 1 the count ran out; 2 an HPS reset; 3 GPO bit 31 was seen 0 |
-| `idv` | GPO bit 31 reads 0 now (the ID view, or the core reset through GPO); no CLAIM is taken while it is 1 |
-| `owner` | the id of the last CLAIM taken |
+| `en` | the enable is set; GPI bit 22 shows the same register |
+| `quiet` | every enable link is at rest: an ENABLE may be taken. A block that cannot return (a stopped core clock, or a core that never answers the link) holds it at 0 for every host; OWNED names it |
+| `stale` | a store other than to ENABLE was dropped since the last ENABLE taken |
+| `burst` | a beat of a burst write was dropped since the last ENABLE taken |
+| `hrst` | the fabric sees the HPS reset now; no ENABLE is taken while it is 1 |
+| `idv` | GPO bit 31 reads 0 now (the ID view, or the core reset through GPO); no ENABLE is taken while it is 1 |
 
-The count runs out `ttl` units and one bridge clock after the CLAIM or RENEW that set it; a RENEW in the last cycle
-wins. **When the lease ends**, however it ends, every line falls, LINE_EN and OSDBUF CTRL read 0, the SECTOR block's
-EN bits clear (a frame in flight completes, zero-filled from the first word the host did not store, and each slot
-returns to SPI once its frame is done; in this revision a save-slot frame cut this way is zero-filled too), queued
-SECTOR entries are discarded (a BEGIN not yet taken leaves its request standing for SPI), the open LANE frame is
-abandoned, queued LANE frames are discarded unplayed (one already playing finishes), and reply words still to come
-are discarded. A frame stored in full before the end is delivered whole.
+**When the enable falls**, every line falls, LINE_EN and OSDBUF CTRL read 0, the SECTOR block's EN bits clear (a
+frame in flight completes, zero-filled from the first word the host did not store, and each slot returns to SPI
+once its frame is done; in this revision a save-slot frame cut this way is zero-filled too), queued SECTOR entries
+are discarded (a BEGIN not yet taken leaves its request standing for SPI), the open LANE frame is abandoned, queued
+LANE frames are discarded unplayed (one already playing finishes), and reply words still to come are discarded. A
+frame stored in full before the fall is delivered whole. PAD levels already delivered stay in the core, as a stock
+program's would, until the next pad store over either path.
 
-**The lease links.** SECTOR and LANE each carry the lease to their core-clock half over a link with one level each
-way: the lease level, and the half's acknowledge that it is at rest (nothing queued, nothing in flight, every
-handshake idle). The half's only lease input is that level, and it reaches rest from any state once the level is low.
-A link opens a block's stores only after the half has seen the level rise, and the level falls only after the half has
-answered it, so a lease that ends within a few cycles of its claim still leaves the link closed until the half
-answers. A CLAIM is taken only while every link is at rest (`quiet`). At a CLAIM the causes are reloaded: SYS raises
-STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that stands. While GPO
-bit 31 is 0 (the ID view) the lane player starts no frame, so nothing queued by a dead host plays inside a stock
-program's identification.
+**The enable links.** SECTOR and LANE each carry the enable to their core-clock half over a link with one level each
+way: the enable level, and the half's acknowledge that it is at rest (nothing queued, nothing in flight, every
+handshake idle). The half's only enable input is that level, and it reaches rest from any state once the level is
+low. A link opens a block's stores only after the half has seen the level rise, and the level falls only after the
+half has answered it, so an enable that falls within a few cycles of its rise still leaves the link closed until the
+half answers. An ENABLE is taken only while every link is at rest (`quiet`). At an ENABLE the causes are reloaded:
+SYS raises STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that stands.
+While GPO bit 31 is 0 (the ID view) the lane player starts no frame, so nothing queued by a host that has gone plays
+inside the next program's identification.
 
-**The lease needs the link's I/O view.** GPO bit 31 = 0 ends it and refuses a CLAIM (`end` 3): the identification
-of the core in the ID view does it, and so does the core reset through GPO, whoever performs them. So a dead
-program's lease ends when the next program starts, and a host that holds the lease identifies the core before it
-claims, never leaves the I/O view while it holds it, releases before a core reset through GPO and claims again
-after it.
+**The enable needs the link's I/O view.** A host that holds it never leaves the I/O view, identifies the core
+before it enables, and enables again after its own core reset through GPO.
 
-**A host's procedures:**
-- **Start.** (1) Before its first GPO store and its first link word, read the FPGA manager's GPO register itself
-  (not a software copy: the usual first act, storing GPO = 0, ends a live lease). If bit 31 reads 1, take one GPI
-  sample: bit 31 = 0, bit 25 = 1 and bit 22 = 1 mean another program holds the lease. Then store nothing to GPO and
-  send no link word; stop, or sample until bit 22 reads 0 (at most the longest TTL, 5.1 s), or, if this program is
-  configured as the machine's one LW program, go on and take over by identifying. (2) Identify the core and run
-  discovery. (3) Read LEASE: `held` means another program claimed meanwhile: stop. (4) Store CLAIM with the host's
-  own id, read LEASE, and require `held` and `owner` = its id; remember `epoch`. A CLAIM stored while `quiet` reads
-  0 is ignored: read LEASE until `quiet` reads 1, and stay on SPI meanwhile. (5) Read OPEN until the bits of the
-  entries it serves are set; store nothing to an entry before its bit is set. An entry whose bit does not set stays
-  on SPI while the lease is kept for the others, and may be bound later if its bit sets. (6) Store LINE_EN with those entries' bits, and re-store every pad level.
-- **Refresh** every quarter of the TTL, from a thread that may be late (never the real-time one): sample GPI (bit
-  31 = 0, bit 25 = 1), store RENEW, read LEASE, and require `held`, `owner` = its id and the remembered `epoch`.
-  Otherwise the lease has ended and `end` says why: every thread stops storing at once and the host starts over. It
-  never releases a lease it no longer holds.
-- **Exit:** store RELEASE with its id. Before a core load or a bridge reset, release at once.
-- A second program that takes the lease by RELEASE with the `owner` it read, then CLAIM, takes it on purpose. The id
-  is an accident guard, not a secret; one program owns the window and core loading, or the two coordinate.
+**A host's start:** (1) Before its first GPO store and its first link word, read the FPGA manager's GPO register
+itself (not a software copy: the usual first act, storing GPO = 0, clears a live enable). If bit 31 reads 1, take
+one GPI sample: bit 31 = 0, bit 25 = 1 and bit 22 = 1 mean another LW program has the window. Then store nothing to
+GPO and send no link word, and stop; or, if this program is configured as the machine's one LW program, go on and
+take over by identifying. (2) Identify the core and run discovery. (3) Read ENABLE until `quiet` reads 1 (stay on
+SPI meanwhile, and for good if it never comes: OWNED names the block that cannot return). (4) Store `0x4C570001`,
+read ENABLE and require `en`. (5) Read OPEN until the bits of the entries it serves are set; store nothing to an
+entry before its bit is set. An entry whose bit does not set stays on SPI, and may be bound later if its bit sets.
+(6) Store LINE_EN with those entries' bits, and re-store every pad level. Nothing is needed to keep the enable, and
+nothing to give it up: the next program's start, a core load and a bridge reset each clear it.
 
 ### Interrupt lines
 
@@ -284,7 +267,7 @@ shared interrupt 47 + *k*, and no two entries name the same ordinal.
 | 3-15 | `f2h_irq[10]`-`[22]` | 50-62 | framework kinds to come |
 | 16-31 | `f2h_irq[23]`-`[38]` | 63-78 | a core's own kinds |
 
-A line is a register, high while the lease is held, its entry's LINE_EN bit is set and its CAUSE word is non-zero;
+A line is a register, high while the enable is set, its entry's LINE_EN bit is set and its CAUSE word is non-zero;
 it falls only when one of the three stops being true, and never pulses per event. Configure it level-sensitive,
 active high, at the interrupt controller (`IRQ_TYPE_LEVEL_HIGH` in a Linux device tree): a raise in the cycle of a
 store-back keeps the line high, so an edge-triggered input would see no new edge after it. The HPS kernel must expose it to userspace (for
@@ -324,7 +307,7 @@ A shadow of `osd_buffer` in each `osd` instance (HDMI and VGA), written over the
 | offset | register | |
 |---|---|---|
 | `0x0000`-`0x0FFF` | IMAGE | byte at `row * 256 + column` (row 0-15), `osd_buffer`'s layout: one byte = 8 vertical pixels. Byte enables honoured |
-| `0x1000` | CTRL | `[0]` LWSEL: video reads the shadow instead of `osd_buffer`. `[1]` HR: with LWSEL, the 16-row (highres) size. Reads 0 whenever no lease is held |
+| `0x1000` | CTRL | `[0]` LWSEL: video reads the shadow instead of `osd_buffer`. `[1]` HR: with LWSEL, the 16-row (highres) size. Reads 0 whenever the enable does |
 | `0x1004` | ID | `0x3144534F` ("OSD1") |
 
 - **Still on SPI:** enable/disable, the info box, rotation and `osd_status`.
@@ -340,7 +323,7 @@ before.
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = STATUS, raised by every capture and by a taken CLAIM; a store of bit 0 clears it |
+| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = STATUS, raised by every capture and by a taken ENABLE; a store of bit 0 clears it |
 | `0x04` | STFLG | `{SEQ[15:0], 8'h00, 4'hA, flag[3:0]}`: the `0x29` head byte, plus a capture count |
 | `0x08`-`0x14` | STATUS[0..3] | the captured `status_req`, `[31:0]` first |
 | `0x1C` | ID | `0x31535453` ("STS1") |
@@ -510,7 +493,7 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
   `clk_sys` below about 50 MHz, the conservative bound; the analysed edge is near 70-100 MHz. A faster core must hold
   `F_REJECT` for `ceil(2 x f_sys / 100 MHz)` cycles, or widen the crossing.
 - **SECTOR FIFO:** dual-clock with Gray pointers. No ratio bound.
-- **Lease links (SECTOR, LANE):** one level each way, each through a two-flop synchroniser; the acknowledge needs
+- **Enable links (SECTOR, LANE):** one level each way, each through a two-flop synchroniser; the acknowledge needs
   four `clk_sys` cycles of rest and the bridge side ten consecutive samples of it. No ratio bound; a stopped
   `clk_sys` holds the link (and `quiet`) where it is.
 - **SECTOR diagnostics (`LW_DIAG=1`):** FRAMES, TSTAMP_DONE and SUM cross together in one held-data handshake word,
@@ -557,20 +540,20 @@ It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image t
 
 The SECTOR arms use a reference CD-style configuration: a 588-word primary on slot 1, and 1 KB cards on slots 2
 and 3. They cover:
-- the lease: every store dropped without it, each verb's refusals, the expiry at 1, 2 and 15 units to the cycle,
-  a RENEW swept across the last live cycle, each way a lease ends with its code, two programs with different ids,
-  the look at GPO and GPI bit 22 before identifying, a takeover, a stock start beside a live host, the SECTOR and
-  LANE blocks in every state when a lease runs out (with `clk_sys` running and stopped), and RESETS against a model
-  of the firewall;
-- the lease links, with a checker on each in every arm (the level rises only on an acknowledge of rest and falls
-  only after the half has answered; no store reaches a linked block outside OPEN) and every CLAIM taken checked
-  against the testbench's own rest predicate: CLAIMs stored as fast as the bus allows after a RELEASE, a CLAIM
-  followed at once by work, the lease ended by RELEASE, GPO bit 31 and an HPS reset in every cycle of the rise,
-  every core-clock register scrambled mid-lease and during the return, a half that never answers and one that
-  cannot return, a dead host's select with frames queued behind it, the causes at a claim, a BEGIN discarded with
-  the lease gone and its request found by the next host's EN, and a slot-0 frame stored in full with the lease ended
+- the host enable: every store dropped without it, every other word refused, no timer, each way it ends (an HPS
+  reset, GPO bit 31 low for one cycle and long), the look at GPO and GPI bit 22 before identifying, a takeover, a
+  stock start beside a live host, a new host starting from stock after every block was bound, the SECTOR and LANE
+  blocks in every state at an ID view (with `clk_sys` running and stopped), and RESETS against a model of the
+  firewall;
+- the enable links, with a checker on each in every arm (the level rises only on an acknowledge of rest and falls
+  only after the half has answered; no store reaches a linked block outside OPEN) and every ENABLE taken checked
+  against the testbench's own rest predicate: ENABLEs stored as fast as the bus allows after an ID view, an ENABLE
+  followed at once by work, the enable ended by GPO bit 31 and an HPS reset in every cycle of the rise, every
+  core-clock register scrambled while enabled and during the return, a half that never answers and one that cannot
+  return, a dead host's select with frames queued behind it, the causes at an ENABLE, a BEGIN discarded with the
+  enable gone and its request found by the next host's EN, and a slot-0 frame stored in full with the enable ended
   at each offset to its last strobe;
-- the lines as levels, compared every cycle with `lease & LINE_EN & cause`: a raise in the cycle of a store-back
+- the lines as levels, compared every cycle with `enable & LINE_EN & cause`: a raise in the cycle of a store-back
   keeps the line high, and a host woken only by the level serves every event across 10,000 random interleavings;
 - the directory word by word, a host's walk of it (and of altered copies: other majors, entries to skip, a shared
   ordinal, a larger header and stride), and each entry's cause on its own PENDING bit and line;

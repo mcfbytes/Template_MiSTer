@@ -27,15 +27,16 @@
 // CAUSE: bit 0, raised by each request rise (and each re-open after a reject); a full-word store with bit 0 set
 // clears it, and a raise in the store's cycle wins. Reads change nothing: the request word is REQ's.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
-// The lease (live, the window's live_q) reaches the feeder through the block's lease link alone (lw_fence,
-// lw_cdc.sv): stores reach this block only while the link is open, which is after the feeder has seen the lease.
+// The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset)
+// reaches the feeder through the block's enable link alone (lw_fence, lw_cdc.sv): stores reach this block only
+// while the link is open, which is after the feeder has seen the enable.
 // Every EN, TEST included, is cleared in the cycle the link's level falls, four cycles after the last stored word
 // has been launched toward clk_sys, so each slot's mux returns to SPI once the feeder is off it and its SPI ack is
 // low, and a frame whose every word was stored still completes with its data. A frame in flight that waits for
-// data is zero-filled from its next word once the FIFO has been empty for two cycles with the lease level low
+// data is zero-filled from its next word once the FIFO has been empty for two cycles with the enable level low
 // (any slot), or with the primary's EN low (the primary), so the core's ack completes. While the level is low and
 // the feeder is idle it pops and discards a queued entry in every cycle; an answer among them goes with its DATA,
-// and its request stands for SPI. At a CLAIM the cause and every answered mark are cleared; an EN rise raises the
+// and its request stands for SPI. At a taken ENABLE the cause and every answered mark are cleared; an EN rise raises the
 // cause for a request that stands.
 // Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
 // (sys_lwx), each through lw_sync (lw_cdc.sv). The request LBAs are latched on clk_100m straight from the core's
@@ -62,11 +63,11 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	input wire        write,
 	input wire [31:0] wdata,
 	input wire  [3:0] be,
-	input wire        live,         // the lease
-	input wire        claim,        // a CLAIM is taken in this cycle
-	output wire       f_open,       // the lease link: stores are taken (OPEN)
+	input wire        hen,          // the host enable
+	input wire        take,         // an ENABLE store is taken in this cycle
+	output wire       f_open,       // the enable link: stores are taken (OPEN)
 	output wire       f_owned,      // OWNED
-	output wire       f_idle,       // the link lets a CLAIM through
+	output wire       f_idle,       // the link lets an ENABLE through
 
 	output wire       doorbell,     // level, high while CAUSE != 0
 
@@ -156,7 +157,7 @@ reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
 reg  [19:0] sum = 0;
 reg   [3:0] dseen = 0;              // the done count of the last word taken
-wire        f_lvl, f_fall, lease_s, rest;   // the lease link's level and its fall; on clk_sys, the level and rest
+wire        f_lvl, f_fall, hen_s, rest;   // the enable link's level and its fall; on clk_sys, the level and rest
 
 // clk_sys -> clk_100m: request levels, status bits, event toggles, the rejected answer's {tag, slot}
 (* preserve *) reg [15:0] sys_lwx = 0;
@@ -232,15 +233,15 @@ always @(posedge clk) begin
 
 	// doorbell: the request rise raises, a raise beats a concurrent clear
 	gen     <= gen + fire;
-	pending <= fire | (pending & ~clr_c & ~claim);
+	pending <= fire | (pending & ~clr_c & ~take);
 	// latched at the rise, and again when a reject re-opens the request (its LBA may have moved)
 	if (req_rise | unans[0]) lba <= c_lba;
 	if (xrise[0] | unans[1]) xlba[6:0]  <= x_lba[6:0];
 	if (xrise[1] | unans[2]) xlba[13:7] <= x_lba[13:7];
 	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls, the feeder
-	// rejects that latest answer (a stale LBA after a core reset restarted the request), or at a CLAIM: the
-	// links are at rest, so no answer is queued, and one discarded without the lease leaves its request standing
-	ans  <= bent | (ans & reqs & ~unans & ~{3{claim}});
+	// rejects that latest answer (a stale LBA after a core reset restarted the request), or at an ENABLE: the
+	// links are at rest, so no answer is queued, and one discarded without the enable leaves its request standing
+	ans  <= bent | (ans & reqs & ~unans & ~{3{take}});
 	btag <= btag ^ bent;
 	if (DIAG && fire) tsreq <= cycles;
 
@@ -296,10 +297,10 @@ end
 
 assign doorbell = pending;
 
-// The lease link. Drain: every stored word visible to clk_sys.
-lw_fence fence (.clk(clk), .live(live), .claim(claim), .drain(sector_w_lwgray == (wptr ^ (wptr >> 1))), .fin(1'b1),
+// The enable link. Drain: every stored word visible to clk_sys.
+lw_fence fence (.clk(clk), .hen(hen), .take(take), .drain(sector_w_lwgray == (wptr ^ (wptr >> 1))), .fin(1'b1),
                 .open(f_open), .owned(f_owned), .idle(f_idle), .lvl(f_lvl), .fall(f_fall),
-                .clk_sys(clk_sys), .rest(rest), .lease_s(lease_s));
+                .clk_sys(clk_sys), .rest(rest), .hen_s(hen_s));
 
 wire ok = (exp_w == flen_w) & ~bfail;
 
@@ -343,7 +344,7 @@ wire [1:0] xen_s = cs1[3:2];
 
 wire       rempty = (sector_r_lwgray == wg_s);
 wire       fidle  = (fs == F_IDLE || fs == F_REJECT);
-wire       dis    = ~lease_s & fidle & ~em & (rptr != g2b(wg_s));   // without the lease: discard, every cycle
+wire       dis    = ~hen_s & fidle & ~em & (rptr != g2b(wg_s));   // without the enable: discard, every cycle
 wire       pop    = (~rempty & ~qv & (fs != F_FILL) & (fs != F_ACK) & (~em | ph == 2'd3)) | dis;
 wire [1:0] qt = q[43:42];
 wire [9:0] qi = q[41:32];
@@ -367,16 +368,16 @@ reg        rjt = 0, rjp = 0;           // one cycle after them (rjp)
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
 reg  [1:0] mt   = 0;                // cycles the FIFO has read empty with EN low, saturating at 2
-reg  [1:0] ml   = 0;                // cycles the FIFO has read empty with the lease level low, saturating at 2
-// the frame in flight will get no more data: the primary's EN fell, or the lease level did (any slot); fill it
+reg  [1:0] ml   = 0;                // cycles the FIFO has read empty with the enable level low, saturating at 2
+// the frame in flight will get no more data: the primary's EN fell, or the enable level did (any slot); fill it
 // from its next word
 wire       cut  = (fs == F_STREAM || (fs == F_ACK && !fwack)) && rempty && !qv && !em &&
-                  ((fsel == 2'd0 && !en_s && mt == 2'd2) || (!lease_s && ml == 2'd2));
+                  ((fsel == 2'd0 && !en_s && mt == 2'd2) || (!hen_s && ml == 2'd2));
 
-// rest, for the lease link: the level low, every EN and every mux on SPI, the feeder idle with its acks low and an
+// rest, for the enable link: the level low, every EN and every mux on SPI, the feeder idle with its acks low and an
 // empty pipeline, the FIFO empty and its Gray source current, no done word in flight
 wire       dn_idle;
-assign rest = !lease_s && cs1 == 4'd0 && !en_sys && x_en_sys == 2'd0 && fidle && !qv && !em && !rjp &&
+assign rest = !hen_s && cs1 == 4'd0 && !en_sys && x_en_sys == 2'd0 && fidle && !qv && !em && !rjp &&
               fack == 3'd0 && !o_wr && rempty && sector_r_lwgray == (rptr ^ (rptr >> 1)) && dn_idle;
 
 // DIAG builds only: {done count, the last data frame's SUM} to clk_100m, launched whenever the count moved
@@ -403,7 +404,7 @@ always @(posedge clk_sys) begin
 
 	qv <= pop;
 	mt <= (!rempty || en_s) ? 2'd0 : (mt == 2'd2) ? 2'd2 : mt + 2'd1;
-	ml <= (!rempty || lease_s) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
+	ml <= (!rempty || hen_s) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
 	if (pop) rptr <= rptr + 1'd1;
 	sector_r_lwgray <= rptr ^ (rptr >> 1);
 
@@ -441,7 +442,7 @@ always @(posedge clk_sys) begin
 
 	if (qv) case (fs)
 		F_IDLE, F_REJECT:
-			if (!lease_s) ;                // discarded: its request stands for SPI
+			if (!hen_s) ;                // discarded: its request stands for SPI
 			else if (qt == T_BEGIN) begin
 				fexp <= 0;
 				if (DIAG) fsum <= 0;

@@ -27,16 +27,17 @@
 // pops with a store to RPOP. Bridge side has no reset and answers every store in fixed cycles: a frame that
 // does not fit is dropped whole at END and counted, a frame without END is never played, and a reply word
 // that finds the reply FIFO full is dropped and counted. Contracts: docs/LW_BRIDGE.md, "LANE block".
-// The lease (live, the window's live_q): while it is low the open frame is abandoned and the reply FIFO's read
-// pointer steps toward its write pointer, so replies that land after the lease are discarded. The player learns
-// of the lease from its lease link alone (lw_fence, lw_cdc.sv): stores reach this block only while the link is
-// open, which is after the player has seen the lease; while its level is low the player completes the frame in
+// The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset):
+// while it is low the open frame is abandoned and the reply FIFO's read pointer steps toward its write pointer, so
+// replies that land after the enable fell are discarded. The player learns of the enable from its enable link
+// alone (lw_fence, lw_cdc.sv): stores reach this block only while the link is open, which is after the player has
+// seen the enable; while its level is low the player completes the frame in
 // flight and pops every queued entry unplayed, in every cycle it is idle. Its rest, which the link acknowledges,
 // is the player idle with idle outputs and the frame FIFO empty; the link returns to IDLE only once the reply
-// FIFO has been stepped to empty too, so a new lease starts with both FIFOs empty. The player's busy input
+// FIFO has been stepped to empty too, so a new enable starts with both FIFOs empty. The player's busy input
 // includes the link's ID view (sys_top), so no frame starts while it is selected.
 // Crossings, each through lw_sync (lw_cdc.sv): the four Gray pointers of the two FIFOs, each recomputed from its
-// binary pointer in every cycle, the played and reply-drop toggles, and the lease link's two levels.
+// binary pointer in every cycle, the played and reply-drop toggles, and the enable link's two levels.
 
 module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 8)   // GAP: 2..7
 (
@@ -49,11 +50,11 @@ module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 
 	input wire         write,
 	input wire  [31:0] wdata,
 	input wire   [3:0] be,
-	input wire         live,         // the lease
-	input wire         claim,        // a CLAIM is taken in this cycle
-	output wire        f_open,       // the lease link: stores are taken (OPEN)
+	input wire         hen,          // the host enable
+	input wire         take,         // an ENABLE store is taken in this cycle
+	output wire        f_open,       // the enable link: stores are taken (OPEN)
 	output wire        f_owned,      // OWNED
-	output wire        f_idle,       // the link lets a CLAIM through
+	output wire        f_idle,       // the link lets an ENABLE through
 
 	input wire         clk_sys,
 	input wire         l_busy,       // any of the link's own selects, or its ID view
@@ -162,13 +163,13 @@ always @(posedge clk) begin
 	pt_d <= pt_s;
 	if (pt_s ^ pt_d) played <= played + 1'd1;
 
-	if (w_pop || (!live && rcount != 0)) rrp <= rrnext;
+	if (w_pop || (!hen && rcount != 0)) rrp <= rrnext;
 	lane_rr_lwgray <= rrp ^ (rrp >> 1);
 	rdt_d <= rdt_s;
 	if (rdt_s ^ rdt_d) rdrops <= rdrops + 1'd1;
 
-	// BEGIN abandons any open frame: its entries past wcom are overwritten; so does the lease's end
-	if (!live) begin
+	// BEGIN abandons any open frame: its entries past wcom are overwritten; so does the enable's fall
+	if (!hen) begin
 		open  <= 0;
 		ovf   <= 0;
 		wspec <= wcom;
@@ -189,13 +190,13 @@ always @(posedge clk) begin
 	end
 end
 
-// The lease link. Drain: no frame open, every committed entry visible to clk_sys. Last condition before IDLE:
+// The enable link. Drain: no frame open, every committed entry visible to clk_sys. Last condition before IDLE:
 // the reply FIFO stepped to empty.
-wire        rest, lease_s;
+wire        rest, hen_s;
 wire        f_drain = !open && wspec == wcom && wvis == wcom && lane_w_lwgray == (wvis ^ (wvis >> 1));
-lw_fence fence (.clk(clk), .live(live), .claim(claim), .drain(f_drain), .fin(rcount == 0),
+lw_fence fence (.clk(clk), .hen(hen), .take(take), .drain(f_drain), .fin(rcount == 0),
                 .open(f_open), .owned(f_owned), .idle(f_idle), .lvl(), .fall(),
-                .clk_sys(clk_sys), .rest(rest), .lease_s(lease_s));
+                .clk_sys(clk_sys), .rest(rest), .hen_s(hen_s));
 
 always @(*) begin
 	case (raddr[11:2])
@@ -224,22 +225,22 @@ reg   [1:0] quiet = 0;                      // cycles the link's selects have be
 reg   [2:0] cnt   = 0;
 reg         capf  = 0;                      // the frame playing records its replies
 reg [RAW:0] rwp   = 0;
-reg   [1:0] ml    = 0;                      // cycles the FIFO has read empty with the lease level low, to 2
+reg   [1:0] ml    = 0;                      // cycles the FIFO has read empty with the enable level low, to 2
 
 wire [AW:0] rnext = rptr + 1'd1;
 wire        empty = rptr == g2b(wg_s);
 wire        avail = fresh && lane_r_lwgray != wg_s;
 wire  [1:0] qk    = q[19:18];
-wire        t_beg = ps == S_IDLE && avail && qk[0] && quiet == 2'd2 && !l_busy && lease_s;
-wire        t_odd = ps == S_IDLE && avail && !qk[0] && lease_s;   // a stray entry
-wire        t_dis = ps == S_IDLE && !empty && !lease_s;            // without the lease: every entry, every cycle
+wire        t_beg = ps == S_IDLE && avail && qk[0] && quiet == 2'd2 && !l_busy && hen_s;
+wire        t_odd = ps == S_IDLE && avail && !qk[0] && hen_s;   // a stray entry
+wire        t_dis = ps == S_IDLE && !empty && !hen_s;            // without the enable: every entry, every cycle
 wire        t_ack = ps == S_ACK && !l_wait && cnt == GAP - 1'd1;
 wire        t_wrd = ps == S_NEXT && avail && qk == K_WORD;
 wire        t_end = ps == S_NEXT && avail && qk == K_END;
-wire        t_cut = ps == S_NEXT && !avail && !lease_s && empty && ml == 2'd2;   // a word that cannot come
+wire        t_cut = ps == S_NEXT && !avail && !hen_s && empty && ml == 2'd2;   // a word that cannot come
 wire        pop   = t_odd | t_dis | ps == S_STB | t_end;   // q still holds the entry through its strobe cycle
 
-assign rest = !lease_s && ps == S_IDLE && !own && !hold && !strobe && sel == 4'd0 && empty &&
+assign rest = !hen_s && ps == S_IDLE && !own && !hold && !strobe && sel == 4'd0 && empty &&
               lane_r_lwgray == (rptr ^ (rptr >> 1)) && lane_rw_lwgray == (rwp ^ (rwp >> 1));
 wire        r_push = t_ack & capf;
 wire [RAW:0] r_used = rwp - g2r(rrg_s);
@@ -256,7 +257,7 @@ always @(posedge clk_sys) begin
 	if (pop) rptr <= rnext;
 	lane_r_lwgray <= rptr ^ (rptr >> 1);
 	quiet <= l_busy ? 2'd0 : (quiet == 2'd2) ? 2'd2 : quiet + 2'd1;
-	ml    <= (lease_s || !empty) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
+	ml    <= (hen_s || !empty) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
 
 	// the reply to the strobe just acknowledged; the gray pointer follows rwp a cycle later, after the word is in
 	// the RAM
