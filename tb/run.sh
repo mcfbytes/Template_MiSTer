@@ -17,8 +17,9 @@
 #   F  LW_DIAG=0 without MISTER_LW_SECTOR_SLOT (the Template's own configuration): no SECTOR files, no muxes
 #   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots)
 #   L  LW_DIAG=0 with the SECTOR block and the frame lane (MISTER_LW_LANE): the link nets through lw_link
-#   R12 R21 R53 R62 R100 R150  arm L with clk_sys at 12.0, 21.477, 53.69, 62.5, 100.0 and 150.0 MHz
-#      (the other arms run it at 33.8688 MHz); LW_TB_SYS_HP_PS is the half period in ps, plus 50 ppm. Each runs
+#   R12 R20 R21 R33 R53 R62 R100 R150  arm L with clk_sys at 12.0, 20.0, 21.477, 33.8688, 53.69, 62.5, 100.0 and
+#      150.0 MHz (the other arms run at 33.8688 MHz without the models); LW_TB_SYS_HP_PS is the half period in ps,
+#      plus 50 ppm. Each runs
 #      with the crossing cells' delay models (LW_TB_CDC, sys/lw_cdc.sv) under each seed of LW_TB_SEEDS (1 2 3)
 #   V  front-end lint: slang elaborates every LW module at its defaults (the vendor atom left unknown), and
 #      the window with every block, at both LW_DIAG values, with every tier macro; and the floor modules with
@@ -50,8 +51,8 @@ export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
 LWF="sys/lw_cdc.sv sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_sector.sv sys/lw_sys_status.sv sys/lw_lane.sv sys/lw_blk_mux.sv"
-LWM="lw_sync lw_arst lw_qstat lw_xfer hps_lw_bridge lw_axi_regbus lw_sys_window lw_sector lw_sys_status lw_lane lw_link lw_blk_mux lw_card_mux"
-LW0="lw_sync lw_arst lw_qstat lw_xfer hps_lw_bridge lw_axi_regbus lw_sys_window lw_sys_status"
+LWM="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window lw_sector lw_sys_status lw_lane lw_link lw_blk_mux lw_card_mux"
+LW0="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window lw_sys_status"
 LWD="-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_LW_LANE"
 lint() {
   : > "$1"; st=0
@@ -130,7 +131,7 @@ verdict() {
 
 O=${LW_TB_OUT:-tb/out}; mkdir -p "$O"; rc=0; R=""
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
-for g in ${LW_TB_ARMS:-S N E 1 0 M F G L R12 R21 R53 R62 R100 R150 V}; do
+for g in ${LW_TB_ARMS:-S N E 1 0 M F G L R12 R20 R21 R33 R53 R62 R100 R150 V}; do
   if [ "$g" = N ]; then
     echo "== arm N: tb/static.sh"
     sh tb/static.sh > "$O/lw_staticN.log" 2>&1
@@ -177,7 +178,9 @@ for g in ${LW_TB_ARMS:-S N E 1 0 M F G L R12 R21 R53 R62 R100 R150 V}; do
     G) D="$B $S -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
     L) D="$B $L";;
     R12) D="$B $C -DLW_TB_SYS_HP_PS=41667";;
+    R20) D="$B $C -DLW_TB_SYS_HP_PS=25000";;
     R21) D="$B $C -DLW_TB_SYS_HP_PS=23281";;
+    R33) D="$B $C -DLW_TB_SYS_HP_PS=14762";;
     R53) D="$B $C -DLW_TB_SYS_HP_PS=9313";;
     R62) D="$B $C -DLW_TB_SYS_HP_PS=8000";;
     R100) D="$B $C -DLW_TB_SYS_HP_PS=5000";;

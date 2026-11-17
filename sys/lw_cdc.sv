@@ -244,5 +244,100 @@ end
 
 endmodule
 
+// A lease link: one level each way between the window and a block whose queue a clk_sys half consumes, and a
+// four-phase handshake on them. lease_lwx (clk) is the block's lease level; through lw_sync it is lease_s, the
+// only thing that tells the clk_sys half about the lease. ack_lwx (clk_sys) is recomputed in every cycle as
+// rest & (rest_n == 3): high after four consecutive cycles of rest, low within one cycle of lease_s rising, and
+// holding no history. rest is the half's own predicate: lease_s low, its machines idle with idle outputs, its
+// queues empty, nothing in flight, every Gray source equal to its pointer's code.
+// On clk, five states (the level, OPEN / OWNED):
+//   DOWN  (0, 0/1) to IDLE once ack_s has read 1 in ten consecutive cycles (two to believe it, eight for what the
+//         half launched before it answered) and fin holds
+//   IDLE  (0, 0/0) to RISE at a CLAIM taken while ack_s reads 1; back to DOWN if ack_s reads 0
+//   RISE  (1, 0/~live) once ack_s has read 0 in two consecutive cycles: to OPEN if live, else to DRAIN
+//   OPEN  (1, 1/0) to DRAIN in any cycle live reads 0
+//   DRAIN (1, 0/1) to DOWN once drain has held for four cycles: the level falls 40 ns after the block's clk half
+//         launched its last word, so that word reaches clk_sys no later than the fall
+// So the level rises only on an acknowledge of rest, and falls only after the half has answered the rise; a lease
+// that ends inside the rise leaves the level up, the gate closed, until the half answers. Configuration starts
+// in DOWN. No reset: nothing reaches the link but live and a taken CLAIM.
+module lw_fence
+(
+	input wire  clk,        // clk_100m
+	input wire  live,       // the lease register
+	input wire  claim,      // a CLAIM is taken in this cycle
+	input wire  drain,      // the block's clk half has nothing left to launch for an ended lease
+	input wire  fin,        // the block's last condition before IDLE (1 if it has none)
+	output wire open,       // the block takes stores: its OPEN bit
+	output wire owned,      // its OWNED bit
+	output wire idle,       // IDLE with the acknowledge reading 1: this link lets a CLAIM through
+	output wire lvl,        // the lease level as launched
+	output wire fall,       // the level falls at this edge
+
+	input wire  clk_sys,
+	input wire  rest,       // the clk_sys half is at rest, combinational over its own registers
+	output wire lease_s     // the lease level on clk_sys
+);
+
+localparam [2:0] L_DOWN = 3'd0, L_IDLE = 3'd1, L_RISE = 3'd2, L_OPEN = 3'd3, L_DRAIN = 3'd4;
+
+reg            [2:0] st = L_DOWN;
+reg            [3:0] n  = 4'd0;
+(* preserve *) reg   lease_lwx = 1'b0;
+(* preserve *) reg   ack_lwx   = 1'b0;     // clk_sys
+reg            [1:0] rest_n    = 2'd0;     // clk_sys: consecutive cycles of rest, saturating at 3
+
+wire ack_s;
+lw_sync #(.W(1)) ack_sync(.clk(clk), .d(ack_lwx), .q(ack_s));
+lw_sync #(.W(1)) lease_sync(.clk(clk_sys), .d(lease_lwx), .q(lease_s));
+
+reg  [2:0] st_d;
+reg  [3:0] n_d;
+always @(*) begin
+	st_d = st;
+	n_d  = n;
+	case (st)
+		L_DOWN:
+			if (!ack_s) n_d = 4'd0;
+			else if (n < 4'd9) n_d = n + 4'd1;
+			else if (fin) begin st_d = L_IDLE; n_d = 4'd0; end
+		L_IDLE:
+			if (claim && ack_s) begin st_d = L_RISE; n_d = 4'd0; end
+			else if (!ack_s) begin st_d = L_DOWN; n_d = 4'd0; end
+		L_RISE:
+			if (ack_s) n_d = 4'd0;
+			else if (n == 4'd0) n_d = 4'd1;
+			else begin st_d = live ? L_OPEN : L_DRAIN; n_d = 4'd0; end
+		L_OPEN:
+			if (!live) begin st_d = L_DRAIN; n_d = 4'd0; end
+		L_DRAIN:
+			if (!drain) n_d = 4'd0;
+			else if (n < 4'd3) n_d = n + 4'd1;
+			else begin st_d = L_DOWN; n_d = 4'd0; end
+		default: begin st_d = L_DOWN; n_d = 4'd0; end
+	endcase
+end
+
+wire up_d = st_d == L_RISE || st_d == L_OPEN || st_d == L_DRAIN;
+
+always @(posedge clk) begin
+	st        <= st_d;
+	n         <= n_d;
+	lease_lwx <= up_d;
+end
+
+assign open  = st == L_OPEN;
+assign owned = st == L_DOWN || st == L_DRAIN || (st == L_RISE && !live) || st > L_DRAIN;
+assign idle  = st == L_IDLE && ack_s;
+assign lvl   = lease_lwx;
+assign fall  = lease_lwx && !up_d;
+
+always @(posedge clk_sys) begin
+	rest_n  <= !rest ? 2'd0 : (rest_n == 2'd3) ? 2'd3 : rest_n + 2'd1;
+	ack_lwx <= rest && rest_n == 2'd3;
+end
+
+endmodule
+
 `default_nettype wire
 `endif
