@@ -35,7 +35,8 @@
 // data is zero-filled from its next word once the FIFO has been empty for two cycles with the lease level low
 // (any slot), or with the primary's EN low (the primary), so the core's ack completes. While the level is low and
 // the feeder is idle it pops and discards a queued entry in every cycle; an answer among them goes with its DATA,
-// and its request stands for SPI. At a CLAIM the cause is cleared; an EN rise raises it for a request that stands.
+// and its request stands for SPI. At a CLAIM the cause and every answered mark are cleared; an EN rise raises the
+// cause for a request that stands.
 // Crossings: the FIFO's Gray pointers, the control bits (en, test, xen) and the feeder's levels and toggles
 // (sys_lwx), each through lw_sync (lw_cdc.sv). The request LBAs are latched on clk_100m straight from the core's
 // clk_sys registers, relying on their being stable while the request stands: the one such read tb/static.sh lists.
@@ -236,9 +237,10 @@ always @(posedge clk) begin
 	if (req_rise | unans[0]) lba <= c_lba;
 	if (xrise[0] | unans[1]) xlba[6:0]  <= x_lba[6:0];
 	if (xrise[1] | unans[2]) xlba[13:7] <= x_lba[13:7];
-	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls or the
-	// feeder rejects that latest answer (a stale LBA after a core reset restarted the request)
-	ans  <= bent | (ans & reqs & ~unans);
+	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls, the feeder
+	// rejects that latest answer (a stale LBA after a core reset restarted the request), or at a CLAIM: the
+	// links are at rest, so no answer is queued, and one discarded without the lease leaves its request standing
+	ans  <= bent | (ans & reqs & ~unans & ~{3{claim}});
 	btag <= btag ^ bent;
 	if (DIAG && fire) tsreq <= cycles;
 

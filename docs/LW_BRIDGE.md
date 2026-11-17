@@ -243,9 +243,9 @@ handshake idle). The half's only lease input is that level, and it reaches rest 
 A link opens a block's stores only after the half has seen the level rise, and the level falls only after the half has
 answered it, so a lease that ends within a few cycles of its claim still leaves the link closed until the half
 answers. A CLAIM is taken only while every link is at rest (`quiet`). At a CLAIM the causes are reloaded: SYS raises
-STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that stands; LANE's starts
-clear. While GPO bit 31 is 0 (the ID view) the lane player starts no frame, so nothing queued by a dead host plays
-inside a stock program's identification.
+STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that stands. While GPO
+bit 31 is 0 (the ID view) the lane player starts no frame, so nothing queued by a dead host plays inside a stock
+program's identification.
 
 **The lease needs the link's I/O view.** GPO bit 31 = 0 ends it and refuses a CLAIM (`end` 3): the identification
 of the core in the ID view does it, and so does the core reset through GPO, whoever performs them. So a dead
@@ -340,7 +340,7 @@ before.
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = STATUS, raised by every capture; a store of bit 0 clears it |
+| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = STATUS, raised by every capture and by a taken CLAIM; a store of bit 0 clears it |
 | `0x04` | STFLG | `{SEQ[15:0], 8'h00, 4'hA, flag[3:0]}`: the `0x29` head byte, plus a capture count |
 | `0x08`-`0x14` | STATUS[0..3] | the captured `status_req`, `[31:0]` first |
 | `0x1C` | ID | `0x31535453` ("STS1") |
@@ -567,8 +567,9 @@ and 3. They cover:
   against the testbench's own rest predicate: CLAIMs stored as fast as the bus allows after a RELEASE, a CLAIM
   followed at once by work, the lease ended by RELEASE, GPO bit 31 and an HPS reset in every cycle of the rise,
   every core-clock register scrambled mid-lease and during the return, a half that never answers and one that
-  cannot return, a dead host's select with frames queued behind it, the causes at a claim, and a slot-0 frame
-  stored in full with the lease ended at each offset to its last strobe;
+  cannot return, a dead host's select with frames queued behind it, the causes at a claim, a BEGIN discarded with
+  the lease gone and its request found by the next host's EN, and a slot-0 frame stored in full with the lease ended
+  at each offset to its last strobe;
 - the lines as levels, compared every cycle with `lease & LINE_EN & cause`: a raise in the cycle of a store-back
   keeps the line high, and a host woken only by the level serves every event across 10,000 random interleavings;
 - the directory word by word, a host's walk of it (and of altered copies: other majors, entries to skip, a shared
