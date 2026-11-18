@@ -229,8 +229,8 @@ wire [15:0] io_din   = HPS_BUS[31:16];
 reg  [15:0] io_dout;
 
 `ifdef MISTER_LW
-// LW tiers (docs/LW_BRIDGE.md): each piece below drives a constant 1 on its own presence bit of HPS_BUS, so the
-// window lists its block only when the wide bus reaches this instance.
+// LW tiers (docs/LW_BRIDGE.md): each piece below, and SECTOR's commit mark before uio_block, drives a constant 1
+// on its own presence bit of HPS_BUS, so the window lists its block only when the wide bus reaches this instance.
 `ifdef MISTER_LW_PAD
 // LW pad stores from sys_top (lw_pad.sv), already on clk_sys; HPS_BUS[375]: this write arm is present
 wire        lw_we    = HPS_BUS[94];
@@ -357,6 +357,25 @@ wire       extended = (~pressed ? (ps2_key_raw[23:16] == 8'he0) : (ps2_key_raw[1
 reg [MAX_W:0] byte_cnt;
 reg   [3:0] sdn_ack;
 wire [15:0] disk = 16'd1 << io_din[11:8];
+
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+// The commit mark for sys_top's LW SECTOR block (lw_sector.sv): "the SPI host has been shown a block request and
+// has not finished it". A GET_SDSTAT answer sets it if it shows a request and clears it if it shows none; the end
+// of a block transfer command (the fall of sd_ack) clears it. HPS_BUS[380] is the mark with the answer cycle ORed
+// in, so the cycle that shows a request already reads 1; while it reads 1 no slot's mux moves to the LW side.
+// HPS_BUS[381]: the mark is present. uio_block is unchanged: the mark only watches the commands.
+reg  sd_commit = 0;
+wire sd_answer = io_enable & io_strobe & ~|byte_cnt & (io_din == 16'h0016);
+wire sd_shown  = sd_rd[sdn] | sd_wr[sdn];
+always @(posedge clk_sys) begin
+	if (sd_answer) sd_commit <= sd_shown;
+	else if (~io_enable & |sd_ack) sd_commit <= 0;
+end
+assign HPS_BUS[380] = sd_commit | (sd_answer & sd_shown);
+assign HPS_BUS[381] = 1'b1;
+`endif
+`endif
 
 always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;

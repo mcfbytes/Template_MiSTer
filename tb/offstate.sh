@@ -7,6 +7,8 @@
 #   1b. osd.v with MISTER_LW and MISTER_LW_OSD, under each of those macro sets, gives upstream's token stream
 #      from its clk_video half (the pixel path, from ce_pix's declaration) to the end: the OSDBUF tier changes
 #      only its clk_sys write side.
+#   1c. hps_io.sv with MISTER_LW and MISTER_LW_SECTOR_SLOT, under each of those macro sets, gives upstream's token
+#      stream for uio_block (the SPI command decoder): SECTOR's commit mark watches the commands and changes none.
 #   2. Every LW-only file (sys/hps_lw_*.sv, sys/lw_*.sv) preprocesses to no token at all without MISTER_LW,
 #      under each of those macro sets; a tier's file also with MISTER_LW and without its tier macro.
 #   3. Every LW-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro) first,
@@ -101,6 +103,41 @@ for label, defs in sets:
     if a_ != b_:
         n, x, y = first_diff(a_, b_)
         check(False, 'sys/osd.v [OSD, %s]: the clk_video half differs at token %d: ... %s ... upstream: ... %s ...' %
+              (label, n, x, y))
+    else:
+        check(True, '')
+
+def uio_block(t):
+    # the tokens of 'always ... begin : uio_block' through its matching end, or None
+    if 'uio_block' not in t:
+        return None
+    i = t.index('uio_block')
+    a = max(j for j in range(i) if t[j] == 'always')
+    b = next(j for j in range(a, i) if t[j] == 'begin')
+    depth, j = 0, b
+    while j < len(t):
+        if t[j] == 'begin':
+            depth += 1
+        elif t[j] == 'end':
+            depth -= 1
+            if depth == 0:
+                return t[a:j + 1]
+        j += 1
+    return None
+
+print('-- hps_io.sv\'s uio_block is upstream\'s token stream with MISTER_LW and MISTER_LW_SECTOR_SLOT, under every macro set')
+for label, defs in sets:
+    mine, e1 = pp('sys/hps_io.sv', ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=1'] + defs)
+    theirs, e2 = pp(os.path.join(UP, 'sys/hps_io.sv'), defs)
+    if not check(mine is not None and theirs is not None, 'sys/hps_io.sv [SECTOR, %s]: preprocessor error %s%s' %
+                 (label, e1, e2)):
+        continue
+    a_, b_ = uio_block(mine), uio_block(theirs)
+    if not check(a_ is not None and b_ is not None, 'sys/hps_io.sv [SECTOR, %s]: no uio_block' % label):
+        continue
+    if a_ != b_:
+        n, x, y = first_diff(a_, b_)
+        check(False, 'sys/hps_io.sv [SECTOR, %s]: uio_block differs at token %d: ... %s ... upstream: ... %s ...' %
               (label, n, x, y))
     else:
         check(True, '')

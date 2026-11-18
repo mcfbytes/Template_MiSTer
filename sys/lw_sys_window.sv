@@ -28,8 +28,9 @@
 // not built), and a from-core bit is driven only by the core-side piece that owns it. Each core-side piece
 // drives a constant 1 on its own presence bit, and a block is listed, decoded and wired only when its tier is
 // built and its presence bit reads 1: hps_io's LW write arm for PAD, hps_io's event exports for EVT, and for
-// SECTOR at least one slot's mux (a slot whose mux is absent is not wired: its descriptor's flags read 0 and
-// its EN bit cannot be set). A truncated bus therefore shows as a block that is not in the directory.
+// SECTOR hps_io's commit mark and at least one slot's mux (a slot whose mux is absent is not wired: its
+// descriptor's flags read 0 and its EN bit cannot be set). A truncated bus therefore shows as a block that is not
+// in the directory.
 // Directory, layout 2: a 16-word header (MAGIC "LWDR", VERSION 2.0, LAYOUT = {entry stride, header length} in
 // bytes, COUNT, WIN_BASE and WIN_SIZE, ENABLE, RSVD, PENDING, OWNED, SCRATCH, OPEN, LINE_EN, RESETS), then one
 // 32-word entry per block listed, in ascending kind order with no gaps. An entry's 8 common words are KIND,
@@ -211,12 +212,14 @@ localparam [31:0] ENA_W   = 32'h4C570001;               // the ENABLE store: the
 wire        pres_pad = hps_lw[375];                     // hps_io's LW write arm
 wire        pres_evt = hps_lw[376];                     // hps_io's event exports
 wire  [2:0] pres_sec = hps_lw[379:377];                 // {save slot 1's mux, save slot 0's, the primary's}
+wire        pres_cmt = hps_lw[381];                     // hps_io's commit mark
 
-// What is listed: a tier built with its piece present. A SECTOR slot is wired when it is declared and its mux is
-// present; the block is listed with one wired slot.
+// What is listed: a tier built with its piece present. A SECTOR slot is wired when it is declared and its mux and
+// hps_io's commit mark are present; the block is listed with one wired slot.
 wire        has_pad = PAD_EN != 0 && pres_pad;
 wire        has_evt = EVT_EN != 0 && pres_evt;
-wire  [2:0] wired   = {MC_DECL1 && pres_sec[2], MC_DECL0 && pres_sec[1], SEC_EN != 0 && pres_sec[0]};
+wire  [2:0] wired   = {MC_DECL1 && pres_sec[2], MC_DECL0 && pres_sec[1], SEC_EN != 0 && pres_sec[0]} &
+                      {3{pres_cmt}};
 wire        has_sec = |wired;
 
 // The entries, in ascending kind order: each listed block's index, and the count.
@@ -529,6 +532,7 @@ if (SEC_EN) begin : sec
 		.clk_sys(clk_sys),
 		// HPS_BUS[166:132], the primary's mux: {lba[31:0], req, hps_ack, reset}
 		.c_reset(hps_lw[132]), .hps_ack(hps_lw[133]), .c_req(hps_lw[134] & wired[0]), .c_lba(hps_lw[166:135]),
+		.c_commit(hps_lw[380]),                     // HPS_BUS[380], hps_io's commit mark
 		.en_sys(sec_en_sys), .o_ack(sec_ack), .o_wr(sec_wr), .o_dat(sec_dat), .o_adr(sec_adr),
 		// HPS_BUS[201:167] and [236:202], the save slots' muxes: {lba[31:0], rd, wr, hps_ack}; an undeclared or
 		// absent slot's request lines are held low, so the feeder never serves it

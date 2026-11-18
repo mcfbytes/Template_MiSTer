@@ -21,8 +21,8 @@
 //   - every LW net and port tb/static.sh lists for this configuration (lw_e_nets.vh) is driven: no bit reads z.
 //     HPS_BUS[383:46] (sys_top's lw_bus) has a weak pull-down here, as synthesis ties a net with no source low,
 //     and each of its bits is driven exactly when the bit map says: every to-core bit by lw_sys_window, the PAD
-//     and EVT exports and presence bits by hps_io when their tier is built, and nothing else, since the
-//     Template has no SECTOR mux and the bits a later piece owns have no driver yet;
+//     and EVT exports and presence bits by hps_io when their tier is built, SECTOR's commit mark and its
+//     presence bit by hps_io when SECTOR is built, and nothing else, since the Template has no SECTOR mux;
 //   - presence: PAD and EVT are listed exactly when built (the Template passes the wide bus to hps_io), SECTOR
 //     never (no mux), OSDBUF and LANE when built, and COUNT agrees;
 //   - GPI: the ID view reads the core magic (bits 25, 24 and 22 clear); in the I/O view bit 25 is the firewall's
@@ -30,8 +30,8 @@
 //     of the run, each moving when its source is forced; without MISTER_LW bits 27:21 are clear;
 //   - an ENABLE stored through the bridge atom sets GPI[22]; GPO[31] low raises lw_idv, which clears it;
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
-//     hps_io decodes it, the status hold, the event pulses and the event levels from hps_io to lw_sys_window, each
-//     when its tier is built;
+//     hps_io decodes it, the status hold, the event pulses and the event levels from hps_io to lw_sys_window, and
+//     the commit mark from hps_io to lw_sector, each when its tier is built;
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
 //   - with the OSD tier, each osd instance that exists carries the window's OSDBUF write port, and the window takes
 //     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd) and GPO[31] on clk_sys;
@@ -141,11 +141,19 @@ task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 // HPS_BUS[383:46]: a net with no source reads 0, as synthesis ties it; a bit any piece drives overrides the pull.
 assign (weak0, weak1) dut.lw_bus = 338'd0;
 `ifdef MISTER_LW_EVT
-// The Template leaves these hps_io inputs open, and synthesis ties an open input port low; the event exports read them.
+// The Template leaves these hps_io inputs open, and synthesis ties an open input port low; the event exports read
+// them, and the requests also the commit mark.
 assign (weak0, weak1) dut.emu.hps_io.info_req = 1'b0;
 assign (weak0, weak1) dut.emu.hps_io.ioctl_upload_req = 1'b0;
+`define LW_TB_SDTIE
+`endif
+`ifdef MISTER_LW_SECTOR_SLOT
+`define LW_TB_SDTIE
+`endif
+`ifdef LW_TB_SDTIE
 assign (weak0, weak1) dut.emu.hps_io.sd_rd = 1'b0;
 assign (weak0, weak1) dut.emu.hps_io.sd_wr = 1'b0;
+`undef LW_TB_SDTIE
 `endif
 
 `ifdef MISTER_LW_PAD
@@ -157,6 +165,11 @@ localparam TB_PAD = 0;
 localparam TB_EVT = 1;
 `else
 localparam TB_EVT = 0;
+`endif
+`ifdef MISTER_LW_SECTOR_SLOT
+localparam TB_SEC = 1;
+`else
+localparam TB_SEC = 0;
 `endif
 `ifdef MISTER_LW_OSD
 localparam TB_OSD = 1;
@@ -171,7 +184,7 @@ localparam TB_LANE = 0;
 
 // The bits of HPS_BUS[383:46] some piece drives in this configuration (bit i - 46 of the mask is bus bit i): every
 // to-core bit [131:46]; with PAD hps_io's presence bit [375]; with EVT the event pulses [239:237], the status
-// hold [371:240], the event levels [374:372] and [376].
+// hold [371:240], the event levels [374:372] and [376]; with SECTOR hps_io's commit mark [380] and [381].
 function [383:46] bus_driven;
 	reg [383:0] m;
 	begin
@@ -179,6 +192,7 @@ function [383:46] bus_driven;
 		m[131:46] = '1;
 		if (TB_PAD) m[375] = 1'b1;
 		if (TB_EVT) begin m[374:237] = '1; m[376] = 1'b1; end
+		if (TB_SEC) m[381:380] = 2'b11;
 		bus_driven = m[383:46];
 	end
 endfunction
@@ -359,6 +373,12 @@ initial begin
 		release dut.emu.hps_io.ev_rq; release dut.emu.hps_io.ev_rq_d; release dut.emu.hps_io.ev_ack_d;
 		release dut.emu.hps_io.upload_req; release dut.emu.hps_io.info_n;
 `endif
+`ifdef MISTER_LW_SECTOR_SLOT
+		force dut.emu.hps_io.sd_commit = !k[0];
+		sys_cycles(1);
+		check("the commit mark at lw_sector", dut.lw_sys_window.sec.sector.c_commit, !k[0]);
+		release dut.emu.hps_io.sd_commit;
+`endif
 	end
 	sys_cycles(4);
 
@@ -446,6 +466,7 @@ initial begin
 	check("PAD listed: built, and hps_io's write arm present", dut.lw_sys_window.has_pad, TB_PAD);
 	check("EVT listed: built, and hps_io's exports present", dut.lw_sys_window.has_evt, TB_EVT);
 	check("SECTOR not listed: no slot's mux is present", dut.lw_sys_window.has_sec, 1'b0);
+	check("hps_io's commit mark present exactly when SECTOR is built", dut.lw_sys_window.pres_cmt, TB_SEC);
 	lw_read(21'h4000C, d);
 	check("COUNT: PAD, EVT, OSDBUF and LANE as built", d, TB_PAD + TB_EVT + TB_OSD + TB_LANE);
 	lw_read(21'h80000, d); check("the PAD block's first word", d, TB_PAD ? 32'd0 : 32'hDEADBEEF);
