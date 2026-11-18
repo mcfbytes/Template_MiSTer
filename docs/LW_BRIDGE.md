@@ -302,6 +302,8 @@ bitstream builds, so an entry's index (and its PENDING, OWNED and OPEN bits) dep
 **Versioning.** The directory's major changes only if a header word or a common entry word changes meaning. A minor
 revision only adds: reserved words that read 0 today, a larger header or stride, new kinds. A kind number is never
 reused; a kind's major changes only if one of its registers changes meaning. Reserved bits read 0 and are written 0.
+A version bumps at first publication, not per unpublished revision: a bit that read 0 before and is added before
+the revision ships in a core keeps the version it has.
 
 **What a host that skips an entry is owed:**
 - **An ordinal belongs to one entry**, in the kind's range, so a line never carries a cause the host cannot clear.
