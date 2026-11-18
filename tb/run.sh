@@ -39,16 +39,46 @@
 #      the window with every block, at both LW_DIAG values, with every tier macro; and the floor modules with
 #      MISTER_LW alone. Any error fails (a name used before its declaration is one, which the Icarus arms
 #      accept). Without slang on PATH the arm reports SKIPPED and does not fail.
+#   H  the HPS-side probe, tb/hps/lw_probe.c, compiled with warnings as errors by the host's C compiler (cc, or
+#      $CC) and, where one is on PATH, by arm-linux-gnueabihf-gcc; the testbench never runs it. It compiles before
+#      any container starts (the image has no C compiler). Without a C compiler the arm reports SKIPPED and does
+#      not fail.
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F and 0. LW_TB_JOBS (8) runs at a time in
 # arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
 # that has it; the tree is mounted at /w.
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
+[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V}
+O=${LW_TB_OUT:-tb/out}
+
+# probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
+probe() {
+  echo "run $LW_TB_HRUN" > "$1"; n=0; f=0
+  W="-std=c11 -Wall -Wextra -Wshadow -Wstrict-prototypes -Wmissing-prototypes -pedantic -Werror -O2"
+  for c in "${CC:-cc}" arm-linux-gnueabihf-gcc; do
+    if ! command -v "$c" >/dev/null 2>&1; then
+      [ $n -eq 0 ] && { echo "SKIPPED: no C compiler ($c) on PATH" >> "$1"; return 0; }
+      continue
+    fi
+    echo "-- $c: tb/hps/lw_probe.c" >> "$1"; n=$((n + 1))
+    if $c $W -o "$O/lw_probe.$(basename "$c")" tb/hps/lw_probe.c >> "$1" 2>&1; then
+      echo "pass $c: compiles, no warning" >> "$1"
+    else f=$((f + 1)); echo "FAIL $c: does not compile without a warning" >> "$1"
+    fi
+  done
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles, 0 failures" >> "$1"; else echo "FAILED: $n compiles, $f failures" >> "$1"; fi
+}
+if [ -z "$LW_TB_INNER" ]; then
+  LW_TB_HRUN=$$; export LW_TB_HRUN
+  case " $ARMS " in *" H "*) mkdir -p "$O"; probe "$O/lw_probeH.log";; esac
+fi
+
 if [ -z "$LW_TB_INNER" ] && ! iverilog -V 2>/dev/null | grep -q 'version 1[2-9]'; then
   if [ -n "$LW_TB_IMAGE" ]; then
     sh tb/offstate.sh --extract   # arm S's upstream tree: the container has no git
-    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_SEEDS -e LW_TB_JOBS -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
+    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_SEEDS -e LW_TB_JOBS -e LW_TB_HRUN -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
       "$LW_TB_IMAGE" sh tb/run.sh
   fi
   echo "tb/run.sh: needs Icarus Verilog >= 12 on PATH, or LW_TB_IMAGE set to an image with it" >&2; exit 2
@@ -267,9 +297,21 @@ verdict() {
           printf "arm %s: %s%s\n", arm, nw ? "PASSED with " nw " expected-fail cases; " : "", res }' "$2"
 }
 
-O=${LW_TB_OUT:-tb/out}; mkdir -p "$O"; rc=0; R=""
-[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
-for g in ${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 V}; do
+mkdir -p "$O"; rc=0; R=""
+for g in $ARMS; do
+  if [ "$g" = H ]; then
+    echo "== arm H: tb/hps/lw_probe.c compiled with warnings as errors"
+    if [ ! -f "$O/lw_probeH.log" ] || [ "$(head -1 "$O/lw_probeH.log")" != "run $LW_TB_HRUN" ]; then
+      V="arm H: FAILED (no compile from this run)"; rc=1
+    elif grep -q '^SKIPPED' "$O/lw_probeH.log"; then V="arm H: $(grep '^SKIPPED' "$O/lw_probeH.log")"
+    else
+      grep -v "^pass \|^run " "$O/lw_probeH.log"
+      V=$(verdict H "$O/lw_probeH.log") || rc=1
+    fi
+    R="$R$V
+"
+    continue
+  fi
   if [ "$g" = N ]; then
     echo "== arm N: tb/static.sh"
     sh tb/static.sh > "$O/lw_staticN.log" 2>&1
