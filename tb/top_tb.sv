@@ -33,6 +33,8 @@
 //     hps_io decodes it, the status hold, the event pulses and the event levels from hps_io to lw_sys_window, and
 //     the commit mark from hps_io to lw_sector, each when its tier is built;
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
+//   - with the lane, its entry names line 3 and its CAUSE word, and a frame stored through the bridge atom and
+//     played raises the lane's cause and f2h_irq[10] once its LINE_EN bit is set; the store-back lowers it;
 //   - with the OSD tier, each osd instance that exists carries the window's OSDBUF write port, and the window takes
 //     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd) and GPO[31] on clk_sys;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
@@ -513,6 +515,28 @@ initial begin
 	lw_write(21'h40018, 32'h4C570001);
 	repeat (4) @(negedge clk_100m);
 	check("enabled again: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b1);
+`ifdef MISTER_LW_LANE
+	$display("-- line 3: a lane frame played raises f2h_irq[10] through the lane's cause and its LINE_EN bit");
+	i = TB_PAD + TB_OSD + TB_EVT;                       // the lane's entry: the last listed, SECTOR is not
+	lw_read(21'h40050 + 21'h80 * i, d); check("the lane's entry: CAUSE at window offset 0x06024", d, 32'h00006024);
+	lw_read(21'h40054 + 21'h80 * i, d); check("the lane's entry: LINE 3", d, 32'd3);
+	lw_read(21'h40058 + 21'h80 * i, d); check("the lane's entry: CAUSE_BITS", d, 32'h7);
+	k = 0; d = 0;
+	while (!d[i] && k < 200) begin lw_read(21'h4002C, d); k = k + 1; end
+	check("the lane's OPEN bit", d[i], 1'b1);
+	lw_write(21'h40030, 32'd1 << i);                    // LINE_EN: the lane's bit
+	lw_write(21'h46000, 32'h00000000);                  // BEGIN: UIO, opcode 0 (no decoder acts on it)
+	lw_write(21'h46008, 32'h00000000);                  // END
+	k = 0; d = 0;
+	while (d[15:0] != 16'd1 && k < 200) begin lw_read(21'h46010, d); k = k + 1; end
+	check("the frame played: PLAYED", d[15:0], 16'd1);
+	repeat (4) @(negedge clk_100m);
+	lw_read(21'h46024, d); check("the lane's CAUSE: PLAYED", d, 32'h1);
+	check("f2h_irq[10] high, and no other LW line", {dut.interrupts.irq & IRQ_LW}, 64'd1 << 10);
+	lw_write(21'h46024, 32'h7);
+	repeat (2) @(negedge clk_100m);
+	check("the store-back: f2h_irq[10] low", {dut.interrupts.irq & IRQ_LW}, 64'd0);
+`endif
 
 	$display("-- the HPS reset reaches the firewall");
 	check("lw_hrst low, the firewall idle", {dut.hps_lw_bridge.lw_hrst, dut.hps_lw_bridge.idle}, 2'b01);

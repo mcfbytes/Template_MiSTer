@@ -48,8 +48,8 @@
 // link open (its OPEN bit), which it is only once the half has seen the enable, and a store dropped there sets
 // stale too. quiet keeps a half still returning to SPI from taking work under the next enable. OWNED shows each
 // link not yet back at rest. Every other block's OPEN bit is en_q, its OWNED bit 0.
-// At a taken ENABLE each block reloads its CAUSE word: EVT ORs in STATUS and its standing levels, SECTOR clears
-// its own.
+// At a taken ENABLE each block reloads its CAUSE word: EVT ORs in STATUS and its standing levels, SECTOR and LANE
+// clear their own.
 // Lines: each is a register, en_q & the entry's LINE_EN bit & the entry's CAUSE word non-zero, so a line is a
 // level that falls only when one of the three does. LINE_EN reads 0 whenever en_q does. PENDING is not
 // gated. RESETS counts rises of lw_hrst and the state machines the firewall freed, each saturating at 255.
@@ -61,7 +61,8 @@
 // its slot index, with its hps_io slot, frame, LBA width and (for a save slot) its DDR image base and extent.
 // OSDBUF queues image stores for a clk_sys writer that writes them through each osd instance's own osd_buffer port
 // (lw_osd.sv, osd.v). EVT raises hps_io's core->host flags (status, block request, info, upload) as causes on its
-// own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies.
+// own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies; its CAUSE
+// (played, reply, drop) is on its own line.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored) and lw_sector's diagnostics; LW_DIAG=1
 // (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
@@ -180,8 +181,10 @@ localparam [31:0] EVT_VER   = 32'h00020000;
 localparam  [7:0] EVT_LINE  = 8'd2;                        // f2h_irq[9], GIC SPI 49
 localparam [15:0] EVT_BITS  = 16'h000F;                    // STATUS, BLK, INFO, UPLOAD
 localparam [15:0] LANE_KIND = 16'd5;
-localparam [31:0] LANE_VER  = 32'h00010001;
-localparam  [7:0] LANE_LINE = 8'd0;
+localparam [31:0] LANE_VER  = 32'h00010002;
+localparam  [7:0] LANE_LINE = 8'd3;                        // f2h_irq[10], GIC SPI 50
+localparam [20:0] LANE_CAUSE = LANE_OFF + 21'h00024;
+localparam [15:0] LANE_BITS = 16'h0007;                    // PLAYED, REPLY, DROP
 
 localparam        SEC_AW    = 9;          // FIFO depth 512
 localparam  [7:0] SEC_RD    = 8'h01;      // a descriptor's flags: RD, BEGIN_S frames; WR, WACK_S with the bytes
@@ -300,12 +303,13 @@ wire [11:0] wlane = lw_waddr[11:0];
 wire [17:0] rpad  = lw_raddr[17:0];
 wire [17:2] wpad  = lw_waddr[17:2];
 
-wire        sec_bell, evt_irq;         // each block's CAUSE word is non-zero
+wire        sec_bell, evt_irq, lane_irq;   // each block's CAUSE word is non-zero
 wire [31:0] sec_rdata, evt_rdata, osd_rdata, lane_rdata, pad_rdata;
 
 // A block's cause level, for the lines and PENDING: only a listed block's.
 wire        sec_lvl = has_sec & sec_bell;
 wire        evt_lvl = has_evt & evt_irq;
+wire        lane_lvl = LANE_EN != 0 && lane_irq;
 
 // The lines: each entry's cause level and LINE_EN bit on the bit its LINE word names, registered under en_q.
 function automatic [2:0] line_bit(input [7:0] ord);
@@ -313,7 +317,8 @@ function automatic [2:0] line_bit(input [7:0] ord);
 endfunction
 
 wire  [2:0] line_d = ({3{sec_lvl & line_en[e_sec]}} & line_bit(SEC_LINE)) |
-                     ({3{evt_lvl & line_en[e_evt]}} & line_bit(EVT_LINE));
+                     ({3{evt_lvl & line_en[e_evt]}} & line_bit(EVT_LINE)) |
+                     ({3{lane_lvl & line_en[e_lane]}} & line_bit(LANE_LINE));
 
 always @(posedge clk) line_q <= {3{en_q}} & line_d;
 
@@ -349,7 +354,7 @@ end
 wire [31:0] ena_rd = {en_q, quiet, stale, lburst, 12'd0, lw_hrst, 3'd0, lw_idv, 11'd0};
 
 // PENDING: bit i = entry i's CAUSE word is non-zero.
-wire [31:0] pending = ({31'd0, sec_lvl} << e_sec) | ({31'd0, evt_lvl} << e_evt);
+wire [31:0] pending = ({31'd0, sec_lvl} << e_sec) | ({31'd0, evt_lvl} << e_evt) | ({31'd0, lane_lvl} << e_lane);
 
 // OPEN and OWNED: bit i is entry i's. A linked block's bits are its link's; every other block's OPEN is en_q.
 wire [31:0] linked  = ({31'd0, has_sec} << e_sec) | ((OSD_EN ? 32'd1 : 32'd0) << e_osd) |
@@ -447,7 +452,7 @@ always @(*) begin
 	if (has_evt && de == e_evt)
 		dir_ent = ent(dew, EVT_KIND, EVT_VER, EVT_OFF, EVT_SIZE, EVT_OFF, EVT_LINE, EVT_BITS, evt_kw(dk));
 	if (LANE_EN && de == e_lane)
-		dir_ent = ent(dew, LANE_KIND, LANE_VER, LANE_OFF, LANE_SIZE, 21'd0, LANE_LINE, 16'd0, lane_kw(dk));
+		dir_ent = ent(dew, LANE_KIND, LANE_VER, LANE_OFF, LANE_SIZE, LANE_CAUSE, LANE_LINE, LANE_BITS, lane_kw(dk));
 
 	if (dw < 10'd16) case (dw[3:0])
 		4'd0:    dir_rdata = 32'h5244574C;                   // MAGIC "LWDR"
@@ -615,7 +620,7 @@ if (LANE_EN) begin : lane
 		.clk(clk),
 		.raddr(rlane), .rdata(lane_rdata),
 		.waddr(wlane), .wsel(w_lane), .write(wr_lane), .wdata(lw_wdata), .be(lw_be), .hen(en_q),
-		.take(e_take), .f_open(lane_open), .f_owned(lane_owned), .f_idle(lane_idle),
+		.take(e_take), .f_open(lane_open), .f_owned(lane_owned), .f_idle(lane_idle), .irq(lane_irq),
 		.clk_sys(clk_sys), .l_busy(lane_busy), .l_wait(lane_wait), .l_dout(lane_dout),
 		.own(lane_own), .hold(lane_hold), .sel(lane_sel), .strobe(lane_strobe), .din(lane_din)
 	);
@@ -631,6 +636,7 @@ else begin : nolane
 	assign lane_open   = 1'b0;
 	assign lane_owned  = 1'b0;
 	assign lane_idle   = 1'b1;
+	assign lane_irq    = 1'b0;
 	assign lane_own    = 1'b0;
 	assign lane_hold   = 1'b0;
 	assign lane_sel    = 4'd0;

@@ -833,9 +833,9 @@ function [511:0] pure_sec;
 endfunction
 function [255:0] pure_lane;
 `ifdef MISTER_LW_LANE
-	pure_lane = {146'd0, win.lane.lane.wspec, win.lane.lane.wcom, win.lane.lane.wvis, win.lane.lane.open, win.lane.lane.ovf,
+	pure_lane = {134'd0, win.lane.lane.wspec, win.lane.lane.wcom, win.lane.lane.wvis, win.lane.lane.open, win.lane.lane.ovf,
 	            win.lane.lane.played, win.lane.lane.drops, win.lane.lane.rrp, win.lane.lane.rhead,
-	            win.lane.lane.rdrops, win.lane.lane.pt_d, win.lane.lane.rdt_d};
+	            win.lane.lane.rdrops, win.lane.lane.pt_d, win.lane.lane.rdt_d, win.lane.lane.rwg_d, win.lane.lane.cause};
 `else
 	pure_lane = 0;
 `endif
@@ -2114,6 +2114,7 @@ end
 `ifdef MISTER_LW_LANE
 // LANE: frames stored over LW against the same frames sent as link words (the HPS's handshake on io_clk/io_ack).
 localparam [20:0] LANE = 21'h46000;
+localparam [20:0] LCAUSE = 21'h46024;   // CAUSE {DROP, REPLY, PLAYED}
 reg         tb_vsync = 0, cfg_has = 0;
 // sys_top's 0x30 arm, the one config decode the link's ack reads: vs_wait from the command word to a vsync
 always @(posedge clk_sys) begin
@@ -2329,6 +2330,193 @@ task lane_rstat(output [31:0] rs); axi_read(LANE + 21'h1C, 0, rs, dl, beats); en
 task lane_pop(output [15:0] w);
 	reg [31:0] h;
 	begin axi_read(LANE + 21'h20, 0, h, dl, beats); w = h[15:0]; axi_write(LANE + 21'h0C, 32'd0, 4'hF); end
+endtask
+
+// T-LN1, the lane's cause word and its line. The clk_100m edge of the lane's last RPOP taken, of its last CAUSE
+// store taken and of the last advance of the synchronised reply write pointer (the edge REPLY is raised at).
+realtime t_lpop = 0, t_lclr = 0, t_lrw = 0;
+integer  n_poprw = 0;                 // RPOPs taken at the edge a reply word landed
+always @(posedge clk) begin
+	if (win.lane.lane.w_pop) t_lpop = $realtime;
+	if (win.lane.lane.w_cause) t_lclr = $realtime;
+	if (win.lane.lane.rwg_s != win.lane.lane.rwg_d) t_lrw = $realtime;
+	if (win.lane.lane.w_pop && win.lane.lane.rwg_s != win.lane.lane.rwg_d) n_poprw = n_poprw + 1;
+end
+// The host model's sleep: a reply word waiting, with the line low, for more than the two edges the cause and the
+// line take after the word lands, is a word stranded.
+`ifndef LW_TB_LN1_N
+`define LW_TB_LN1_N 10000
+`endif
+reg     ln_mon = 0, ln_asleep = 0;
+integer ln_run = 0, ln_strand = 0;
+always @(posedge clk) if (ln_mon) begin
+	if (ln_asleep && win.lane.lane.rcount != 0 && !lines[2]) begin
+		ln_run = ln_run + 1;
+		if (ln_run == 3) ln_strand = ln_strand + 1;
+	end
+	else ln_run = 0;
+end
+// One word waits and the cause is clear. A one-strobe capture frame (one reply) is stored and, d clk_100m cycles
+// after its END's response, an RPOP (mode 0) or a store-back of CAUSE (mode 1). same: the store took effect at the
+// edge the reply landed; lat: cycles from the END's response to that edge, eff: from the store's issue to its edge.
+task ln_trial(input integer mode, input integer d, output integer same, output integer lat, output integer eff);
+	reg  [31:0] c, rs, p, dr;
+	realtime    t0, ti;
+	begin
+		cause_drain(LCAUSE);
+		lane_count(p, dr);
+		f_set(0, 16'h0029, 0);
+		lane_send_c(1, 1'b1);
+		t0 = $realtime;
+		repeat (d) @(negedge clk);
+		ti = $realtime;
+		if (mode == 0) axi_write(LANE + 21'h0C, 32'd0, 4'hF);
+		else axi_write(LCAUSE, 32'h7, 4'hF);
+		lane_wait(p + 1);
+		lat  = $rtoi((t_lrw - t0) / 10.0 + 0.5);
+		eff  = $rtoi(((mode == 0 ? t_lpop : t_lclr) - ti) / 10.0 + 0.5);
+		same = (mode == 0 ? t_lpop : t_lclr) == t_lrw;
+		axi_read(LCAUSE, 0, c, dl, beats);
+		lane_rstat(rs);
+		if (mode == 0) begin
+			if (!c[1]) $display("     RPOP %0d cycles after END: REPLY not raised (pop at %0t, reply at %0t)", d, t_lpop, t_lrw);
+			check($sformatf("REPLY with an RPOP %0d cycles after END: raised", d), c[1], 1);
+			check($sformatf("REPLY with an RPOP %0d cycles after END: one word waits", d), rs[15:0], 1);
+		end
+		else begin
+			check($sformatf("REPLY with a store-back %0d cycles after END: set exactly when it landed at or after the clear", d),
+			      c[1], t_lrw >= t_lclr);
+			check($sformatf("REPLY with a store-back %0d cycles after END: two words wait", d), rs[15:0], 2);
+			axi_write(LANE + 21'h0C, 32'd0, 4'hF);
+		end
+	end
+endtask
+task lane_cause_cases;
+	reg  [31:0] p, dr, c, rs, v;
+	reg  [15:0] w;
+	reg  [15:0] r0;
+	integer     k, m, hits, lat, eff, ctr, same, seed, prod, popped, wakes, len, idle, nr0, nf;
+	begin
+		$display("-- LANE 17: CAUSE: PLAYED per frame; the line follows; W1C clears only the bits written; reads never clear");
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
+		cause_drain(LCAUSE); settle;
+		rd("lane 17: CAUSE clear", LCAUSE, 32'd0);
+		check("lane 17: line 3 low", lines[2], 0);
+		lane_count(p, dr);
+		f_set(0, 16'h001E, 2); fw[0] = 16'h1701; fw[1] = 16'h1702;
+		lane_send(1); lane_wait(p + 1);
+		rd("lane 17: a frame played: PLAYED", LCAUSE, 32'h1);
+		rd("lane 17: read again: unchanged", LCAUSE, 32'h1);
+		rdm("lane 17: PENDING has the lane's bit", DIRB + 21'h20, 32'd1 << TB_E_LANE, 32'd1 << TB_E_LANE);
+		check("lane 17: line 3 high", lines[2], 1);
+		axi_write(LCAUSE, 32'h1, 4'h1);
+		rd("lane 17: a partial store clears nothing", LCAUSE, 32'h1);
+		axi_write(LCAUSE, 32'h6, 4'hF);
+		rd("lane 17: a store of the other bits clears nothing", LCAUSE, 32'h1);
+		axi_write(LINEN, 32'hFFFFFFFF & ~(32'd1 << TB_E_LANE), 4'hF); repeat (2) @(negedge clk);
+		check("lane 17: its LINE_EN bit clear: line 3 low, the cause standing", {lines[2], win.lane_lvl}, 2'b01);
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); repeat (2) @(negedge clk);
+		check("lane 17: its LINE_EN bit set again: line 3 high", lines[2], 1);
+		axi_write(LCAUSE, 32'h1, 4'hF); repeat (2) @(negedge clk);
+		check("lane 17: the store-back: line 3 low within two cycles", lines[2], 0);
+		rd("lane 17: CAUSE clear", LCAUSE, 32'd0);
+
+		$display("-- LANE 18: CAUSE: REPLY for a captured frame beside PLAYED; each bit cleared alone");
+		lane_count(p, dr);
+		f_set(0, 16'h0029, 0);
+		lane_send_c(1, 1'b1); lane_wait(p + 1);
+		rd("lane 18: a capture frame: PLAYED and REPLY", LCAUSE, 32'h3);
+		axi_write(LCAUSE, 32'h1, 4'hF);
+		rd("lane 18: PLAYED cleared, REPLY kept", LCAUSE, 32'h2);
+		check("lane 18: line 3 still high", lines[2], 1);
+		axi_write(LCAUSE, 32'h2, 4'hF);
+		rd("lane 18: REPLY cleared", LCAUSE, 32'h0);
+		lane_rstat(rs);
+		check("lane 18: the reply still waits (the level)", rs[15:0], 1);
+
+		$display("-- LANE 19: CAUSE: a reply landing while one word waits raises REPLY");
+		lane_send_c(1, 1'b1); lane_wait(p + 2);
+		axi_read(LCAUSE, 0, c, dl, beats);
+		check("lane 19: REPLY raised by a second word", c[1], 1);
+		lane_rstat(rs);
+		check("lane 19: two words wait", rs[15:0], 2);
+		cause_drain(LCAUSE);
+		lane_pop(w);
+		rd("lane 19: an RPOP raises nothing", LCAUSE, 32'd0);
+
+		$display("-- LANE 20: CAUSE: a reply landing at the edge the last waiting word is popped raises REPLY");
+		ln_trial(0, 400, same, lat, eff);
+		ctr = lat - eff;
+		$display("     the reply lands %0d cycles after END's response, an RPOP takes effect %0d after its issue", lat, eff);
+		hits = 0;
+		for (k = 0; k < 4 && hits < 2; k = k + 1)
+			for (m = -8; m <= 8; m = m + 1) begin
+				ln_trial(0, (ctr + m > 0) ? ctr + m : 0, same, lat, eff);
+				hits = hits + same;
+			end
+		$display("     %0d RPOPs taken at the edge the reply landed", hits);
+		check("lane 20: an RPOP met a reply's landing at its edge", hits > 0, 1);
+
+		$display("-- LANE 21: CAUSE: a reply raised at the edge of a store-back stays set");
+		ln_trial(1, 400, same, lat, eff);
+		ctr = lat - eff;
+		hits = 0;
+		for (k = 0; k < 4 && hits < 2; k = k + 1)
+			for (m = -8; m <= 8; m = m + 1) begin
+				ln_trial(1, (ctr + m > 0) ? ctr + m : 0, same, lat, eff);
+				hits = hits + same;
+			end
+		$display("     %0d store-backs taken at the edge the reply landed", hits);
+		check("lane 21: a store-back met a reply's landing at its edge", hits > 0, 1);
+		lane_pop(w);
+		cause_drain(LCAUSE);
+		lane_rstat(rs);
+		check("lane 21: drained", rs[15:0], 0);
+
+		$display("-- LANE 22: a host that sleeps on line 3 and drains by the rule strands no reply (%0d replies)", `LW_TB_LN1_N);
+		axi_write(LINEN, 32'd1 << TB_E_LANE, 4'hF);
+		cause_drain(LCAUSE);
+		lane_rstat(rs); r0 = rs[31:16];
+		nr0 = n_poprw;
+		seed = 29; prod = 0; popped = 0; wakes = 0; idle = 0; nf = 0;
+		ln_strand = 0; ln_run = 0; ln_asleep = 1; ln_mon = 1;
+		while ((prod < `LW_TB_LN1_N || popped < prod) && idle < slow(5000)) begin
+			if (lines[2]) begin
+				ln_asleep = 0; wakes = wakes + 1; idle = 0;
+				repeat ($unsigned($random(seed)) % 8) @(negedge clk);
+				axi_read(LCAUSE, 0, c, dl, beats);
+				axi_write(LCAUSE, c, 4'hF);
+				lane_rstat(rs);
+				while (rs[15:0] != 0) begin
+					axi_write(LANE + 21'h0C, 32'd0, 4'hF); popped = popped + 1;
+					lane_rstat(rs);
+				end
+				ln_asleep = 1;
+			end
+			else if (prod < `LW_TB_LN1_N && prod - popped <= 200 && ($random(seed) & 3) != 0) begin
+				len = 1 + $unsigned($random(seed)) % 4;
+				if (prod + len > `LW_TB_LN1_N) len = `LW_TB_LN1_N - prod;
+				f_set(0, 16'h0029, len - 1);
+				for (m = 0; m < len - 1; m = m + 1) fw[m] = 16'h0000;
+				lane_send_c(1, 1'b1);
+				prod = prod + len; nf = nf + 1;
+			end
+			else begin
+				repeat (1 + $unsigned($random(seed)) % 16) @(negedge clk);
+				idle = idle + 1;
+			end
+		end
+		ln_mon = 0; ln_asleep = 0;
+		$display("     %0d replies in %0d frames, %0d popped, %0d wakes, %0d RPOPs taken at a landing's edge", prod,
+		         nf, popped, wakes, n_poprw - nr0);
+		check("lane 22: every reply popped", popped, prod);
+		check("lane 22: no word waited with line 3 low while the host slept", ln_strand, 0);
+		lane_rstat(rs);
+		check("lane 22: none waiting, no reply dropped", rs, {r0, 16'd0});
+		settle;
+		cause_drain(LCAUSE);
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
+	end
 endtask
 `endif
 
@@ -2780,7 +2968,7 @@ task dm_build;
 			e = e + 1;
 		end
 		if (TB_LANE) begin
-			dm_entry(e, 5, 32'h00010001, 32'h06000, 32'h01000, 0, 0, 0);           // LANE: no cause, no line
+			dm_entry(e, 5, 32'h00010002, 32'h06000, 32'h01000, 32'h06024, 3, 32'h7);   // LANE 1.2: line 3, three causes
 			b = 16 + 32 * e + 8;
 			dm[b] = 32'h70000002; dm[b + 1] = 32'h080E0014;                            // K0-K7: the replay bitmap
 			dm[b + 8] = 32'h00000003; dm[b + 9] = 32'h04000004; dm[b + 10] = 32'h01000000;
@@ -2957,7 +3145,7 @@ task dir_cases;
 			end
 		end
 		check("LINE words: each non-zero ordinal named once, each in 1-15", bad, 0);
-		check("entries with a line", nl, TB_SEC + TB_EVT);
+		check("entries with a line", nl, TB_SEC + TB_EVT + TB_LANE);
 		for (i = 0; i < wk_n; i = i + 1) if (wk_cause[i] != 0) begin
 			axi_read(DIRB + wk_cause[i], 0, v, vl, nb);
 			check($sformatf("kind %0d: its CAUSE word reads as an idle cause", wk_kind[i]), v, 0);
@@ -3033,6 +3221,12 @@ task dir_causes;
 			check($sformatf("kind %0d: lines low before", wk_kind[i]), lines, 0);
 			// SECTOR's request with its EN set: the mux claims the slot, so hps_io shows it nowhere (no EVT BLK)
 			if (wk_kind[i] == 2) begin sec_wr(S_CTRL, C_EN0); settle; cd_request(32'h00007700); end
+`ifdef MISTER_LW_LANE
+			else if (wk_kind[i] == 5) begin                 // LANE: a frame played
+				lane_count(v, vl); f_set(0, 16'h001E, 2); fw[0] = 16'h7701; fw[1] = 16'h7702;
+				lane_send(1); lane_wait(v + 1);
+			end
+`endif
 			else st_req(st_pat(700));
 			settle;
 			rd($sformatf("kind %0d: PENDING has its bit alone", wk_kind[i]), DIRB + 21'h20, 32'd1 << wk_idx[i]);
@@ -3050,7 +3244,7 @@ task dir_causes;
 				sec_wr(S_CTRL, 32'h0); settle;
 			end
 		end
-		check("no entry names ordinal 3: its line never rose", line3_high, 0);
+		check("ordinal 3: its line rose exactly when the lane is built", line3_high != 0, TB_LANE != 0);
 		$display("     %0d cycles with the block selects compared", sel_cycles);
 		check("cycles with no read select, two read selects or two store selects", sel_bad, 0);
 	end
@@ -3124,7 +3318,7 @@ endtask
 
 // ---- The host enable: the gate, the store, the ends, the lines and the start order ----
 // en_q's edges, and the lines against their definition in every cycle: line k is the register of en_q & its
-// entry's LINE_EN bit & its entry's CAUSE word non-zero (SECTOR ordinal 1, SYS 2).
+// entry's LINE_EN bit & its entry's CAUSE word non-zero (SECTOR ordinal 1, SYS 2, LANE 3).
 realtime t_lrise = 0, t_lfall = 0;
 integer  n_lrise = 0, n_lfall = 0;
 always @(win.en_q) if ($realtime > 0) begin
@@ -3135,10 +3329,10 @@ reg  [2:0] lm_q = 0;
 integer    lm_n = 0, lm_bad = 0, lm_fall_c = 0, lm_fall_e = 0, lm_fall_l = 0, lm_rises = 0, lm_falls = 0;
 always @(posedge clk) begin : line_model
 	reg [2:0] en, lv, nx;
-	en = {1'b0, win.line_en[TB_E_SYS], win.line_en[TB_E_SEC]};
-	lv = {1'b0, win.evt_lvl, win.sec_lvl};
+	en = {TB_LANE != 0 && win.line_en[TB_E_LANE], win.line_en[TB_E_SYS], win.line_en[TB_E_SEC]};
+	lv = {win.lane_lvl, win.evt_lvl, win.sec_lvl};
 	nx = {3{win.en_q}} & en & lv;
-	for (i_lm = 0; i_lm < 2; i_lm = i_lm + 1) if (lm_q[i_lm] && !nx[i_lm]) begin
+	for (i_lm = 0; i_lm < 3; i_lm = i_lm + 1) if (lm_q[i_lm] && !nx[i_lm]) begin
 		if (!win.en_q) lm_fall_l = lm_fall_l + 1;
 		else if (!en[i_lm]) lm_fall_e = lm_fall_e + 1;
 		else lm_fall_c = lm_fall_c + 1;
@@ -3811,6 +4005,7 @@ task lane_view_cases;
 		      2'b01);
 		lane_count(v_l, dr);
 		check("ID view: PLAYED counts the one frame", v_l, p + 1);
+		check("ID view: the frame's PLAYED is pending, and no line rises without the enable", {win.lane_lvl, lines[2]}, 2'b10);
 		trk_clear; link_send;
 		trk_cmp("ID view: a link frame after");
 
@@ -3842,9 +4037,11 @@ task lane_view_cases;
 		check("cut capture: an ENABLE is then taken", win.en_q, 1);
 		lane_rstat(rs);
 		check("cut capture: RSTAT under the new enable: none waiting, no drop counted", rs, {rd0, 16'd0});
+		rd("cut capture: CAUSE under the new enable: clear", LCAUSE, 32'd0);
+		check("cut capture: line 3 low under the new enable", lines[2], 0);
 	end
 endtask
-reg [31:0] v_l;
+reg [31:0] v_l, dr1_l;
 reg  [8:0] rw0;
 reg [15:0] rd0;
 `endif
@@ -3943,6 +4140,7 @@ task ls6;
 		check("the frame in flight completed; the queued two were popped", v, p + 1);
 		check("its four remaining strobes, and no other", bus_n - b0, 4);
 		check("the player idle", {lane_own, lane_hold}, 2'b00);
+		rd("the ENABLE finds the lane's CAUSE clear (its last frame played before it)", LCAUSE, 32'd0);
 `endif
 		wait_open;
 		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); sys_drain;
@@ -3962,11 +4160,27 @@ task ls10;
 		info_v = 8'h3B; @(negedge clk_sys) info_rq = 1; @(negedge clk_sys) up_rq = 1; settle;
 		if (TB_EVT) rd("before: EVT CAUSE shows all four", SYSB, 32'hF);
 		if (TB_EVT) rd("before: PEND shows the three levels", SYSB + 21'h18, 32'hE);
+`ifdef MISTER_LW_LANE
+		begin : l10lane                          // the predecessor's frames played and a reply waits, its cause unread
+			reg [31:0] p, dr;
+			lane_count(p, dr);
+			f_set(0, 16'h0029, 0);
+			lane_send_c(1, 1'b1); lane_wait(p + 1);
+			rd("before: the lane's CAUSE shows PLAYED and REPLY", LCAUSE, 32'h3);
+		end
+`endif
 		sys_drain;
 		if (TB_SEC) if (win.sec_lvl) cause_drain(SEC);
 		host_end;
 		ena_w; wait_open;
 		if (TB_EVT) rd("after the ENABLE: EVT CAUSE shows STATUS, BLK, INFO and UPLOAD", SYSB, 32'hF);
+`ifdef MISTER_LW_LANE
+		rd("after the ENABLE: the lane's CAUSE clear", LCAUSE, 32'd0);
+		rdm("after the ENABLE: the lane's reply stepped out, RSTAT none waiting", LANE + 21'h1C, 32'h0000FFFF, 32'd0);
+		axi_write(LINEN, 32'd1 << TB_E_LANE, 4'hF); settle;
+		check("the lane's LINE_EN bit: no line", lines, 0);
+		axi_write(LINEN, 32'd0, 4'hF); settle;
+`endif
 		check("LINE_EN 0: no line", lines, 0);
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF); settle;
 		check("SYS's LINE_EN bit: its line rises", lines[1], TB_EVT != 0);
@@ -6726,7 +6940,8 @@ initial begin
 	rd("LANE RSTAT reset", LANE + 21'h1C, 32'd0);
 	rd("LANE RHEAD reads 0 while empty", LANE + 21'h20, 32'd0);
 	rd("LANE BEGIN reads 0", LANE, 32'd0);
-	rd("LANE register hole", LANE + 21'h24, 32'd0);
+	rd("LANE CAUSE clear", LCAUSE, 32'd0);
+	rd("LANE register hole", LANE + 21'h28, 32'd0);
 	rd("LANE block end", LANE + 21'hFFC, 32'd0);
 	check("player idle", {lane_own, lane_hold}, 0);
 
@@ -6891,6 +7106,7 @@ initial begin
 		integer k, nfit;
 		nfit = ((1 << win.LANE_AW) - 1) / 10;     // frames of 10 entries that fit DEPTH - 1
 		lane_count(p, dr);
+		cause_drain(LCAUSE);
 		@(negedge clk_sys); io_enable = 1;          // the link holds its select: the player cannot start
 		f_set(0, 16'h001E, 8);
 		for (k = 0; k < nfit + 2; k = k + 1) begin
@@ -6900,12 +7116,17 @@ initial begin
 		lane_count(p1, dr1);
 		check("lane 8: (DEPTH - 1) / 10 frames of 10 entries fit, two dropped", dr1 - dr, 2);
 		check("lane 8: nothing played while the link is selected", p1, p);
+		rd("lane 8: CAUSE: DROP alone", LCAUSE, 32'h4);
+		check("lane 8: line 3 high", lines[2], 1);
+		axi_write(LCAUSE, 32'h4, 4'hF);
 		@(negedge clk_sys); io_enable = 0;
 		lane_wait(p + nfit);
 		check("lane 8: the last committed frame's status", hst[31:0], {16'((nfit - 1) * 16 + 1), 16'((nfit - 1) * 16)});
 		check("lane 8: status word 7", hst[127:112], 16'((nfit - 1) * 16 + 7));
 		lane_count(p1, dr1);
 		check("lane 8: DROPS unchanged by the drain", dr1 - dr, 2);
+		rd("lane 8: CAUSE after the drain: PLAYED alone", LCAUSE, 32'h1);
+		cause_drain(LCAUSE);
 	end
 
 	check("lanes 1-8: the selects drop at least two cycles between transactions", lo_min >= 2, 1);
@@ -7046,6 +7267,7 @@ initial begin
 		integer m, nr;
 		nr = 1 << win.LANE_RAW;
 		lane_count(p, dr);
+		cause_drain(LCAUSE);
 		f_set(0, 16'h0033, nr + 44);                // nr + 45 replies: 45 past the depth
 		for (i = 0; i < nr + 44; i = i + 1) fw[i] = {8'(i / 3), 8'(i * 11)};
 		trk_clear;
@@ -7055,6 +7277,10 @@ initial begin
 		lane_rstat(rs);
 		check("lane 15: the reply FIFO holds its depth", rs[15:0], nr);
 		check("lane 15: 45 replies dropped", rs[31:16], 45);
+		rd("lane 15: CAUSE: PLAYED, REPLY and DROP", LCAUSE, 32'h7);
+		lane_count(v_l, dr1_l);
+		check("lane 15: DROP from the reply words: DROPS unchanged", dr1_l, dr);
+		cause_drain(LCAUSE);
 		for (m = 0; m < nr; m = m + 1) lane_pop(w);
 		lane_rstat(rs);
 		check("lane 15: drained, the drop count kept", rs, {16'd45, 16'd0});
@@ -7091,6 +7317,7 @@ initial begin
 		check("lane 16: drained", rs[15:0], 0);
 	end
 
+	lane_cause_cases;
 	lane_view_cases;
 `endif
 
