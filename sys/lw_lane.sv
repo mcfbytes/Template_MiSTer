@@ -19,7 +19,7 @@
 `ifdef MISTER_LW_LANE
 `default_nettype none
 
-// LANE block (LW directory kind 5, minor 1, "LAN1"): the ordered frame lane, built with MISTER_LW_LANE.
+// LANE block (LW directory kind 5, minor 2, "LAN1"): the ordered frame lane, built with MISTER_LW_LANE.
 // Stores on clk_100m queue whole frames (BEGIN, WORDs, END) in a dual-clock FIFO; the clk_sys player replays
 // each committed frame onto the link nets through lw_link, so hps_io, hps_ext, both osd instances and sys_top's
 // own arms each decode one ordinary link transaction. A frame opened with BEGIN's capture bit records the
@@ -27,6 +27,12 @@
 // pops with a store to RPOP. Bridge side has no reset and answers every store in fixed cycles: a frame that
 // does not fit is dropped whole at END and counted, a frame without END is never played, and a reply word
 // that finds the reply FIFO full is dropped and counted. Contracts: docs/LW_BRIDGE.md, "LANE block".
+// CAUSE (0x24), the lane's line: PLAYED (bit 0) per frame played, REPLY (1) in every cycle the synchronised reply
+// write pointer differs from its value a cycle before, so a word landing while another waits, or in the cycle the
+// last is popped, raises it too; DROP (2) per frame dropped at END and per reply word dropped. A full-word store
+// clears each bit written as 1, a raise in the store's cycle wins; a taken ENABLE clears the word. Reads change
+// nothing. Each bit comes from a crossing the block already has: the played toggle, the reply write pointer, the
+// reply-drop toggle and the frame-drop count.
 // The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset):
 // while it is low the open frame is abandoned and the reply FIFO's read pointer steps toward its write pointer, so
 // replies that land after the enable fell are discarded. The player learns of the enable from its enable link
@@ -55,6 +61,7 @@ module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 
 	output wire        f_open,       // the enable link: stores are taken (OPEN)
 	output wire        f_owned,      // OWNED
 	output wire        f_idle,       // the link lets an ENABLE through
+	output wire        irq,          // level, high while CAUSE != 0
 
 	input wire         clk_sys,
 	input wire         l_busy,       // any of the link's own selects, or its ID view
@@ -111,6 +118,7 @@ reg [RAW:0] rrp = 0;                        // reply FIFO read pointer
 (* preserve *) reg [RAW:0] lane_rr_lwgray = 0;
 (* preserve *) reg [RAW:0] lane_rw_lwgray = 0;   // clk_sys: reply FIFO write pointer
 wire [RAW:0] rwg_s;
+reg [RAW:0] rwg_d = 0;                      // rwg_s a cycle before: a difference is a reply word landed
 reg  [15:0] rhead = 0;
 reg  [15:0] rdrops = 0;                     // reply words dropped on a full reply FIFO, free-running
 (* preserve *) reg rdt_lwx = 0;             // clk_sys: toggles once per dropped reply word
@@ -133,6 +141,15 @@ wire        w_ok   = ~ovf && used < ROOM;
 wire [RAW:0] rcount = g2r(rwg_s) - rrp;      // reply words waiting
 wire        w_pop  = st && waddr[11:2] == 10'd3 && rcount != 0;
 wire [RAW:0] rrnext = rrp + 1'd1;
+
+// CAUSE: {DROP, REPLY, PLAYED}
+localparam [2:0] C_PLAYED = 3'b001, C_REPLY = 3'b010, C_DROP = 3'b100;
+reg   [2:0] cause  = 0;
+wire        w_cause = st && waddr[11:2] == 10'd9;
+wire  [2:0] clr    = w_cause ? wdata[2:0] : 3'd0;
+wire  [2:0] raise  = ((pt_s ^ pt_d) ? C_PLAYED : 3'd0) | ((rwg_s != rwg_d) ? C_REPLY : 3'd0) |
+                     (((hen && w_end && ovf) || (rdt_s ^ rdt_d)) ? C_DROP : 3'd0);
+assign      irq    = |cause;
 
 reg         we;
 reg  [AW-1:0] wa;
@@ -167,6 +184,8 @@ always @(posedge clk) begin
 	lane_rr_lwgray <= rrp ^ (rrp >> 1);
 	rdt_d <= rdt_s;
 	if (rdt_s ^ rdt_d) rdrops <= rdrops + 1'd1;
+	rwg_d <= rwg_s;
+	cause <= raise | (cause & ~clr & ~{3{take}});   // a raise beats a clear in the same cycle; an ENABLE clears
 
 	// BEGIN abandons any open frame: its entries past wcom are overwritten; so does the enable's fall
 	if (!hen) begin
@@ -205,6 +224,7 @@ always @(*) begin
 		10'd6:   rdata = 32'h314E414C;    // "LAN1"
 		10'd7:   rdata = {rdrops, {(15 - RAW){1'b0}}, rcount};
 		10'd8:   rdata = (rcount != 0) ? {16'd0, rhead} : 32'd0;
+		10'd9:   rdata = {29'd0, cause};
 		default: rdata = 32'd0;
 	endcase
 end

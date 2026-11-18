@@ -193,7 +193,7 @@ bitstream builds, so an entry's index (and its PENDING bit) depends on the core'
 | 2 | SECTOR | `0x00020000` | `0x08000` / `0x08000` | `0x08000` | 1 | bit *k* per wired slot (`0x1`-`0x7`) | see SECTOR |
 | 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000` |
 | 4 | EVT | `0x00020000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0xF` | K0 = 4: the status words |
-| 5 | LANE | `0x00010001` | `0x06000` / `0x01000` | 0 | 0 | 0 | see LANE |
+| 5 | LANE | `0x00010002` | `0x06000` / `0x01000` | `0x06024` | 3 | `0x7` | see LANE |
 
 **Walking it.** A host:
 - refuses the directory, and drives everything over SPI, on an unknown MAGIC, a major it does not know, or a
@@ -253,7 +253,7 @@ is low. A link opens a block's stores only after the half has seen the level ris
 the half has answered it, so an enable that falls within a few cycles of its rise still leaves the link closed until
 the half answers. An ENABLE is taken only while every link is at rest (`quiet`). At an ENABLE the causes are
 reloaded: EVT ORs in STATUS and every level PEND shows; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that
-stands. While GPO bit 31 is 0 (the ID view) neither the lane player nor the OSD writer starts anything, so nothing
+stands; LANE's word starts clear. While GPO bit 31 is 0 (the ID view) neither the lane player nor the OSD writer starts anything, so nothing
 queued by a host that has gone plays inside the next program's identification.
 
 **The enable needs the link's I/O view.** A host that holds it never leaves the I/O view, identifies the core
@@ -279,7 +279,8 @@ shared interrupt 47 + *k*, and no two entries name the same ordinal.
 |---|---|---|---|
 | 1 | `f2h_irq[8]` | 48 | SECTOR |
 | 2 | `f2h_irq[9]` | 49 | EVT |
-| 3-15 | `f2h_irq[10]`-`[22]` | 50-62 | framework kinds to come |
+| 3 | `f2h_irq[10]` | 50 | LANE |
+| 4-15 | `f2h_irq[11]`-`[22]` | 51-62 | framework kinds to come |
 | 16-31 | `f2h_irq[23]`-`[38]` | 63-78 | a core's own kinds |
 
 A line is a register, high while the enable is set, its entry's LINE_EN bit is set and its CAUSE word is non-zero;
@@ -462,10 +463,11 @@ request/reply mailbox for any opcode.
 | `0x18` | R | ID `0x314E414C` ("LAN1") |
 | `0x1C` | R | RSTAT `{reply_drops[31:16], replies[15:0]}`: reply words dropped on a full reply FIFO (free-running), and waiting |
 | `0x20` | R | RHEAD `[15:0]`: the oldest reply word, 0 when none is waiting. Reading it has no side effect |
+| `0x24` | R, W1C | CAUSE: `[0]` PLAYED, a frame finished playing; `[1]` REPLY, a reply word landed; `[2]` DROP, a frame was discarded at END or a reply word was dropped. Clear at an ENABLE |
 
 Stores must be full words (all four byte enables). Every other offset reads 0.
 
-**Kind words** (the entry's CAUSE and LINE words are 0: the lane has no cause word and raises no line):
+**Kind words** (the entry's CAUSE word is `0x06024`, its LINE 3):
 
 | word | value |
 |---|---|
@@ -503,7 +505,9 @@ Stores must be full words (all four byte enables). Every other offset reads 0.
 - Replies queue in order across frames in a 256-word FIFO. Read RSTAT, then RHEAD and a store to RPOP per word.
 - Once PLAYED has passed a capture frame, all of that frame's replies are in the FIFO.
 - A reply that finds the FIFO full is dropped and counted in RSTAT; the frame still plays whole.
-- There is no reply line or cause word in this revision: the host polls PLAYED and RSTAT.
+- **The lane's line (ordinal 3).** CAUSE's bits are raised per event: PLAYED per frame played, REPLY in every
+  cycle a reply word lands (a word that lands while another waits, or as the last one is popped, raises it too),
+  DROP per frame or reply word dropped. The levels are RSTAT and PLAYED: drain by RPOP until RSTAT reads 0.
 
 ## Hooking the SECTOR block
 
@@ -613,7 +617,9 @@ mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 - the frame lane: the whole reference run with every decoder behind `lw_link`, then lane frames against the same
   frames sent as link words (status, RTC, timestamp, mount, gamma, FIO, both OSDs), the `vs_wait` and
   `ioctl_wait` holds, a link word raised mid-frame, full-FIFO drops, unended frames, the longest frame, and reply
-  capture (`0x29` word for word against the link, ordering across frames, overflow).
+  capture (`0x29` word for word against the link, ordering across frames, overflow), and the lane's cause and
+  line (REPLY raised by a word that lands while another waits and at the edge of the last word's RPOP, and a
+  host that sleeps on the line and strands no reply over 10,000 random interleavings).
 
 It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image that has it.
 
