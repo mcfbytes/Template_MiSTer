@@ -38,7 +38,8 @@
  * the run with no further LW access. Exit status: 0 every check passed; 1 a check failed; 2 the probe could not
  * run (usage, /dev/mem); 3 it stopped before touching the bridge (the look, or discovery found no window).
  *
- * tb/run.sh (arm H) compiles it with warnings as errors; the testbench never runs it.
+ * tb/run.sh (arm H) compiles it with warnings as errors, and runs tb/hps/lw_probe_test.c, which includes it, on
+ * the build host against a model of the window; the testbench never runs it against the RTL.
  */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64   /* the physical offsets are above 2 GB: a 32-bit off_t cannot carry them */
@@ -435,15 +436,22 @@ static void discover(int fd)
 	check(1, "the directory is a layout this probe knows, and the window is the token's");
 }
 
-/* the walk: LAYOUT's lengths, never constants; skip what is not known; a shared or out-of-range ordinal gets no line */
+/* the walk: LAYOUT's lengths, never constants; skip what is not known; an ordinal that two entries name (either of
+ * them skipped or not) or that lies outside 1-15 gets no line: neither entry has it */
 static void walk(void)
 {
-	uint32_t lay = rd(H_LAYOUT), hl = lay & 0xFFFFu, st = lay >> 16, n = rd(H_COUNT), i, j, lines = 0, dup = 0;
+	uint32_t lay = rd(H_LAYOUT), hl = lay & 0xFFFFu, st = lay >> 16, n = rd(H_COUNT), i, j, once = 0, dup = 0;
 	step("the directory, walked by its rules");
 	say("LAYOUT header %u bytes, stride %u; COUNT %u", (unsigned)hl, (unsigned)st, (unsigned)n);
 	if (hl < 0x40u || st < 0x20u || hl % 4u || st % 4u || n > 31u || hl + n * st > PAGE) {
 		check(0, "the table fits the directory's page with a header and entries this probe can read");
 		return;
+	}
+	for (i = 0; i < n; i++) {
+		uint32_t e = hl + i * st, line = rd(e + 20) & 0xFFu;
+		if (!(rd(e) & 0xFFFFu) || !line || line > 31u) continue;
+		if (once & (1u << line)) dup |= 1u << line;
+		once |= 1u << line;
 	}
 	for (i = 0; i < n; i++) {
 		uint32_t e = hl + i * st, kind = rd(e) & 0xFFFFu, ver = rd(e + 4), off = rd(e + 8), size = rd(e + 12);
@@ -469,13 +477,9 @@ static void walk(void)
 		blk[kind].line = line;
 		blk[kind].bits = bits;
 		for (j = 0; j < 24; j++) blk[kind].k[j] = rd(e + 32 + 4 * j);
-		if (line) {
-			if (line > 15u || (lines & (1u << line))) dup |= 1u << i;
-			else lines |= 1u << line;
-		}
 	}
 	for (i = 1; i <= K_LAST; i++)
-		if (blk[i].present && blk[i].line && (dup & (1u << blk[i].idx))) {
+		if (blk[i].present && blk[i].line && (blk[i].line > 15u || (dup & (1u << blk[i].line)))) {
 			say("%s: line %u is shared or out of range: no line", kind_name[i], (unsigned)blk[i].line);
 			blk[i].line = 0;
 		}

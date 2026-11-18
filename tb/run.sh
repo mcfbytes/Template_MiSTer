@@ -41,9 +41,10 @@
 #      MISTER_LW alone. Any error fails (a name used before its declaration is one, which the Icarus arms
 #      accept). Without slang on PATH the arm reports SKIPPED and does not fail.
 #   H  the HPS-side probe, tb/hps/lw_probe.c, compiled with warnings as errors by the host's C compiler (cc, or
-#      $CC) and, where one is on PATH, by arm-linux-gnueabihf-gcc; the testbench never runs it. It compiles before
-#      any container starts (the image has no C compiler). Without a C compiler the arm reports SKIPPED and does
-#      not fail.
+#      $CC) and, where one is on PATH, by arm-linux-gnueabihf-gcc; the testbench never runs it. And its own logic
+#      run on the build host: tb/hps/lw_probe_test.c includes the probe against a model of the window (its cases
+#      in its header), compiled the same way and run once. It all runs before any container starts (the image
+#      has no C compiler). Without a C compiler the arm reports SKIPPED and does not fail.
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F and 0. LW_TB_JOBS (8) runs at a time in
 # arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -63,13 +64,28 @@ probe() {
       [ $n -eq 0 ] && { echo "SKIPPED: no C compiler ($c) on PATH" >> "$1"; return 0; }
       continue
     fi
-    echo "-- $c: tb/hps/lw_probe.c" >> "$1"; n=$((n + 1))
-    if $c $W -o "$O/lw_probe.$(basename "$c")" tb/hps/lw_probe.c >> "$1" 2>&1; then
-      echo "pass $c: compiles, no warning" >> "$1"
-    else f=$((f + 1)); echo "FAIL $c: does not compile without a warning" >> "$1"
-    fi
+    for src in lw_probe lw_probe_test; do
+      echo "-- $c: tb/hps/$src.c" >> "$1"; n=$((n + 1)); rm -f "$O/$src.$(basename "$c")"
+      if $c $W -o "$O/$src.$(basename "$c")" tb/hps/$src.c >> "$1" 2>&1; then
+        echo "pass $c: compiles, no warning" >> "$1"
+      else f=$((f + 1)); echo "FAIL $c: $src.c does not compile without a warning" >> "$1"
+      fi
+    done
   done
-  if [ $f -eq 0 ]; then echo "PASSED: $n compiles, 0 failures" >> "$1"; else echo "FAILED: $n compiles, $f failures" >> "$1"; fi
+  # the probe's own logic, on the build host (the first compiler's binary)
+  t=$O/lw_probe_test.$(basename "${CC:-cc}"); r=0
+  if [ -x "$t" ]; then
+    "$t" > "$O/lw_probe_test.log" 2>&1; st=$?
+    cat "$O/lw_probe_test.log" >> "$1"
+    r=$(sed -n 's/^lw_probe_test: \([0-9]*\) checks.*/\1/p' "$O/lw_probe_test.log"); nf=$(grep -c '^FAIL ' "$O/lw_probe_test.log")
+    f=$((f + nf))
+    if [ $nf -eq 0 ] && { [ $st -ne 0 ] || [ -z "$r" ]; }; then
+      f=$((f + 1)); echo "FAIL lw_probe_test: status $st, no failed check named" >> "$1"
+    fi
+    r=${r:-0}
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles, $r probe checks, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles, $r probe checks, $f failures" >> "$1"; fi
 }
 if [ -z "$LW_TB_INNER" ]; then
   LW_TB_HRUN=$$; export LW_TB_HRUN
@@ -301,7 +317,7 @@ verdict() {
 mkdir -p "$O"; rc=0; R=""
 for g in $ARMS; do
   if [ "$g" = H ]; then
-    echo "== arm H: tb/hps/lw_probe.c compiled with warnings as errors"
+    echo "== arm H: tb/hps/lw_probe.c compiled with warnings as errors, its logic run on the build host"
     if [ ! -f "$O/lw_probeH.log" ] || [ "$(head -1 "$O/lw_probeH.log")" != "run $LW_TB_HRUN" ]; then
       V="arm H: FAILED (no compile from this run)"; rc=1
     elif grep -q '^SKIPPED' "$O/lw_probeH.log"; then V="arm H: $(grep '^SKIPPED' "$O/lw_probeH.log")"
