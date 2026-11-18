@@ -26,9 +26,10 @@
 // A slot's EN bit can be set only while the slot is wired (its mux's presence bit on HPS_BUS reads 1).
 // Registers (block-relative): CAUSE 0x000, REQ 0x004 {any, 0, k[17:16], GET_SDSTAT word}, CTRL 0x008 (EN [2:0] by
 // k, ABORT [8], TEST [9], CLR [10]), STATUS 0x00C ({frames[31:16]}, sd_commit [10], ABORT held [9], busy [8], ack
-// [6:4] and en_sys [2:0] by k: independent samples), ACCEPT 0x010, ID 0x014, DIAG 0x018-0x030 (DROPS, COUNTS,
-// RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM); per slot k at 0x100 + 0x20k: RSTAT_S {offered, answered, 0,
-// GET_SDSTAT word}, LBA_S, BEGIN_S, WACK_S (k = 1, 2); DATA at 0x4000 + 4i. Every slot field is indexed by k.
+// [6:4] and en_sys [2:0] by k: independent samples), ACCEPT 0x010 {ok, closed, 0, drops, 0, next_index}, ID
+// 0x014, DIAG 0x018-0x030 (DROPS, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM); per slot k at 0x100 +
+// 0x20k: RSTAT_S {offered, answered, 0, GET_SDSTAT word}, LBA_S, BEGIN_S, WACK_S (k = 1, 2); DATA at 0x4000 + 4i.
+// Every slot field is indexed by k.
 // Requests cross as records. On clk_sys a slot's request is offered while its mux is on this block (en_sys), the
 // core's request is raised and the slot's ack is low and has been for two cycles (so a request still raised then
 // is offered again, as hps_io shows it to an SPI host). A rise of offered sets the slot's new mark, a rejected
@@ -82,7 +83,9 @@
 // so FRAMES, TSTAMP_DONE and SUM move on the same clk_100m edge. Events that come while a word is in flight
 // coalesce into the next word: FRAMES adds them all, SUM shows the latest data frame's.
 // Bridge side has no reset and answers in fixed cycles (no back-pressure); a full FIFO drops the store and
-// counts it.
+// counts it. A BEGIN or WACK it refuses (or a held ABORT does) opens no frame: ACCEPT's closed bit reads 1 (as for a
+// withdrawn frame) and every DATA store is ignored until the next BEGIN or WACK; and its slot's CAUSE bit rises
+// again while its EN is set, its record shows it offered and no answer of that slot stands.
 // DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:16], DROPS, COUNTS, RINGS, TSTAMP_*, CYCLES, SUM and TEST:
 // they read 0 and CTRL.TEST/CLR are ignored. Every other register stays.
 
@@ -273,7 +276,9 @@ wire  [2:0] reopen = rc_sel & {3{rc_rej}} & latest & ~bent;
 wire  [2:0] unans  = (rc_sel & {3{rc_new | ~rc_off}}) | reopen;
 // a withdrawn frame's request is open again, unless the store that withdrew it answers that slot
 wire  [2:0] wraise = wks & {3{wdr}} & {xen_lwx, en_lwx} & {rq_xoff, rq_off0} & ~bent;
-wire  [2:0] raise  = (rc_sel & {3{rc_off}} & ({3{rc_new}} | reopen)) | wraise;
+// so is the request of a BEGIN or WACK refused by a full FIFO or a held ABORT, unless an answer of its slot stands
+wire  [2:0] fraise = {b_x1, b_x0, b_p} & {3{~p_ok}} & {xen_lwx, en_lwx} & {rq_xoff, rq_off0} & ~ans;
+wire  [2:0] raise  = (rc_sel & {3{rc_off}} & ({3{rc_new}} | reopen)) | wraise | fraise;
 wire        fire   = |raise;
 wire        w_en  = wdata[0] & wired[0];                                     // the EN bits a store sets
 wire  [1:0] w_xen = wdata[2:1] & wired[2:1];
@@ -400,7 +405,7 @@ always @(*) begin
 		7'h02: rdata = {21'd0, 1'b0, test_lwx, 1'b0, 5'd0, xen_lwx, en_lwx};   // CTRL
 		7'h03: rdata = {DIAG ? frames : 16'd0, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
 		                st_s[2:0]};                        // STATUS
-		7'h04: rdata = {ok, 3'd0, fdrops, 3'd0, exp_w};    // ACCEPT
+		7'h04: rdata = {ok, bfail, 2'd0, fdrops, 3'd0, exp_w};   // ACCEPT: {ok, closed, 0, drops, 0, next_index}
 		7'h05: rdata = 32'h33434553;     // "SEC3"
 		7'h06: rdata = DIAG ? {8'd0, hw, drops} : 32'd0;
 		7'h07: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;

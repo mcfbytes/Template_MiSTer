@@ -4975,6 +4975,29 @@ task sec_rec_cases;
 		check_buf("the 512 words, then zeros: the held ABORT aborted the frame", 32'h00005900, 512);
 		rd("REQ idle", SEC + S_REQ, 32'd0);
 
+		$display("-- T-SEC7: a BEGIN_S refused behind a held ABORT opens no frame: ACCEPT shows it closed, its DATA is ignored, the slot's cause rises; stored again, it serves the request");
+		n0 = cd_frames; a0 = sv1.acks;
+		cd_request(32'h00005980); settle;
+		sv1.go(0, 7'h5A); settle; cause_drain(SEC);
+		sec_wr(S_BEGIN0, 32'h00005980); settle;
+		sys_run = 0;
+		frame_data(32'h00005980, 0, 520);                       // 512 taken, the FIFO full
+		sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2 | C_ABORT);         // held
+		sec_wr(S_BEGIN1, 32'h0000005A);                          // refused: the ABORT is held
+		rd("refused BEGIN_S: ACCEPT closed, one refused, nothing open", SEC + S_ACCEPT, 32'h40010000);
+		rd("refused BEGIN_S: slot 1's cause rises again", SEC + S_CAUSE, 32'h00000002);
+		rdm("refused BEGIN_S: RSTAT_S[1] offered, not answered", SEC + S_RSTAT1, 32'hC0000000, 32'h80000000);
+		sv_store(32'h0000005A, 0, 8);
+		rd("refused BEGIN_S: its DATA ignored, uncounted", SEC + S_ACCEPT, 32'h40010000);
+		sys_run = 1;
+		wait_frame(n0);
+		check_buf("refused BEGIN_S: the primary aborted by the held ABORT", 32'h00005980, 512);
+		check("refused BEGIN_S: nothing reached slot 1", sv1.acks - a0, 0);
+		cause_drain(SEC);
+		sv1_serve("refused BEGIN_S, stored again", 32'h0000005A);
+		rd("refused BEGIN_S, stored again: ACCEPT ok", SEC + S_ACCEPT, 32'h80000100);
+		rd("REQ idle", SEC + S_REQ, 32'd0);
+
 		$display("-- T-SEC7: EN cleared mid-frame with DATA outstanding zero-fills the primary's frame");
 		n0 = cd_frames;
 		cd_request(32'h00005A00); settle; cause_drain(SEC);
