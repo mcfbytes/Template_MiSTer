@@ -8,7 +8,8 @@
 #      neither, the f2h_irq lines, the LW nets arm E checks, in every configuration arm E builds; and the
 #      crossing structure: every crossing built from the cells of sys/lw_cdc.sv, every source register named;
 #      and the directory's lines: each entry's LINE word one ordinal of its own, picking that entry's line;
-#      and sys/lw_bridge.sdc: both ends on every bound, every pattern matched, every crossing source covered
+#      and sys/lw_bridge.sdc: both ends on every bound, every pattern matched, every crossing source covered;
+#      and the wording of the LW files, tb/ and docs/LW_BRIDGE.md (the guide also in the host interface's terms)
 #   E  sys_top.v elaborated (tb/top_tb.sv, against the stand-ins of tb/sys_stubs.sv) in every configuration of
 #      "tb/static.sh --configs": off and each of the 32 LW tier sets, each with no upstream macro,
 #      MISTER_DEBUG_NOHDMI and MISTER_DUAL_SDRAM (99). Fails if it does not elaborate, if an LW run warns of an

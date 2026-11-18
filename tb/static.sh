@@ -48,9 +48,12 @@
 #      lines is line_q alone, line_q is assigned once, on posedge clk, as {3{en_q}} & line_d, and held is
 #      en_q alone, a register assigned only on posedge clk.
 # Then, once, the wording:
-#   9. No line of an LW-only file, of a file under tb/, or of the LW text of a stock file (a branch that a MISTER_LW*
-#      or LW_* macro opens) names a device of the reference core the framework was cut from (the words are listed
-#      in the check, in pieces): the framework's names are its own ("slot", "save slot", "image").
+#   9. No line of an LW-only file, of a file under tb/, of the LW text of a stock file (a branch that a MISTER_LW*
+#      or LW_* macro opens) or of docs/LW_BRIDGE.md names a device of the reference core the framework was cut from
+#      (the words are listed in the check, in pieces): the framework's names are its own ("slot", "save slot",
+#      "image"). And the guide, docs/LW_BRIDGE.md, names no register, verb or field the host interface no longer
+#      has (a lease and its TTL, timebase, renew, release, claim, owner and epoch), no planning label (a finding,
+#      rule or step id, a section sign) and no IPv4 address.
 # Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
 #  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
 #      get_keepers name pattern (the Gray loop's expanded per bus) matches a register of an LW module, as a
@@ -882,7 +885,7 @@ check(pm is not None and
 print('directory lines: %s' % ', '.join('%s ordinal %d' % (b, ORDS[b]) for b in sorted(ORDS) if ORDS[b]))
 
 # ---- The wording: no word of the reference core's own devices in the framework's text ----
-print('-- wording: no reference-core device word in the LW files, the LW text of the stock files, or tb/')
+print('-- wording: no reference-core device word in the LW files, the LW text of the stock files, tb/ or the guide; the guide in its own terms')
 # (spelled in pieces, so this file passes its own check)
 RCW = re.compile(r'(?i)mem' + r'ca' + r'rd|(?<![a-z])c' + r'ard|ps' + r'x|play' + r'station')
 def lw_lines(path):
@@ -903,11 +906,22 @@ def lw_lines(path):
 wfiles = [(p, None) for p in lwfiles + [SDC] * os.path.exists(SDC)] + [(p, 'lw') for p in stock + ['sys/emu_ports.vh']]
 wfiles += [(d + '/' + x, None) for d in ('tb', 'tb/hps') if os.path.isdir(d)
            for x in sorted(os.listdir(d)) if re.search(r'\.(s?v|sh|c|h)$', x)]
+GUIDE = 'docs/LW_BRIDGE.md'
+wfiles += [(GUIDE, None)]
 for p, how in wfiles:
     txt = lw_lines(p) if how else list(enumerate(open(p, errors='replace').read().split('\n'), 1))
     bad = [(n, l) for n, l in txt if RCW.search(l)]
     for n, l in bad[:8]: print('     %s:%d: %s' % (p, n, l.strip()[:100]))
     check(not bad, '%s: %d lines with a reference-core device word' % (p, len(bad)))
+# the guide: no retired term of the host interface, no planning label, no address
+GRET = re.compile(r'(?i:\blease|\bepoch\b|\bowner\b|\btimebase\b)|\b(?:TTL|RENEW|RELEASE|CLAIM)\b')
+GLAB = re.compile(r'\b(?:F|D|O|Q|R[0-3]?|[CH]-W|T-[A-Z]+)-?\d{1,2}\b|\u00a7')
+GIP = re.compile(r'(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])')
+gtxt = list(enumerate(open(GUIDE, encoding='utf-8', errors='replace').read().split('\n'), 1))
+for rx, what in ((GRET, 'a retired term of the host interface'), (GLAB, 'a planning label'), (GIP, 'an IPv4 address')):
+    bad = [(n, l) for n, l in gtxt if rx.search(l)]
+    for n, l in bad[:8]: print('     %s:%d: %s' % (GUIDE, n, l.strip()[:100]))
+    check(not bad, '%s: %d lines with %s' % (GUIDE, len(bad), what))
 
 # ---- The constraints: every bound names both ends, every pattern matches, every source is covered ----
 print('-- lw_bridge.sdc: -from and -to on every bound, every name pattern matched, every lw_sync source covered')
