@@ -33,7 +33,8 @@
 #      each declared with a preserve attribute (in lw_cdc.sv, also a cell's own toggles, and lw_arst's chain,
 #      whose rise is asynchronous, into its own clock); every register so named feeds one. An lw_xfer's s_go and s_d are on its s_clk.
 #      An lw_fence's hen, take, drain and fin are on its clk and its rest on its clk_sys.
-#   6. Every *_lwgray register is one of the Gray buses and is assigned once, unconditionally, as g <= b ^ (b >> 1).
+#   6. Every *_lwgray register is one of the Gray buses, the list sys/lw_bridge.sdc's set_max_skew loop walks, and
+#      is assigned once, unconditionally, as g <= b ^ (b >> 1); every bus on that list has its *_lwgray register.
 #   7. No clocked block outside the cells reads, directly or through nets, a register or an input on another
 #      clock (input and inout clocks from PORTDOM) other than through a cell's output, beside the listed reads
 #      (XREAD_ALLOW) and the presence bits' nets (PRESENCE, each a constant select of its port), each of which must
@@ -50,12 +51,19 @@
 #   9. No line of an LW-only file, of a file under tb/, or of the LW text of a stock file (a branch that a MISTER_LW*
 #      or LW_* macro opens) names a device of the reference core the framework was cut from (the words are listed
 #      in the check, in pieces): the framework's names are its own ("slot", "save slot", "image").
+# Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
+#  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
+#      get_keepers name pattern (the Gray loop's expanded per bus) matches a register of an LW module, as a
+#      keeper name <hierarchy>|<register>; the collection lw_x is exactly the registers that feed an lw_sync, and
+#      lw_s0, lw_a, lw_q and lw_src exactly the cells' first stages, asynchronous chain, bundle captures and
+#      hold registers. It prints the source bits into first stages and the bundle bits, per block at its
+#      default parameters (one instance each, every generate branch), for the post-fit pair count to compare.
 # Needs Icarus Verilog (for its preprocessor) and python3.
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}/static; mkdir -p "$O" || exit 2
 command -v iverilog >/dev/null 2>&1 || { echo "FAILED: no iverilog on PATH"; exit 1; }
 exec python3 -I - "$O" "$@" <<'EOF'
-import os, re, subprocess, sys
+import fnmatch, os, re, subprocess, sys
 O, args = sys.argv[1], sys.argv[2:]
 
 # off, then each of the 32 tier sets (the floor MISTER_LW alone first, every tier last)
@@ -371,7 +379,11 @@ CELLSYNC = {'lws0_q', 'lws1_q', 'lwa0_q', 'lwa1_q'}
 SYNATTR = 'SYNCHRONIZER_IDENTIFICATION'
 # The stock files' LW text holds no synchroniser: the list is empty
 SYNC_ALLOW = {}
-GRAYBUS = ['sector_w', 'sector_r', 'lane_w', 'lane_r', 'lane_rw', 'lane_rr', 'osd_w', 'osd_r']
+SDC = 'sys/lw_bridge.sdc'
+SDCTXT = open(SDC).read() if os.path.exists(SDC) else ''
+# the Gray buses: the list the SDC's set_max_skew loop walks
+_gl = re.findall(r'^\s*foreach g \[list ([\w ]+)\] \{$', SDCTXT, re.M)
+GRAYBUS = _gl[0].split() if len(_gl) == 1 else []
 # Reads across clocks outside the cells, as (module, register, source); each must still be there. None is left.
 XREAD_ALLOW = set()
 # The input and inout ports on a block's second clock. Every other one is on the block's port clk, or on the one clock
@@ -755,14 +767,18 @@ for n, M in sorted(mods.items()):
 for n, M in sorted(mods.items()):
     for r in sorted(x for x in M['regs'] if x.endswith('_lwgray')):
         bus = r[:-len('_lwgray')]
-        check(bus in GRAYBUS, '%s: %s is not one of the Gray buses %s' %
-              (n, r, ' '.join(GRAYBUS)))
+        check(bus in GRAYBUS, '%s: %s is not one of the Gray buses %s lists: %s' %
+              (n, r, SDC, ' '.join(GRAYBUS)))
         asg = [(clk, rhs, unc) for clk, out in M['blocks'] for lhs, rhs, _, unc in out if lhs_names(lhs)[0] == [r]]
         asg += [(None, [], False)] * (r in M['comb'])
         ok = len(asg) == 1 and asg[0][2] and len(asg[0][1]) == 7 and IDENT.match(asg[0][1][0]) and \
              asg[0][1][1:] == ['^', '(', asg[0][1][0], '>>', '1', ')']
         check(ok, '%s: %s is not assigned once, unconditionally, as g <= b ^ (b >> 1): %s' %
               (n, r, ' / '.join(' '.join(a[1]) for a in asg) or 'never'))
+check(GRAYBUS, '%s: no Gray-bus list (one line foreach g [list ...] {)' % SDC)
+for bus in GRAYBUS:
+    check(any(bus + '_lwgray' in M['regs'] for M in mods.values()),
+          '%s: the Gray bus %s has no %s_lwgray register' % (SDC, bus, bus))
 # every read across clocks goes through a cell: a clocked block reads nothing of another clock but a cell's output
 seen_allow = set()
 for n, M in sorted(mods.items()):
@@ -884,13 +900,98 @@ def lw_lines(path):
             continue
         if any(b for b, _ in stack): out.append((n, l))
     return out
-wfiles = [(p, None) for p in lwfiles] + [(p, 'lw') for p in stock + ['sys/emu_ports.vh']]
+wfiles = [(p, None) for p in lwfiles + [SDC] * os.path.exists(SDC)] + [(p, 'lw') for p in stock + ['sys/emu_ports.vh']]
 wfiles += [('tb/' + x, None) for x in sorted(os.listdir('tb')) if re.search(r'\.(s?v|sh|c|h)$', x)]
 for p, how in wfiles:
     txt = lw_lines(p) if how else list(enumerate(open(p, errors='replace').read().split('\n'), 1))
     bad = [(n, l) for n, l in txt if RCW.search(l)]
     for n, l in bad[:8]: print('     %s:%d: %s' % (p, n, l.strip()[:100]))
     check(not bad, '%s: %d lines with a reference-core device word' % (p, len(bad)))
+
+# ---- The constraints: every bound names both ends, every pattern matches, every source is covered ----
+print('-- lw_bridge.sdc: -from and -to on every bound, every name pattern matched, every lw_sync source covered')
+sdcl = [l.strip() for l in SDCTXT.split('\n') if l.strip() and not l.strip().startswith('#')]
+check(sdcl, '%s: no such file, or no command in it' % SDC)
+# the collections: name -> patterns; the Gray loop's query is expanded per bus
+COLL, pats = {}, []
+for l in sdcl:
+    for v, q, a in re.findall(r'\bset (\w+) +\[get_keepers -nowarn (\{([^{}]*)\}|"[^"]*")\]', l):
+        ps = a.split() if a else [q[1:-1].replace('${g}', b) for b in GRAYBUS]
+        COLL.setdefault(v, []).extend(ps); pats += ps
+    n = len(re.findall(r'\bget_(?:keepers|registers|pins|nets|cells)\b', l))
+    check(n == len(re.findall(r'\bset \w+ +\[get_keepers -nowarn (?:\{[^{}]*\}|"[^"]*")\]', l)),
+          '%s: a query this check cannot read: %s' % (SDC, l))
+nbound = 0
+for l in sdcl:
+    for cmd in ('set_net_delay', 'set_max_skew'):
+        if re.search(r'\b%s\b' % cmd, l):
+            nbound += 1
+            fr, to = re.search(r' -from \$(\w+)\b', l), re.search(r' -to \$(\w+)\b', l)
+            check(fr is not None and to is not None, '%s: %s without both -from and -to: %s' % (SDC, cmd, l))
+            for m in (fr, to):
+                if m:
+                    check(m.group(1) in COLL, '%s: %s names $%s, which no get_keepers builds' % (SDC, cmd, m.group(1)))
+# every register of every LW module as a keeper name; a pattern's * matches across the hierarchy bars too
+KEEP = {('%s|%s:inst|%s' % ('sys_top', n, r)): (n, r) for n, M in mods.items() for r in M['regs']}
+def matched(ps):
+    return {KEEP[k] for k in KEEP for p_ in ps if fnmatch.fnmatchcase(k, p_)}
+for p_ in pats:
+    check(matched([p_]), '%s: the pattern %s matches no register of an LW module' % (SDC, p_))
+CELLS = {'lw_s0': {('lw_sync', 'lws0_q')}, 'lw_a': {('lw_arst', 'lwa0_q'), ('lw_arst', 'lwa1_q')},
+         'lw_q': {('lw_qstat', 'lwq_d')}, 'lw_src': {('lw_xfer', 'lwsrc_d')}, 'lw_x': fed}
+for v, want in sorted(CELLS.items()):
+    got = matched(COLL.get(v, []))
+    check(got == want, '%s: $%s also matches [%s] and misses [%s]' % (SDC, v,
+          ' '.join(sorted('%s.%s' % x for x in got - want)), ' '.join(sorted('%s.%s' % x for x in want - got))))
+# the bits, for the post-fit pair count: per block at its default parameters, every generate branch, one each
+LIT = re.compile(r"(\d*)\s*'\s*[sS]?([bodhBODH])\s*([\w?]+)$")
+def veval(ts, env):
+    out = []
+    for t in ts:
+        m = LIT.match(t)
+        if m: out.append(str(int(m.group(3).replace('_', ''), {'b': 2, 'o': 8, 'd': 10, 'h': 16}[m.group(2).lower()])))
+        elif IDENT.match(t): out.append(str(env[t]))
+        elif re.match(r'\d+$', t) or t in ('+', '-', '*', '<<', '>>', '(', ')'): out.append(t)
+        else: raise ValueError(t)
+    return eval(' '.join(out), {'__builtins__': {}})
+def defaults(path, name):
+    t, env = toks2(pp(path, LWALL)), {}
+    b = t.index('module', next(i for i in range(len(t)) if t[i] == 'module' and t[i + 1] == name))
+    t = t[b:t.index('endmodule', b)]
+    for i, k in enumerate(t):
+        if k in ('parameter', 'localparam'):
+            j = i + 1
+            while t[j] in ('signed', 'integer') or t[j] == '[':
+                j = skip_group(t, j) if t[j] == '[' else j + 1
+            if t[j + 1] != '=': continue
+            e, d = j + 2, 0
+            while d or t[e] not in (',', ';', ')'):
+                d += t[e] in OPENER; d -= t[e] in (')', ']', '}'); e += 1
+            try: env[t[j]] = veval(t[j + 2:e], env)
+            except (ValueError, KeyError, SyntaxError): pass
+    return env
+CELLMOD = {'lw_sync', 'lw_xfer', 'lw_fence', 'lw_arst', 'lw_qstat'}
+def bits(n, env):
+    sb = qb = 0
+    for mod, inst, par, con in mods[n]['insts']:
+        if mod not in CELLMOD: continue
+        ce = defaults(mods[mod]['file'], mod)
+        ce.update({k: veval(v, env) for k, v in par.items()})
+        if mod == 'lw_sync': sb += ce['W']
+        elif mod == 'lw_qstat': qb += ce['W']
+        else:
+            a, b = bits(mod, ce); sb += a; qb += b
+    return sb, qb
+per, tot = [], [0, 0]
+for n in sorted(mods):
+    if n in CELLMOD: continue
+    try: a, b = bits(n, defaults(mods[n]['file'], n))
+    except (ValueError, KeyError, SyntaxError) as e:
+        check(False, '%s: cannot count its crossing bits at its defaults (%s)' % (n, e)); continue
+    if a or b:
+        per.append('%s %d+%d' % (n, a, b)); tot[0] += a; tot[1] += b
+print('constraints: %d bounds; %d source bits into first stages and %d bundle bits, one instance of each block at '
+      'its defaults (%s)' % (nbound, tot[0], tot[1], ', '.join(per)))
 
 print('%s: %d checks, %d failures' % ('FAILED' if fails else 'PASSED', checks, fails))
 sys.exit(1 if fails else 0)
