@@ -35,8 +35,9 @@
 #      An lw_fence's hen, take, drain and fin are on its clk and its rest on its clk_sys.
 #   6. Every *_lwgray register is one of the Gray buses and is assigned once, unconditionally, as g <= b ^ (b >> 1).
 #   7. No clocked block outside the cells reads, directly or through nets, a register or an input on another
-#      clock (input clocks from PORTDOM) other than through a cell's output, beside the listed reads
-#      (XREAD_ALLOW), each of which must still exist; and no register is assigned on two clocks.
+#      clock (input and inout clocks from PORTDOM) other than through a cell's output, beside the listed reads
+#      (XREAD_ALLOW) and the presence bits' nets (PRESENCE, each a constant select of its port), each of which must
+#      still exist; and no register is assigned on two clocks.
 # Then, once, the directory's lines, in sys/lw_sys_window.sv with every tier:
 #   8. Every entry is one ent() call whose kind and LINE word are the localparams <B>_KIND and <B>_LINE of one
 #      block B, each localparam in one call. The LINE words name each non-zero ordinal once, a framework kind's
@@ -373,12 +374,17 @@ GRAY_ALLOW = {'stflg'}     # the status flag's Gray code, until the status snaps
 # records; the status snapshot, a quasi-static capture until it crosses whole. Each must still be there.
 XREAD_ALLOW = {('lw_sector', 'lba', 'c_lba'), ('lw_sector', 'xlba', 'x_lba'),
                ('lw_evt', 'snap', 'status_req')}
-# The input ports on a block's second clock. Every other input is on the block's port clk, or on the one clock
+# The input and inout ports on a block's second clock. Every other one is on the block's port clk, or on the one clock
 # of a block that has no clk port.
 PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack x_rd x_wr x_lba x_hps_ack'),
            'lw_evt': ('clk_sys', 'stflg status_req'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
-           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout')}
+           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout hps_lw')}
+# The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
+# piece leaves it to the pull-down. Only these nets, each assigned exactly this select, are exempt; every other bit
+# of hps_lw is on clk_sys and crosses through a cell.
+PRESENCE = {'lw_sys_window': {'pres_pad': 'hps_lw [ 375 ]', 'pres_evt': 'hps_lw [ 376 ]',
+                              'pres_sec': 'hps_lw [ 379 : 377 ]'}}
 
 TOK2 = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|[A-Za-z_$][\w$]*|\d+\s*\'\s*[sS]?[bodhBODH]\s*[\w?]+|'
                   r'\d[\w\'.]*|\'[sS]?[bodhBODH]\w*|===|!==|<<<|>>>|<=|>=|==|!=|<<|>>|&&|\|\||\S', re.S)
@@ -504,8 +510,8 @@ def parse_module(t):
     name, i = t[1], 2
     if t[i] == '#': i = skip_group(t, i + 1)
     pe = skip_group(t, i)
-    M = {'name': name, 'ports': {}, 'regs': {}, 'mems': set(), 'consts': set(), 'comb': {}, 'blocks': [],
-         'insts': []}
+    M = {'name': name, 'ports': {}, 'regs': {}, 'mems': set(), 'consts': set(), 'comb': {}, 'combrhs': {},
+         'blocks': [], 'insts': []}
     for part in split_top(t[i + 1:pe - 1]):
         if part:
             if part[0] in ('input', 'output', 'inout'): last = part[0]
@@ -544,6 +550,7 @@ def parse_module(t):
                 if len(part) > 1 and part[1] == '[': M['mems'].add(nm)
                 elif k == 'wire' and '=' in part:
                     M['comb'][nm] = idents(part[part.index('=') + 1:])
+                    M['combrhs'][nm] = ' '.join(part[part.index('=') + 1:])
                 if k in ('reg', 'logic', 'integer'):
                     M['regs'][nm] = {'attr': attr, 'kind': k}
                 elif k == 'wire' and nm not in M['comb']:
@@ -625,13 +632,15 @@ def domains(M):
     clocks = {c for c, _ in M['blocks']}
     deflt = 'clk' if 'clk' in M['ports'] else (sorted(clocks)[0] if len(clocks) == 1 else None)
     second = PORTDOM.get(M['name'], (None, ''))
-    port = {p: (second[0] if p in second[1].split() else deflt) for p, d in M['ports'].items() if d == 'input'}
+    port = {p: (second[0] if p in second[1].split() else deflt) for p, d in M['ports'].items()
+            if d in ('input', 'inout')}
     return reg, cell, port
 
 def sources(M, reg, cell, port, n, seen=None):
     """(leaf, clock) pairs a read of n reaches through the module's nets; leaves of no known clock are left out."""
     seen = set() if seen is None else seen
     if n in seen or n in M['consts'] or n in M['mems']: return set()
+    if PRESENCE.get(M['name'], {}).get(n, 0) == M['combrhs'].get(n) and len(M['comb'][n]) == 1: return set()
     seen.add(n)
     if n in reg: return {(n, c) for c in reg[n]}
     if n in cell: return {(n, cell[n])}
@@ -774,6 +783,10 @@ for n, M in sorted(mods.items()):
         check(False, '%s: %s on %s reads %s on %s with no cell between' % (n_, t, clk, s, c))
 for a in sorted(XREAD_ALLOW - seen_allow):
     check(False, '%s: the listed read of %s by %s is gone; take it off the list' % (a[0], a[2], a[1]))
+for n, nets in sorted(PRESENCE.items()):
+    for net, sel in sorted(nets.items()):
+        got = mods[n]['combrhs'].get(net) if n in mods and len(mods[n]['comb'].get(net, [])) == 1 else None
+        check(got == sel, '%s: the presence net %s is %s, not %s' % (n, net, got or 'gone', sel))
 print('crossing structure: %d lw_sync instances, %d source registers, %d enable links, %d listed reads across '
       'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
 check(nfence == 2, 'enable links: %d lw_fence instances, not one each in lw_sector and lw_lane' % nfence)

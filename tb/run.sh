@@ -12,7 +12,7 @@
 #      implicit net or a port width that the off run of the same upstream variant does not, or if a check of
 #      top_tb fails (an LW net that reads z, an HPS_BUS bit driven other than as the bit map says, among them)
 #   Z  MISTER_LW alone (the floor): no block listed, the enable and the firewall whole
-#   1  LW_DIAG=1 (debug build: diagnostics compiled in), every tier
+#   1  LW_DIAG=1 (debug build: diagnostics compiled in), every tier but the lane
 #   0  LW_DIAG=0 (shipping build), every tier but the lane
 #   M  LW_DIAG=0 with MENU_CORE (the osd header-row gate only)
 #   F  LW_DIAG=0 with the floor, PAD and EVT (the Template's own configuration): no SECTOR files, no muxes, no OSD
