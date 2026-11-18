@@ -17,7 +17,9 @@
 #      no LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
 #      SYSTEMVERILOG_FILE lines for LW-only files and one SDC_FILE line for lw_bridge.sdc, right after
-#      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's.
+#      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's, and its
+#      bytes are: every upstream line kept byte for byte and in order, the lines added only comment or blank
+#      lines, and every line ending as upstream's lines end (CRLF), so a later upstream change merges.
 #   5. sys/lw_bridge.sdc is inert in a build without MISTER_LW: its one command outside a guard collects the
 #      first synchroniser stages (lws0_*, which only sys/lw_cdc.sv declares, and check 2 empties without
 #      MISTER_LW), and every other command sits inside "if {[get_collection_size $lw_s0] > 0} {", which the file
@@ -46,7 +48,7 @@ if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ] || [ ! -f "$UP/Template.sv
 fi
 command -v iverilog >/dev/null 2>&1 || { echo "FAILED: no iverilog on PATH"; exit 1; }
 exec python3 -I - "$UP" "$O" <<'EOF'
-import os, re, subprocess, sys
+import difflib, os, re, subprocess, sys
 UP, O = sys.argv[1], sys.argv[2]
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
@@ -241,7 +243,19 @@ check(re.search(r'lws0_', open('sys/lw_cdc.sv').read()) is not None and
               for x in os.listdir('sys') if x != 'lw_cdc.sv' and re.search(r'\.(s?v|vh?|vhd)$', x)),
       'sys/lw_bridge.sdc\'s guard: lws0_ is named outside sys/lw_cdc.sv, or not in it')
 asg = lambda p: [l for l in open(p).read().splitlines() if l.strip() and not l.lstrip().startswith('#')]
+print('-- Template.qsf: upstream\'s assignments, its lines byte for byte and its line ends; only comment lines added')
 check(asg('Template.qsf') == asg(os.path.join(UP, 'Template.qsf')), 'Template.qsf: an assignment differs from upstream')
+qm = open('Template.qsf', 'rb').read().splitlines(keepends=True)
+qu = open(os.path.join(UP, 'Template.qsf'), 'rb').read().splitlines(keepends=True)
+ops = difflib.SequenceMatcher(None, qu, qm, autojunk=False).get_opcodes()
+lost = sum(i2 - i1 for t, i1, i2, _, _ in ops if t in ('replace', 'delete'))
+check(not lost, 'Template.qsf: %d of upstream\'s lines not kept byte for byte, in order' % lost)
+added = [qm[j] for t, _, _, j1, j2 in ops if t == 'insert' for j in range(j1, j2)]
+check(all(l.lstrip().startswith(b'#') or not l.strip() for l in added),
+      'Template.qsf: an added line that is not a comment or blank: %s' %
+      next((l.strip() for l in added if not (l.lstrip().startswith(b'#') or not l.strip())), b'').decode(errors='replace'))
+eol = lambda ls: sorted({l[len(l.rstrip(b'\r\n')):] for l in ls})
+check(eol(qm) == eol(qu), 'Template.qsf: lines end in %s, upstream\'s in %s' % (eol(qm), eol(qu)))
 
 print('-- Template.sv is upstream\'s token stream without MISTER_LW; its CONF_STR value with and without it')
 open(os.path.join(O, 'build_id.v'), 'w').write('`define BUILD_DATE "000000"\n')
