@@ -231,9 +231,13 @@ end
 
 // MISTER_LW_LANE (with MISTER_LW): the link nets below come from lw_link (LW BRIDGE), the link's own or the
 // LW frame lane's while it plays a frame. Without it the link front is the stock one.
+// MISTER_LW_OSD (with MISTER_LW): each osd takes the LW OSDBUF stores as a second write source.
 `ifdef MISTER_LW
 `ifdef MISTER_LW_LANE
 `define LW_LANE_LINK
+`endif
+`ifdef MISTER_LW_OSD
+`define LW_OSD_PORTS
 `endif
 `endif
 
@@ -612,12 +616,14 @@ cyclonev_hps_interface_peripheral_uart uart
 // f2h_irq[7+k] = LW line ordinal k (GIC SPI 47+k), level-high: the entry whose LINE word is k (the LW directory).
 wire  [2:0] lw_lines;
 
+`ifdef LW_OSD_PORTS
 // OSDBUF stores from lw_sys_window to both osd shadows.
 wire        lw_osd_we;
 wire  [9:0] lw_osd_addr;
 wire [31:0] lw_osd_data;
 wire  [3:0] lw_osd_be;
 wire  [1:0] lw_osd_ctrl;
+`endif
 wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
 `else
 wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
@@ -1255,7 +1261,7 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
 		.de_out(hdmi_de_osd)
-`ifdef MISTER_LW
+`ifdef LW_OSD_PORTS
 		,
 		.clk_lw(clk_100m),
 		.lw_we(lw_osd_we),
@@ -1485,7 +1491,7 @@ osd vga_osd
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
 	.de_out(vga_de_osd)
-`ifdef MISTER_LW
+`ifdef LW_OSD_PORTS
 	,
 	.clk_lw(clk_100m),
 	.lw_we(lw_osd_we),
@@ -1839,20 +1845,17 @@ wire [13:0] fb_stride;
 
 ////////////////////  LW BRIDGE  ///////////////////////////////////
 // MISTER_LW: lwhps2fpga (0xFF200000, 2 MB) answers every offset (0xDEADBEEF default); the `SYS_LW_CAPS
-// window holds the directory and the PAD, OSDBUF and SYS blocks, plus SECTOR when the core declares it
-// (MISTER_LW_SECTOR_SLOT) and the frame lane with MISTER_LW_LANE. Without MISTER_LW none of this is built.
-// Register map: docs/LW_BRIDGE.md.
+// window holds the directory, and each tier the core builds adds its block: PAD with MISTER_LW_PAD, EVT with
+// MISTER_LW_EVT, SECTOR when the core declares it (MISTER_LW_SECTOR_SLOT), the OSDBUF with MISTER_LW_OSD and
+// the frame lane with MISTER_LW_LANE. Without MISTER_LW none of this is built.
+// HPS_BUS[383:46] is one vector, lw_bus, whatever the tiers; lw_sys_window owns its bit map.
+// Register map and bit map: docs/LW_BRIDGE.md.
 `ifdef MISTER_LW
 wire [20:0] lw_raddr, lw_waddr;
 wire        lw_write;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
-wire [48:0] lw_pad;
-wire [34:0] lw_blk_up;
-wire [18:0] lw_blk_dn;
-wire [19:0] lw_card_up;
-wire [12:0] lw_card_dn;
-wire [131:0] lw_st_up;
+wire [383:46] lw_bus;
 wire        lw_wburst, lw_hrst, lw_idv;
 wire  [1:0] lw_freed;
 
@@ -1863,6 +1866,23 @@ lw_arst lw_idv_arst
 	.rst_n(gp_out[31]),
 	.q(lw_idv)
 );
+
+// The tiers the core builds (its .qsf macros).
+`ifdef MISTER_LW_PAD
+localparam        LW_PAD_EN    = 1;
+`else
+localparam        LW_PAD_EN    = 0;
+`endif
+`ifdef MISTER_LW_EVT
+localparam        LW_EVT_EN    = 1;
+`else
+localparam        LW_EVT_EN    = 0;
+`endif
+`ifdef LW_OSD_PORTS
+localparam        LW_OSD_EN    = 1;
+`else
+localparam        LW_OSD_EN    = 0;
+`endif
 
 // The core's SECTOR declaration (its .qsf macros); every one is optional.
 `ifdef MISTER_LW_SECTOR_SLOT
@@ -1952,6 +1972,7 @@ hps_lw_bridge hps_lw_bridge
 );
 
 lw_sys_window #(
+	.PAD_EN(LW_PAD_EN), .EVT_EN(LW_EVT_EN), .OSD_EN(LW_OSD_EN),
 	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .BLKSZ(LW_BLKSZ),
 	.MC_SLOT0(LW_MC_SLOT0), .MC_WSRC0(LW_MC_WSRC0), .MC_EXT0(LW_MC_EXT0),
 	.MC_SLOT1(LW_MC_SLOT1), .MC_WSRC1(LW_MC_WSRC1), .MC_EXT1(LW_MC_EXT1), .MC_FRAME(LW_MC_FRAME),
@@ -1972,17 +1993,20 @@ lw_sys_window #(
 	.held(lw_held),
 	.lines(lw_lines),
 	.clk_sys(clk_sys),
-	.lw_pad(lw_pad),
-	.blk_up(lw_blk_up),
-	.blk_dn(lw_blk_dn),
-	.card_up(lw_card_up),
-	.card_dn(lw_card_dn),
-	.st_up(lw_st_up),
+	.hps_lw(lw_bus),
+`ifdef LW_OSD_PORTS
 	.osd_we(lw_osd_we),
 	.osd_addr(lw_osd_addr),
 	.osd_data(lw_osd_data),
 	.osd_be(lw_osd_be),
 	.osd_ctrl(lw_osd_ctrl),
+`else
+	.osd_we(),
+	.osd_addr(),
+	.osd_data(),
+	.osd_be(),
+	.osd_ctrl(),
+`endif
 `ifdef LW_LANE_LINK
 	.lane_busy(|link_sel | ~gp_outr[31]),   // a select, or the ID view: no lane frame starts
 	.lane_wait(io_wait | vs_wait),
@@ -2006,6 +2030,9 @@ lw_sys_window #(
 `ifdef LW_LANE_LINK
 `undef LW_LANE_LINK
 `endif
+`ifdef LW_OSD_PORTS
+`undef LW_OSD_PORTS
+`endif
 `endif
 
 emu emu
@@ -2013,9 +2040,8 @@ emu emu
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
 `ifdef MISTER_LW
-	// HPS_BUS[313:46]: the LW window's clk_sys lines (bit map: docs/LW_BRIDGE.md)
-	.HPS_BUS({lw_st_up, lw_card_up[19:10], lw_card_dn[12:11], lw_card_up[9:0], lw_card_dn[10:9], lw_card_dn[8:0],
-				 lw_blk_up, lw_blk_dn, lw_pad, f1, HDMI_TX_VS, 
+	// HPS_BUS[383:46]: the LW window's clk_sys lines (lw_sys_window's hps_lw; bit map: docs/LW_BRIDGE.md)
+	.HPS_BUS({lw_bus, f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),

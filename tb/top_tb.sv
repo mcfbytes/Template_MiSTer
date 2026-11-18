@@ -18,17 +18,21 @@
 // Arm E of tb/run.sh: sys_top.v elaborated with the real LW files, hps_io, osd, sysmem and the Template's emu,
 // against tb/sys_stubs.sv, in one configuration of macros (tb/static.sh --configs). It checks the top level's
 // LW wiring by hierarchical reference:
-//   - every LW net and port tb/static.sh lists for this configuration (lw_e_nets.vh) is driven: no bit reads z,
-//     except the from-core SECTOR nets, which only a core's lw_blk_mux and lw_card_mux drive and the Template
-//     does not instantiate: those must read z in every bit, so nothing in sys/ drives a bit the core owns;
+//   - every LW net and port tb/static.sh lists for this configuration (lw_e_nets.vh) is driven: no bit reads z.
+//     HPS_BUS[383:46] (sys_top's lw_bus) has a weak pull-down here, as synthesis ties a net with no source low,
+//     and each of its bits is driven exactly when the bit map says: every to-core bit by lw_sys_window, the PAD
+//     and EVT exports and presence bits by hps_io when their tier is built, and nothing else, since the
+//     Template has no SECTOR mux and the bits a later piece owns have no driver yet;
+//   - presence: PAD and EVT are listed exactly when built (the Template passes the wide bus to hps_io), SECTOR
+//     never (no mux), OSDBUF and LANE when built, and COUNT agrees;
 //   - GPI: the ID view reads the core magic (bits 25, 24 and 22 clear); in the I/O view bit 25 is the firewall's
 //     present output, 1, bit 24 its idle register and bit 22 the window's enable register, in every clk_100m cycle
 //     of the run, each moving when its source is forced; without MISTER_LW bits 27:21 are clear;
 //   - an ENABLE stored through the bridge atom sets GPI[22]; GPO[31] low raises lw_idv, which clears it;
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
-//     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window;
+//     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window, each when its tier is built;
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
-//   - each osd instance that exists carries the window's OSDBUF store ports, on clk_100m;
+//   - with the OSD tier, each osd instance that exists carries the window's OSDBUF store ports, on clk_100m;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
 //     also through the lane's link front;
 //   - an LW read through the bridge atom returns the directory magic and the default word;
@@ -80,12 +84,12 @@ sys_top dut
 );
 
 `ifdef MISTER_LW
-localparam BUSW = 314;
+localparam BUSW = 384;
 `else
 localparam BUSW = 46;
 `endif
 
-integer checks = 0, fails = 0, nnets = 0, nports = 0, core_z = 0, stock_z = 0;
+integer checks = 0, fails = 0, nnets = 0, nports = 0, stock_z = 0;
 
 task check(input string what, input [255:0] got, input [255:0] exp);
 	checks = checks + 1;
@@ -104,29 +108,22 @@ function integer zc(input [1023:0] v);
 	end
 endfunction
 
-// The from-core SECTOR nets: a core's muxes drive them; the Template has none.
-function core_side(input string n);
-	core_side = n == "lw_blk_up" || n == "lw_card_up";
-endfunction
-
 task lw_net(input string n, input integer z, input integer w);
 	begin
 		checks = checks + 1; nnets = nnets + 1;
-		if (core_side(n) ? z != w : z != 0) begin
+		if (z != 0) begin
 			fails = fails + 1;
-			if (core_side(n)) $display("FAIL net %s: %0d of %0d bits driven; only a core drives it", n, w - z, w);
-			else $display("FAIL net %s: %0d of %0d bits undriven", n, z, w);
+			$display("FAIL net %s: %0d of %0d bits undriven", n, z, w);
 		end
-		else if (core_side(n)) $display("pass net %s: %0d bits, none driven (core side)", n, w);
 		else $display("pass net %s: %0d bits", n, w);
 	end
 endtask
 
-// A port of HPS_BUS carries the core-side nets and the stock bits too: every other bit of it must be driven.
+// A port of HPS_BUS carries the stock bits too, some of which nothing drives: every other bit of it must be.
 task lw_port(input string p, input integer z, input integer w);
 	integer exp;
 	begin
-		exp = (p == "emu.HPS_BUS" || p == "emu.hps_io.HPS_BUS") ? core_z + stock_z : 0;
+		exp = (p == "emu.HPS_BUS" || p == "emu.hps_io.HPS_BUS") ? stock_z : 0;
 		checks = checks + 1; nports = nports + 1;
 		if (z != exp) begin
 			fails = fails + 1;
@@ -139,6 +136,56 @@ endtask
 task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 
 `ifdef MISTER_LW
+// HPS_BUS[383:46]: a net with no source reads 0, as synthesis ties it; a bit any piece drives overrides the pull.
+assign (weak0, weak1) dut.lw_bus = 338'd0;
+
+`ifdef MISTER_LW_PAD
+localparam TB_PAD = 1;
+`else
+localparam TB_PAD = 0;
+`endif
+`ifdef MISTER_LW_EVT
+localparam TB_EVT = 1;
+`else
+localparam TB_EVT = 0;
+`endif
+`ifdef MISTER_LW_OSD
+localparam TB_OSD = 1;
+`else
+localparam TB_OSD = 0;
+`endif
+`ifdef MISTER_LW_LANE
+localparam TB_LANE = 1;
+`else
+localparam TB_LANE = 0;
+`endif
+
+// The bits of HPS_BUS[383:46] some piece drives in this configuration (bit i - 46 of the mask is bus bit i): every
+// to-core bit [131:46]; with PAD hps_io's presence bit [375]; with EVT the status hold [371:240] and [376].
+function [383:46] bus_driven;
+	reg [383:0] m;
+	begin
+		m = 0;
+		m[131:46] = '1;
+		if (TB_PAD) m[375] = 1'b1;
+		if (TB_EVT) begin m[371:240] = '1; m[376] = 1'b1; end
+		bus_driven = m[383:46];
+	end
+endfunction
+
+// The bits of lw_bus that something drives: a bit whose strength reads weak follows the pull alone. Each bit is
+// probed by a constant index (a variable one reads the value without its strength).
+reg [383:46] bus_strong;
+event        bus_probe;
+genvar       gb;
+generate for (gb = 46; gb < 384; gb = gb + 1) begin : bw
+	always @(bus_probe) begin : p
+		string t;
+		t = $sformatf("%v", dut.lw_bus[gb]);
+		bus_strong[gb] = t.substr(0, 1) != "We";
+	end
+end endgenerate
+
 integer n_freed = 0;   // the firewall's read machine freed at a release
 always @(posedge clk_100m) if (dut.hps_lw_bridge.lw_freed === 2'b01) n_freed = n_freed + 1;
 
@@ -198,6 +245,7 @@ endtask
 `endif
 
 reg [31:0] d;
+reg [383:46] bus_w, bus_e;
 reg [48:0] pad;
 reg [131:0] st;
 reg  [2:0] ss;
@@ -217,11 +265,24 @@ initial begin
 
 	$display("-- the LW nets and ports of this configuration are driven");
 `ifdef MISTER_LW
-	core_z  = zc(dut.lw_blk_up) + zc(dut.lw_card_up);
 	stock_z = zc(dut.emu.HPS_BUS[45:0]);
 `endif
 `include "lw_e_nets.vh"
 	$display("%0d LW nets, %0d LW ports", nnets, nports);
+`ifdef MISTER_LW
+	$display("-- HPS_BUS[383:46]: each bit driven exactly as the bit map says for this tier set");
+	-> bus_probe; #0.01;
+	bus_w = bus_strong;
+	bus_e = bus_driven();
+	k = 0;
+	for (i = 46; i < 384; i = i + 1) if (bus_w[i] !== bus_e[i]) begin
+		if (k < 6) $display("   HPS_BUS[%0d]: %s, the map says %s", i, bus_w[i] ? "driven" : "undriven",
+		                    bus_e[i] ? "driven" : "undriven");
+		k = k + 1;
+	end
+	check("HPS_BUS[383:46] bits whose driver differs from the bit map", k, 0);
+	check("HPS_BUS[383:46] reads no x or z", ^dut.lw_bus === 1'bx, 1'b0);
+`endif
 
 	$display("-- GPI: the core magic in the ID view; the firewall's bits 25 and 24 and the free bits in the I/O view");
 	gp_out = 32'h0000_0000; #20;
@@ -257,20 +318,25 @@ initial begin
 `ifdef MISTER_LW
 	$display("-- HPS_BUS: each LW field reaches the other end");
 	for (k = 0; k < 2; k = k + 1) begin
+`ifdef MISTER_LW_PAD
 		pad = (k != 0) ? ~49'h0_A5C3_1E87_D2B4 : 49'h1_5A3C_E178_2D4B;
-		force dut.lw_sys_window.lw_pad = pad;
+		force dut.lw_sys_window.pad_q = pad;
 		sys_cycles(1);
 		check("PAD store at hps_io {we, op, idx, data}",
 		      {dut.emu.hps_io.lw_we, dut.emu.hps_io.lw_op, dut.emu.hps_io.lw_idx, dut.emu.hps_io.lw_dat}, pad);
-		release dut.lw_sys_window.lw_pad;
+		release dut.lw_sys_window.pad_q;
+`endif
+`ifdef MISTER_LW_EVT
 		st = {4'hA, 128'h0123_4567_89AB_CDEF_FEDC_BA98_7654_3210};
 		if (k != 0) st = ~st;
 		force dut.emu.hps_io.stflg = st[131:128];
 		force dut.emu.hps_io.status_req = st[127:0];
 		sys_cycles(1);
-		check("status hold at lw_sys_window.st_up", dut.lw_sys_window.st_up, st);
+		check("status hold at lw_evt {stflg, status_req}",
+		      {dut.lw_sys_window.evt.evt.stflg, dut.lw_sys_window.evt.evt.status_req}, st);
 		release dut.emu.hps_io.stflg;
 		release dut.emu.hps_io.status_req;
+`endif
 	end
 	sys_cycles(4);
 
@@ -289,7 +355,7 @@ initial begin
 	check("f2h_irq[63:2]", {dut.interrupts.irq & IRQ_LW}, 64'd0);
 `endif
 
-`ifdef MISTER_LW
+`ifdef MISTER_LW_OSD
 	$display("-- osd: each instance carries the OSDBUF store ports on clk_100m");
 	for (k = 0; k < 2; k = k + 1) begin
 		force dut.lw_sys_window.osd_we   = (k != 0) ? 1'b0 : 1'b1;
@@ -354,6 +420,16 @@ initial begin
 	$display("-- an LW read through the bridge atom");
 	lw_read(21'h40000, d); check("directory magic at 0x40000", d, 32'h5244574C);
 	lw_read(21'h00000, d); check("undecoded 0x00000", d, 32'hDEADBEEF);
+
+	$display("-- presence: the tiers built and wired are listed; SECTOR has no mux in the Template");
+	check("PAD listed: built, and hps_io's write arm present", dut.lw_sys_window.has_pad, TB_PAD);
+	check("EVT listed: built, and hps_io's exports present", dut.lw_sys_window.has_evt, TB_EVT);
+	check("SECTOR not listed: no slot's mux is present", dut.lw_sys_window.has_sec, 1'b0);
+	lw_read(21'h4000C, d);
+	check("COUNT: PAD, EVT, OSDBUF and LANE as built", d, TB_PAD + TB_EVT + TB_OSD + TB_LANE);
+	lw_read(21'h80000, d); check("the PAD block's first word", d, TB_PAD ? 32'd0 : 32'hDEADBEEF);
+	lw_read(21'h4301C, d); check("the EVT block's ID word", d, TB_EVT ? 32'h31535453 : 32'hDEADBEEF);
+	lw_read(21'h41000, d); check("the SECTOR block's first word", d, 32'hDEADBEEF);
 
 	$display("-- the host enable: GPI[22] is the window's enable register; GPO[31] low clears it");
 	check("no enable: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b0);

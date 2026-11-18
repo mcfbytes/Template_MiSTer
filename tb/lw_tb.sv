@@ -17,6 +17,11 @@
 
 // LW bridge framework testbench: hps_lw_bridge, lw_sys_window (directory, PAD, SECTOR, OSDBUF, SYS), hps_io's
 // LW write path and both osd shadows, driven through a stand-in for the HPS LW bridge atom (lw_stub_atom.sv).
+// The tier macros choose the blocks (MISTER_LW_PAD, _EVT, _SECTOR_SLOT, _LANE, _OSD): a case that needs a block
+// runs only where it is built, and the directory, the decode and the lines are checked against the set built.
+// HPS_BUS[383:46] is the window's one port with a weak pull-down, as synthesis ties a net with no source low.
+// LW_TB_TIER runs the short tier run (arm T, and arm B with a core side that leaves pieces out: LW_TB_BUS46, a
+// 46-bit bus at the core; LW_TB_NOMUX, no SECTOR mux; LW_TB_NOSAVE1, save slot 1's mux missing).
 // The reference configuration is a CD-style core: a 588-word primary frame on hps_io slot 1 and two 1 KB memory
 // cards on slots 2 and 3, each card image in DDR. Without MISTER_LW_SECTOR_SLOT the window has no SECTOR block and
 // the consumers meet hps_io directly (the Template's own configuration); the directory, the block's addresses and
@@ -176,15 +181,9 @@ wire [20:0] lw_raddr, lw_waddr;
 wire        lw_write, lw_wburst;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
-wire [48:0] lw_pad;
 wire  [2:0] lines;           // line ordinal k = lines[k-1]
 wire        doorbell = lines[0];   // ordinal 1: SECTOR's entry
 wire        sys_irq  = lines[1];   // ordinal 2: SYS's entry
-wire [131:0] st_up;
-wire [34:0] blk_up;
-wire [18:0] blk_dn;
-wire [19:0] card_up;
-wire [12:0] card_dn;
 wire        osd_we;
 wire  [9:0] osd_addr;
 wire [31:0] osd_data;
@@ -219,11 +218,46 @@ always @(posedge clk) begin
 	if (osd_we)    n_osdwe = n_osdwe + 1;
 end
 
-`ifdef MISTER_LW_SECTOR_SLOT
-localparam TB_SEC = 1;
+// The tiers built (_B), and listed: a built tier whose core-side piece is present.
+`ifdef MISTER_LW_PAD
+localparam TB_PADB = 1;
 `else
-localparam TB_SEC = 0;
+localparam TB_PADB = 0;
 `endif
+`ifdef MISTER_LW_EVT
+localparam TB_EVTB = 1;
+`else
+localparam TB_EVTB = 0;
+`endif
+`ifdef MISTER_LW_SECTOR_SLOT
+localparam TB_SECB = 1;
+`else
+localparam TB_SECB = 0;
+`endif
+`ifdef MISTER_LW_OSD
+localparam TB_OSD = 1;
+`else
+localparam TB_OSD = 0;
+`endif
+`ifdef LW_TB_BUS46
+localparam TB_BUS46 = 1;
+`else
+localparam TB_BUS46 = 0;
+`endif
+`ifdef LW_TB_NOMUX
+localparam TB_NOMUX = 1;
+`else
+localparam TB_NOMUX = 0;
+`endif
+`ifdef LW_TB_NOSAVE1
+localparam TB_NOSAVE1 = 1;
+`else
+localparam TB_NOSAVE1 = 0;
+`endif
+localparam TB_PAD = TB_PADB && !TB_BUS46;
+localparam TB_EVT = TB_EVTB && !TB_BUS46;
+localparam TB_SEC = TB_SECB && !TB_BUS46 && !TB_NOMUX;
+localparam TB_W1  = TB_SEC && !TB_NOSAVE1;    // save slot 1 wired
 `ifdef LW_TB_DEFGEOM
 localparam TB_FRAME = 128;
 `else
@@ -234,9 +268,26 @@ localparam TB_LANE = 1;
 `else
 localparam TB_LANE = 0;
 `endif
+localparam TB_COUNT = TB_PAD + TB_SEC + TB_OSD + TB_EVT + TB_LANE;
+
+// HPS_BUS as sys_top wires it: the window's hps_lw is [383:46]; the SPI side is driven by the tb (io_*). A bit no
+// piece drives reads 0 (the pull-down), as synthesis ties it.
+reg         io_enable = 0, io_strobe = 0;
+reg  [15:0] io_din = 0;
+wire [383:0] hps_bus;
+assign (weak0, weak1) hps_bus[383:46] = 338'd0;
+assign hps_bus[45:38] = 0;
+assign hps_bus[35:33] = {m_sel[1], m_sel[0], m_strobe};
+assign hps_bus[31:16] = m_din;
+// The to-core fields the cases watch, from the bus: the PAD store, the primary's and the save slots' lines.
+wire [48:0] lw_pad  = hps_bus[94:46];
+wire [18:0] blk_dn  = {hps_bus[95], hps_bus[96], hps_bus[97], hps_bus[113:98]};             // {en_sys, ack, wr, data}
+wire [12:0] card_dn = {hps_bus[131], hps_bus[130], hps_bus[129], hps_bus[128], hps_bus[122:114]};
+                                                                     // {ack1, en_sys1, ack0, en_sys0, addr[8:0]}
 
 lw_sys_window #(
-	.SEC_EN(TB_SEC), .SEC_SLOT(8'd1), .SEC_FRAME(TB_FRAME), .BLKSZ(3'd3),
+	.PAD_EN(TB_PADB), .EVT_EN(TB_EVTB), .OSD_EN(TB_OSD),
+	.SEC_EN(TB_SECB), .SEC_SLOT(8'd1), .SEC_FRAME(TB_FRAME), .BLKSZ(3'd3),
 	.MC_SLOT0(4'd2), .MC_WSRC0(32'h30100000), .MC_EXT0(32'h00020000),
 	.MC_SLOT1(4'd3), .MC_WSRC1(32'h30200000), .MC_EXT1(32'h00020000), .MC_FRAME(10'd256),
 	.LANE_EN(TB_LANE)
@@ -247,8 +298,7 @@ lw_sys_window #(
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be), .lw_wburst(lw_wburst),
 	.lw_hrst(lw_hrst), .lw_freed(lw_freed), .lw_idv(lw_idv), .held(lw_held),
 	.lines(lines),
-	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn), .card_up(card_up), .card_dn(card_dn),
-	.st_up(st_up),
+	.clk_sys(clk_sys), .hps_lw(hps_bus[383:46]),
 	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl),
 `ifdef MISTER_LW_LANE
 	.lane_busy(io_enable | io_fpga | io_osd | ~gpo31_s), .lane_wait(hps_bus[37] | vs_wait), .lane_dout(hps_bus[15:0]),
@@ -301,16 +351,20 @@ osd hdmi_osd
 (
 	.clk_sys(clk_sys), .io_osd(m_sel[2]), .io_strobe(m_strobe), .io_din(m_din),
 	.clk_video(clk_vid), .din(24'd0), .de_in(v_de), .vs_in(v_vs), .hs_in(v_hs),
-	.dout(ho_d), .de_out(ho_de), .vs_out(ho_vs), .hs_out(ho_hs),
-	.clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
+	.dout(ho_d), .de_out(ho_de), .vs_out(ho_vs), .hs_out(ho_hs)
+`ifdef MISTER_LW_OSD
+	, .clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
+`endif
 );
 
 osd vga_osd
 (
 	.clk_sys(clk_sys), .io_osd(m_sel[3]), .io_strobe(m_strobe), .io_din(m_din), .osd_status(osd_status),
 	.clk_video(clk_vid), .din(24'd0), .de_in(v_de), .vs_in(v_vs), .hs_in(v_hs),
-	.dout(vo_d), .de_out(vo_de), .vs_out(vo_vs), .hs_out(vo_hs),
-	.clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
+	.dout(vo_d), .de_out(vo_de), .vs_out(vo_vs), .hs_out(vo_hs)
+`ifdef MISTER_LW_OSD
+	, .clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
+`endif
 );
 
 osd_cap cap_h(.clk(clk_vid), .d(ho_d), .de(ho_de), .vs(ho_vs));
@@ -403,19 +457,6 @@ always @(posedge clk) begin
 	if (lw_write) begin fw_wa = lw_waddr; fw_wd = lw_wdata; end
 end
 
-// HPS_BUS as sys_top wires it: {st_up, card_up/dn, blk_up, blk_dn, lw_pad, ...}; the SPI side is driven by the tb (io_*)
-reg         io_enable = 0, io_strobe = 0;
-reg  [15:0] io_din = 0;
-wire [313:0] hps_bus;
-assign st_up = hps_bus[313:182];
-assign card_up = {hps_bus[181:172], hps_bus[169:160]};
-assign {hps_bus[171:170], hps_bus[159:158], hps_bus[157:149]} = {card_dn[12:11], card_dn[10:9], card_dn[8:0]};
-assign blk_up = hps_bus[148:114];
-assign hps_bus[113:95] = blk_dn;
-assign hps_bus[94:46] = lw_pad;
-assign hps_bus[45:38] = 0;
-assign hps_bus[35:33] = {m_sel[1], m_sel[0], m_strobe};
-assign hps_bus[31:16] = m_din;
 
 localparam CONF_STR = {"CORE;", `SYS_LW_CAPS "SS3E000000:400000;", "V,v1;"};
 
@@ -467,10 +508,19 @@ assign ebus[32] = 1'b0;
 assign ebus[15:0] = 16'd0;
 `endif
 
+// The core side's view of HPS_BUS: the whole bus, or with LW_TB_BUS46 a core whose emu port is still 46 bits, so
+// its bits above 45 go nowhere.
+`ifdef LW_TB_BUS46
+wire [383:46] core_hi;
+`define TB_CORE_BUS {core_hi, hps_bus[45:0]}
+`else
+`define TB_CORE_BUS hps_bus
+`endif
+
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
-	.HPS_BUS(hps_bus),
+	.HPS_BUS(`TB_CORE_BUS),
 `ifdef MISTER_LW_LANE
 	.ioctl_wait(ioctl_wait), .status(hst), .RTC(rtc), .TIMESTAMP(tstamp), .img_mounted(img_m), .img_readonly(img_ro),
 	.img_size(img_sz), .gamma_bus(gbus), .sdram_sz(sdsz), .uart_mode(umode), .uart_speed(uspeed), .EXT_BUS(ebus),
@@ -483,7 +533,8 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 	.sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .sd_buff_addr(sd_buff_addr)
 );
 
-// Two memory cards on hps_io slots 2 and 3, each behind an lw_card_mux when the SECTOR block is built.
+// Two memory cards on hps_io slots 2 and 3, each behind an lw_card_mux when the SECTOR block is built (no mux with
+// LW_TB_NOMUX; card 2's missing with LW_TB_NOSAVE1).
 wire        mc1_ack, mc1_write, mc2_ack, mc2_write;
 wire  [8:0] mc1_addr, mc2_addr;
 wire [15:0] mc1_din, mc2_din;
@@ -492,32 +543,43 @@ mc_model mc1(.clk(clk_sys), .reset(cd_reset), .ack(mc1_ack), .write(mc1_write), 
 mc_model mc2(.clk(clk_sys), .reset(cd_reset), .ack(mc2_ack), .write(mc2_write), .addr(mc2_addr), .din(mc2_din),
              .haddr(sd_buff_addr));
 `ifdef MISTER_LW_SECTOR_SLOT
+`ifndef LW_TB_NOMUX
+`define TB_MUX
+`endif
+`endif
+`ifdef TB_MUX
 lw_card_mux #(.CARD(0)) mc1_lw
 (
-	.HPS_BUS(hps_bus),
+	.HPS_BUS(`TB_CORE_BUS),
 	.core_rd(mc1.rd), .core_wr(mc1.wr), .core_lba(mc1.lba), .core_ack(mc1_ack), .core_write(mc1_write),
 	.core_addr(mc1_addr), .core_data(mc1_din),
 	.hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
 	.hps_data(sd_buff_dout)
 );
+`ifdef LW_TB_NOSAVE1
+assign sd_rd[3] = mc2.rd, sd_wr[3] = mc2.wr, mc2_ack = sd_ack[3], mc2_write = sd_buff_wr, mc2_addr = sd_buff_addr;
+assign mc2_din  = sd_buff_dout;
+`else
 lw_card_mux #(.CARD(1)) mc2_lw
 (
-	.HPS_BUS(hps_bus),
+	.HPS_BUS(`TB_CORE_BUS),
 	.core_rd(mc2.rd), .core_wr(mc2.wr), .core_lba(mc2.lba), .core_ack(mc2_ack), .core_write(mc2_write),
 	.core_addr(mc2_addr), .core_data(mc2_din),
 	.hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
 	.hps_data(sd_buff_dout)
 );
+`endif
 
 // The CD on hps_io slot 1, behind an lw_blk_mux when the SECTOR block is built.
 lw_blk_mux cd_lw
 (
-	.HPS_BUS(hps_bus), .reset(cd_reset),
+	.HPS_BUS(`TB_CORE_BUS), .reset(cd_reset),
 	.core_req(cd_req), .core_lba(cd_lba), .core_ack(cd_ack), .core_wr(cd_wr), .core_data(cd_data),
 	.hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
 );
+`undef TB_MUX
 `else
-// No SECTOR block, so no mux: each consumer meets hps_io directly, as in a core that declares none.
+// No SECTOR block, or no mux: each consumer meets hps_io directly, as in a core that declares none.
 assign sd_rd[2] = mc1.rd, sd_wr[2] = mc1.wr, mc1_ack = sd_ack[2], mc1_write = sd_buff_wr, mc1_addr = sd_buff_addr;
 assign mc1_din  = sd_buff_dout;
 assign sd_rd[3] = mc2.rd, sd_wr[3] = mc2.wr, mc2_ack = sd_ack[3], mc2_write = sd_buff_wr, mc2_addr = sd_buff_addr;
@@ -580,8 +642,19 @@ end
 // Reads have no side effect: the state a read could move, by hierarchical reference. With clk_sys stopped nothing
 // else moves it, so it must be identical before and after any reads.
 function [511:0] pure_win;
-	pure_win = {255'd0, win.scratch, win.adrop, win.octrl, win.ohr, win.dirty, win.awp, win.arp, win.ds, win.psel, win.rr,
-	           doorbell, sys_irq, win.sys_status.flg, win.sys_status.seq, win.sys_status.snap, win.sys_status.cause};
+	reg [63:0] p;
+	reg [167:0] e;
+	begin
+		p = 0; e = 0;
+`ifdef MISTER_LW_PAD
+		p = {win.pad.pad.adrop, win.pad.pad.dirty, win.pad.pad.awp, win.pad.pad.arp, win.pad.pad.ds, win.pad.pad.psel,
+		     win.pad.pad.rr};
+`endif
+`ifdef MISTER_LW_EVT
+		e = {win.evt.evt.flg, win.evt.evt.seq, win.evt.evt.snap, win.evt.evt.cause};
+`endif
+		pure_win = {215'd0, win.scratch, win.octrl, win.ohr, doorbell, sys_irq, p, e};
+	end
 endfunction
 function [511:0] pure_sec;
 `ifdef MISTER_LW_SECTOR_SLOT
@@ -991,9 +1064,11 @@ task cause_drain(input [20:0] a);
 	integer nb;
 	begin axi_read(a, 0, c, cl, nb); axi_write(a, c, 4'hF); end
 endtask
+// The same on SYS's CAUSE word, where the block is listed.
+task sys_drain; if (TB_EVT) cause_drain(SYSB); endtask
 
 // The entries with an enable link (SECTOR, LANE): a store to one needs its OPEN bit.
-localparam TB_E_SEC = 1, TB_E_SYS = TB_SEC ? 3 : 2, TB_E_LANE = TB_E_SYS + 1;
+localparam TB_E_SEC = TB_PAD, TB_E_OSD = TB_E_SEC + TB_SEC, TB_E_SYS = TB_E_OSD + TB_OSD, TB_E_LANE = TB_E_SYS + TB_EVT;
 localparam [31:0] TB_LINKED = (TB_SEC ? 32'd1 << TB_E_SEC : 32'd0) | (TB_LANE ? 32'd1 << TB_E_LANE : 32'd0);
 // The host's step before an ENABLE: ENABLE read until quiet, for a bound (a stopped clk_sys never answers).
 task wait_quiet;
@@ -1039,7 +1114,7 @@ endtask
 // The same, then every line enabled.
 task ena_short; begin ena_take; axi_write(LINEN, 32'hFFFFFFFF, 4'hF); end endtask
 // The same, then the status read once (the ENABLE raised STATUS).
-task ena_up; begin ena_short; cause_drain(SYSB); end endtask
+task ena_up; begin ena_short; sys_drain; end endtask
 // The bench's host's enable ended by the next program's ID view.
 task ena_off;
 	reg [31:0] v;
@@ -1313,7 +1388,9 @@ endfunction
 // One core status request: st_in, then a rising edge of status_set (held one clk_sys, then dropped).
 // The last capture of the snapshot, for the race sweep's level property.
 realtime t_cap = 0;
-always @(posedge clk) if (win.sys_status.capture) t_cap = $realtime;
+`ifdef MISTER_LW_EVT
+always @(posedge clk) if (win.evt.evt.capture) t_cap = $realtime;
+`endif
 
 task st_req(input [127:0] v);
 	begin
@@ -1403,12 +1480,14 @@ task osd_check(input string what, input from_lw, input integer exp_lines, input 
 	end
 endtask
 
+`ifdef MISTER_LW_OSD
 function [31:0] lanes_h(input integer w);
 	lanes_h = {hdmi_osd.lw_buf3[w], hdmi_osd.lw_buf2[w], hdmi_osd.lw_buf1[w], hdmi_osd.lw_buf0[w]};
 endfunction
 function [31:0] lanes_v(input integer w);
 	lanes_v = {vga_osd.lw_buf3[w], vga_osd.lw_buf2[w], vga_osd.lw_buf1[w], vga_osd.lw_buf0[w]};
 endfunction
+`endif
 function [31:0] img_w(input integer w);
 	img_w = {lw_img[4*w+3], lw_img[4*w+2], lw_img[4*w+1], lw_img[4*w]};
 endfunction
@@ -1416,6 +1495,7 @@ endfunction
 integer r, bad;
 string  caps;
 
+`ifdef MISTER_LW_OSD
 // The header rows (ra[12], MENU_CORE builds) always read osd_buffer, never the shadow: on every pixel step
 // with LWSEL set, a header byte must be the SPI byte. Old values sampled at the edge, pbyte read after.
 integer hdr_n = 0, hdr_bad = 0, shd_n = 0, c_n = 0, l_n = 0;
@@ -1432,6 +1512,7 @@ always @(posedge clk_vid) begin : hdr_watch
 	end
 	if (c && l && !h && hdmi_osd.pix.pbyte !== o) shd_n = shd_n + 1;
 end
+`endif
 
 `ifdef MISTER_LW_LANE
 // LANE: frames stored over LW against the same frames sent as link words (the HPS's handshake on io_clk/io_ack).
@@ -1668,8 +1749,10 @@ task sys_rate;
 endtask
 
 // ---- The firewall across an HPS reset ----
-// OSD CTRL is the store target (two readable bits, in every arm); the directory magic the read target.
-localparam [20:0] FW_CTRL  = OSD + 21'h1000;
+// The store target: OSD CTRL (two readable bits), or without the OSD tier LINE_EN, which like it reads 0 with no
+// enable and holds the listed entries' bits (FW_MASK: the bits a store can set); the directory magic the read target.
+localparam [20:0] FW_CTRL  = TB_OSD ? OSD + 21'h1000 : LINEN;
+localparam [31:0] FW_MASK  = TB_OSD ? 32'h3 : ((32'd1 << TB_COUNT) - 32'd1) & 32'h3;
 localparam [31:0] FW_MAGIC = 32'h5244574C;   // the directory's MAGIC, "LWDR"
 
 // At negedges: until lw_hrst has been high for a full cycle (its rise is behind), or until the cycle it falls in.
@@ -1733,7 +1816,7 @@ task fw_case(input integer kind, input integer off, input integer pol, inout int
 	begin
 		ena_take;                                    // the reset ends it
 		axi_read(FW_CTRL, 0, oc, dl, beats);
-		v  = {30'd0, ~oc[1:0]};
+		v  = {30'd0, ~oc[1:0]} & FW_MASK;
 		id = 12'h800 | (kind << 8) | (pol << 4) | ((off + 4) & 15);
 		a  = (kind != 0) ? FW_CTRL : 21'h40000;
 		rready = 0; bready = (kind != 2);
@@ -1869,7 +1952,7 @@ task fw_reset_cases;
 
 		$display("-- firewall, HPS reset: a read and a store accepted while it is held complete across the release");
 		ena_take;
-		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
+		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]} & FW_MASK;
 		rready = 0; bready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n;
 		hps_rst_n = 0; fw_wait_high;
 		fw_ar(21'h40000, 0, 12'h0C3);
@@ -1919,7 +2002,7 @@ task fw_reset_cases;
 
 		$display("-- firewall, HPS reset held low while reads and stores run: every access answers, nothing is freed");
 		ena_take;
-		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
+		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]} & FW_MASK;
 		fr0 = n_fr; fw0 = n_fw;
 		hps_rst_n = 0; fw_wait_high;
 		for (j = 0; j < 4; j = j + 1) begin
@@ -1981,7 +2064,7 @@ task fw_reset_cases;
 
 		$display("-- firewall, a master revived before the release (records): idle reads 0 throughout");
 		ena_take;
-		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]};
+		axi_read(FW_CTRL, 0, oc, dl, beats); v = {30'd0, ~oc[1:0]} & FW_MASK;
 		rready = 0; fr0 = n_fr; fw0 = n_fw; nr0 = fr_n; nb0 = fb_n; nw0 = n_lwwr;
 		@(negedge clk); fw_ar(21'h000100, 0, 12'h0A1);
 		fw_aw(21'h000104, 12'h0A2);
@@ -2068,24 +2151,30 @@ task dm_build;
 	begin
 		for (i = 0; i < 1024; i = i + 1) dm[i] = 0;
 		e = 0;
-		dm_entry(e, 1, 32'h00010000, 32'h40000, 32'h40000, 0, 0, 0);               // PAD
-		dm[16 + 32 * e + 8] = 32'h040F000C; dm[16 + 32 * e + 9] = 32'h20000000;       // K0-K7: the opcode bitmap
-		e = e + 1;
+		if (TB_PAD) begin
+			dm_entry(e, 1, 32'h00010000, 32'h40000, 32'h40000, 0, 0, 0);           // PAD
+			dm[16 + 32 * e + 8] = 32'h040F000C; dm[16 + 32 * e + 9] = 32'h20000000;   // K0-K7: the opcode bitmap
+			e = e + 1;
+		end
 		if (TB_SEC) begin
 			dm_entry(e, 2, 32'h00010001, 32'h01000, 32'h02000, 32'h01000, 1, 1);       // SECTOR: line 1, cause bit 0
 			b = 16 + 32 * e + 8;
 			dm[b]     = {8'd1, 8'd0, 6'd0, TB_FRAME[9:0]};                             // K0 {slot, frame words}
 			dm[b + 2] = 32'h02000002;                                                  // K2 {FIFO depth, gap}
 			dm[b + 3] = 32'h02030100; dm[b + 4] = 32'h30100000;                       // K3-K8: the two cards
-			dm[b + 5] = 32'h03030100; dm[b + 6] = 32'h30200000;
+			dm[b + 5] = TB_W1 ? 32'h03030100 : 32'h03000100; dm[b + 6] = 32'h30200000;  // flags 0 unwired
 			dm[b + 7] = 32'h00020000; dm[b + 8] = 32'h00020000;
 			e = e + 1;
 		end
-		dm_entry(e, 3, 32'h00010000, 32'h04000, 32'h02000, 0, 0, 0);               // OSDBUF
-		dm[16 + 32 * e + 8] = 32'h00800100;                                            // K0 {height, width}
-		e = e + 1;
-		dm_entry(e, 4, 32'h00010000, 32'h03000, 32'h01000, 32'h03000, 2, 1);       // SYS: line 2, STATUS
-		e = e + 1;
+		if (TB_OSD) begin
+			dm_entry(e, 3, 32'h00010000, 32'h04000, 32'h02000, 0, 0, 0);           // OSDBUF
+			dm[16 + 32 * e + 8] = 32'h00800100;                                        // K0 {height, width}
+			e = e + 1;
+		end
+		if (TB_EVT) begin
+			dm_entry(e, 4, 32'h00010000, 32'h03000, 32'h01000, 32'h03000, 2, 1);   // SYS: line 2, STATUS
+			e = e + 1;
+		end
 		if (TB_LANE) begin
 			dm_entry(e, 5, 32'h00010001, 32'h06000, 32'h01000, 0, 0, 0);           // LANE: no cause, no line
 			b = 16 + 32 * e + 8;
@@ -2264,7 +2353,7 @@ task dir_cases;
 			end
 		end
 		check("LINE words: each non-zero ordinal named once, each in 1-15", bad, 0);
-		check("entries with a line", nl, TB_SEC ? 2 : 1);
+		check("entries with a line", nl, TB_SEC + TB_EVT);
 		for (i = 0; i < wk_n; i = i + 1) if (wk_cause[i] != 0) begin
 			axi_read(DIRB + wk_cause[i], 0, v, vl, nb);
 			check($sformatf("kind %0d: its CAUSE word reads as an idle cause", wk_kind[i]), v, 0);
@@ -2297,8 +2386,10 @@ task dir_cases;
 		syn[16 + 32 * (n + 1) + 5] = 32'd2;                         // the unknown kind names the SYS entry's ordinal
 		dir_walk(1, tb_off, tb_size); walk_check("an ordinal two entries name: no line for either", 4, 0);
 		syn[16 + 32 * (n + 1) + 5] = 32'd4;
-		syn[16 + 5] = 32'd20;                                      // PAD names a private ordinal
-		dir_walk(1, tb_off, tb_size); walk_check("a framework ordinal out of 1-15: no line", 1, 0);
+		if (em_n > 0) begin
+			syn[16 + 5] = 32'd20;                                  // the first entry names a private ordinal
+			dir_walk(1, tb_off, tb_size); walk_check("a framework ordinal out of 1-15: no line", em_kind[0], 0);
+		end
 
 		$display("-- directory: the walk follows LAYOUT, not constants (header 0x80, stride 0x100)");
 		syn_copy;
@@ -2315,8 +2406,8 @@ endtask
 integer sel_cycles = 0, sel_bad = 0;
 always @(posedge clk) begin
 	sel_cycles = sel_cycles + 1;
-	if (win.r_dir + win.r_sec + win.r_sys + win.r_osd + win.r_lane + win.r_pad + win.r_none != 1 ||
-	    win.w_dir + win.w_sec + win.w_sys + win.w_osd + win.w_lane + win.w_pad > 1) sel_bad = sel_bad + 1;
+	if (win.r_dir + win.r_sec + win.r_evt + win.r_osd + win.r_lane + win.r_pad + win.r_none != 1 ||
+	    win.w_dir + win.w_sec + win.w_evt + win.w_osd + win.w_lane + win.w_pad > 1) sel_bad = sel_bad + 1;
 end
 
 // The causes the entries declare: each raise sets exactly its entry's PENDING bit and its LINE's bit of the lines,
@@ -2365,10 +2456,10 @@ endtask
 function integer blk_at(input [20:0] a);
 	if (a >= 21'h40000 && a < 21'h41000) blk_at = 1;                    // the directory
 	else if (TB_SEC && a >= 21'h41000 && a < 21'h43000) blk_at = 2;     // SECTOR
-	else if (a >= 21'h43000 && a < 21'h44000) blk_at = 3;               // SYS
-	else if (a >= 21'h44000 && a < 21'h46000) blk_at = 4;               // OSDBUF
+	else if (TB_EVT && a >= 21'h43000 && a < 21'h44000) blk_at = 3;     // SYS
+	else if (TB_OSD && a >= 21'h44000 && a < 21'h46000) blk_at = 4;     // OSDBUF
 	else if (TB_LANE && a >= 21'h46000 && a < 21'h47000) blk_at = 5;    // LANE
-	else if (a >= 21'h80000 && a < 21'hC0000) blk_at = 6;               // PAD
+	else if (TB_PAD && a >= 21'h80000 && a < 21'hC0000) blk_at = 6;     // PAD
 	else blk_at = 0;
 endfunction
 
@@ -2393,14 +2484,14 @@ task decode_sweep;
 			end
 		end
 		$display("     %0d pages in blocks, %0d outside", nblk, nnone);
-		check("pages in blocks", nblk, 1 + 2 * TB_SEC + 1 + 2 + TB_LANE + 64);
+		check("pages in blocks", nblk, 1 + 2 * TB_SEC + TB_EVT + 2 * TB_OSD + TB_LANE + 64 * TB_PAD);
 		check("every page reads as the map says", bad, 0);
 		rd("the directory's MAGIC at its offset", DIRB, FW_MAGIC);
 		if (TB_SEC) rd("SECTOR's ID at its offset", SEC + 21'h38, 32'h32434553);
-		rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h31535453);
-		rd("OSDBUF's ID at its offset", OSD + 21'h1004, 32'h3144534F);
+		if (TB_EVT) rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h31535453);
+		if (TB_OSD) rd("OSDBUF's ID at its offset", OSD + 21'h1004, 32'h3144534F);
 		if (TB_LANE) rd("LANE's ID at its offset", 21'h46018, 32'h314E414C);
-		rd("PAD reads 0", pad_addr(8'h02, 0), 32'd0);
+		if (TB_PAD) rd("PAD reads 0", pad_addr(8'h02, 0), 32'd0);
 		rd("the directory page past the entries reads 0", DIRB + 21'h40 + 21'h80 * em_n, 32'd0);
 		rd("the directory page's last word reads 0", DIRB + 21'hFFC, 32'd0);
 
@@ -2438,7 +2529,7 @@ integer    lm_n = 0, lm_bad = 0, lm_fall_c = 0, lm_fall_e = 0, lm_fall_l = 0, lm
 always @(posedge clk) begin : line_model
 	reg [2:0] en, lv, nx;
 	en = {1'b0, win.line_en[TB_E_SYS], win.line_en[TB_E_SEC]};
-	lv = {1'b0, win.sys_lvl, win.sec_lvl};
+	lv = {1'b0, win.evt_lvl, win.sec_lvl};
 	nx = {3{win.en_q}} & en & lv;
 	for (i_lm = 0; i_lm < 2; i_lm = i_lm + 1) if (lm_q[i_lm] && !nx[i_lm]) begin
 		if (!win.en_q) lm_fall_l = lm_fall_l + 1;
@@ -2488,12 +2579,12 @@ task ena_cases;
 		n = n_padwe; axi_write(pad_addr(8'h02, 0), 32'h00005555, 4'hF); settle;
 		check("no enable: a pad store is dropped, nothing reaches hps_io", n_padwe - n, 0);
 		axi_write(OSD + 21'h1000, 32'h3, 4'hF);
-		rd("no enable: OSD CTRL unchanged", OSD + 21'h1000, 32'd0);
+		if (TB_OSD) rd("no enable: OSD CTRL unchanged", OSD + 21'h1000, 32'd0);
 		n = n_osdwe; axi_write(OSD, 32'hFFFFFFFF, 4'hF);
 		check("no enable: an image store does not reach the osds", n_osdwe - n, 0);
 		st_req(st_pat(900)); settle;
 		axi_write(SYSB, 32'h1, 4'hF);
-		rd("no enable: a W1C store on SYS CAUSE is dropped, the cause stands", SYSB, 32'h1);
+		if (TB_EVT) rd("no enable: a W1C store on SYS CAUSE is dropped, the cause stands", SYSB, 32'h1);
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1);
 			rd("no enable: SECTOR CTRL unchanged", SEC + 21'h10, 32'd0);
@@ -2541,10 +2632,10 @@ task ena_cases;
 		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
 		rd("enabled: LINE_EN holds the listed entries' bits", LINEN, (32'd1 << em_n) - 1);
 		axi_write(pad_addr(8'h02, 0), 32'h00005555, 4'hF); settle;
-		check("enabled: the pad store lands", joy0, 32'h00005555);
+		if (TB_PAD) check("enabled: the pad store lands", joy0, 32'h00005555);
 		axi_write(pad_addr(8'h02, 0), 32'h00000000, 4'hF); settle;
 		axi_write(SYSB, 32'h1, 4'hF);
-		rd("enabled: the W1C clears SYS CAUSE", SYSB, 32'd0);
+		if (TB_EVT) rd("enabled: the W1C clears SYS CAUSE", SYSB, 32'd0);
 		axi_wburst(SCR, 4'd3, 2'b01, n);
 		ena_rd(v);
 		check("a burst write while enabled: burst set, stale clear", v[29:28], 2'b01);
@@ -2572,10 +2663,10 @@ task ena_cases;
 			if (TB_LANE) check("not open: the lane's frame not begun", win.lane.lane.open, 0);
 			axi_write(pad_addr(8'h02, 0), 32'h0BADF00D, 4'hF);   // PAD is not linked: kept for the restart
 			repeat (20) @(negedge clk);
-			check("clk_sys stopped: the pad word not yet delivered", joy0 == 32'h0BADF00D, 0);
+			if (TB_PAD) check("clk_sys stopped: the pad word not yet delivered", joy0 == 32'h0BADF00D, 0);
 			sys_run = 1;
 			settle;
-			check("clk_sys running again: the PAD store kept and delivered", joy0, 32'h0BADF00D);
+			if (TB_PAD) check("clk_sys running again: the PAD store kept and delivered", joy0, 32'h0BADF00D);
 			wait_open;
 			rd("clk_sys running again: OPEN every listed block", OPENA, (32'd1 << em_n) - 1);
 			if (TB_SEC) begin
@@ -2618,24 +2709,26 @@ task ena_cases;
 		st_req(st_pat(902)); settle;
 		if (TB_SEC) begin cd_request(32'h00007E00); settle; end
 		axi_read(DIRB + 21'h20, 0, v, dl, beats);
-		check("no enable: PENDING shows SYS (and SECTOR)", v, (TB_SEC ? 32'd1 << TB_E_SEC : 0) | 32'd1 << TB_E_SYS);
+		check("no enable: PENDING shows SYS (and SECTOR)", v,
+		      (TB_SEC ? 32'd1 << TB_E_SEC : 0) | (TB_EVT ? 32'd1 << TB_E_SYS : 0));
 		check("no enable: every line low", lines, 0);
 		rd("OWNED reads 0", OWNEDA, 32'd0);
 		ena_take;
 		settle;
 		check("enabled, LINE_EN 0: every line low", lines, 0);
-		rd("PENDING when enabled: SYS's (SECTOR's word cleared at the ENABLE)", DIRB + 21'h20, 32'd1 << TB_E_SYS);
+		rd("PENDING when enabled: SYS's (SECTOR's word cleared at the ENABLE)", DIRB + 21'h20,
+		   TB_EVT ? 32'd1 << TB_E_SYS : 32'd0);
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1); settle;
 			rd("an EN rise raises SECTOR's cause for its standing request", DIRB + 21'h20, v);
 		end
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF); settle;
-		check("LINE_EN with SYS's bit: SYS's line alone", lines, 3'b010);
+		check("LINE_EN with SYS's bit: SYS's line alone", lines, TB_EVT ? 3'b010 : 3'b000);
 		if (TB_SEC) begin
 			axi_write(LINEN, 32'd1 << TB_E_SEC, 4'hF); settle;
 			check("LINE_EN with SECTOR's bit: SECTOR's line alone", lines, 3'b001);
 			axi_write(LINEN, (32'd1 << TB_E_SEC) | (32'd1 << TB_E_SYS), 4'hF); settle;
-			check("both bits: both lines", lines, 3'b011);
+			check("both bits: both lines", lines, TB_EVT ? 3'b011 : 3'b001);
 		end
 		axi_write(LINEN, ~((32'd1 << TB_E_SEC) | (32'd1 << TB_E_SYS)), 4'hF); settle;
 		check("the other bits: no line", lines, 0);
@@ -2648,7 +2741,7 @@ task ena_cases;
 		if (TB_SEC) begin
 			$display("-- lines: a host that skips SECTOR is never woken by it; the block takes nothing from SPI");
 			axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF);
-			cause_drain(SYSB); settle;
+			sys_drain; settle;
 			check("after the ENABLE: SECTOR's cause clear, its request standing", {win.sec_lvl, sd_rd[1]}, 2'b01);
 			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0;
 			cd_request(32'h00007E00); settle;
@@ -2665,10 +2758,10 @@ task ena_cases;
 			wait_frame(n0);
 			check_buf("the skipped block's request served over SPI", 32'h00007E00, TB_FRAME);
 			st_req(st_pat(903)); settle;
-			check("the host's other line works: SYS", lines, 3'b010);
-			cause_drain(SYSB); cause_drain(SEC);
+			if (TB_EVT) check("the host's other line works: SYS", lines, 3'b010);
+			sys_drain; cause_drain(SEC);
 		end
-		else cause_drain(SYSB);
+		else sys_drain;
 		host_end;
 	end
 endtask
@@ -2697,7 +2790,7 @@ task line_cases;
 	reg [31:0] v, c;
 	integer k, n, same, low, seq_seen, seed, nev, done, gap, wakes, nb;
 	realtime tw;
-	begin
+	if (TB_EVT) begin
 		$display("-- lines are levels: a raise swept across the store-back's cycle; where it wins, no low cycle");
 		ena_up;
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF);
@@ -2716,10 +2809,10 @@ task line_cases;
 			// the capture's edge and the store's edge: both seen on the bus
 			if (t_cap == t_wsys) begin
 				same = same + 1;
-				check($sformatf("raise %0d in the clear's cycle: the cause stands", k), win.sys_lvl, 1);
+				check($sformatf("raise %0d in the clear's cycle: the cause stands", k), win.evt_lvl, 1);
 				check($sformatf("raise %0d in the clear's cycle: the line had no low cycle", k), low, 0);
 			end
-			cause_drain(SYSB); settle;
+			sys_drain; settle;
 		end
 		$display("     %0d raises met the clear in its cycle", same);
 		check("a raise met the store-back in its cycle", same > 0, 1);
@@ -2750,7 +2843,7 @@ task line_cases;
 		axi_read(SYSB + 21'h04, 0, v, dl, nb);
 		$display("     %0d events, %0d wakes", nev, wakes);
 		check("every event served: the last SEQ the host read is the block's", seq_seen, v[31:16]);
-		check("quiescent: the cause clear, the line low", {win.sys_lvl, lines[1]}, 2'b00);
+		check("quiescent: the cause clear, the line low", {win.evt_lvl, lines[1]}, 2'b00);
 		ena_off;
 	end
 endtask
@@ -2781,8 +2874,10 @@ task look_cases;
 		ena_rd(v);
 		check("the first host's enable as it was", v[31], 1);
 		if (TB_SEC) rd("the first host's SECTOR binding as it was", SEC + 21'h10, 32'h1);
+`ifdef MISTER_LW_OSD
 		rd("the first host's OSD CTRL as it was", OSD + 21'h1000, 32'h1);
 		check("the first host's image word as it was", hdmi_osd.lw_buf0[0], 8'hA5);
+`endif
 `ifdef MISTER_LW_LANE
 		lane_count(v, dr);
 		check("the first host's frames still queued", v, p);
@@ -2812,7 +2907,7 @@ task look_cases;
 		axi_write(SCR, 32'h0C0C0C0C, 4'hF);
 		ena_rd(v);
 		check("a stock start: the enable ended, stale set", {v[31], v[29]}, 2'b01);
-		rd("a stock start: the live host's stores dropped (OSD CTRL cleared with the enable)", OSD + 21'h1000, 32'd0);
+		if (TB_OSD) rd("a stock start: the live host's stores dropped (OSD CTRL cleared with the enable)", OSD + 21'h1000, 32'd0);
 		rd("a stock start: SCRATCH not stored", SCR, dg(32'h0B0B0B0B));
 		if (TB_SEC) check("a stock start: SECTOR's EN gone", blk_dn[18], 0);
 		$display("     GPI[22] compared with en_q in %0d cycles, %0d of them held", gpi22_n, gpi22_on);
@@ -2840,7 +2935,9 @@ task fresh_cases;
 		axi_write(OSD + 21'h1000, 32'h3, 4'hF);              // LWSEL and HR
 		axi_write(OSD, 32'h5A5AA5A5, 4'hF);
 		repeat (slow(50)) @(negedge clk);
+`ifdef MISTER_LW_OSD
 		check("bound: both osds select the shadow", {hdmi_osd.lwsel_v1, vga_osd.lwsel_v1}, 2'b11);
+`endif
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1);
 			sec_stand(32'h00004E00); lba = cd_lba; if (win.sec_lvl) cause_drain(SEC);
@@ -2861,7 +2958,7 @@ task fresh_cases;
 		pl0 = n_play;
 `endif
 		st_req(st_pat(990)); settle;
-		check("bound: SYS's line high", lines[1], 1);
+		if (TB_EVT) check("bound: SYS's line high", lines[1], 1);
 		// the successor: GPO = 0 (the select drops, the ID view), its identification, then the I/O view
 		@(negedge clk_sys); gpo31 = 0;
 `ifdef MISTER_LW_LANE
@@ -2872,11 +2969,13 @@ task fresh_cases;
 		ena_rd(v);
 		check("the successor finds ENABLE 0", v[31], 0);
 		check("the successor finds GPI[22] 0", tb_gpi[22], 0);
-		check("every line low, the SYS cause still pending", {lines, win.sys_lvl}, 4'b0001);
-		rd("OSD CTRL 0", OSD + 21'h1000, 32'd0);
+		check("every line low, the SYS cause still pending", {lines, win.evt_lvl}, {3'b000, TB_EVT != 0});
+		if (TB_OSD) rd("OSD CTRL 0", OSD + 21'h1000, 32'd0);
 		repeat (slow(50)) @(negedge clk);
+`ifdef MISTER_LW_OSD
 		check("neither osd selects the shadow, neither is in the shadow's highres",
 		      {hdmi_osd.lwsel_v1, vga_osd.lwsel_v1, hdmi_osd.lwhr_s1, vga_osd.lwhr_s1}, 4'b0000);
+`endif
 		if (TB_SEC) begin
 			wait_frame(n1);
 			check_buf("the frame begun completes, filled from its first missing word", lba, 20);
@@ -3139,7 +3238,7 @@ task ls6;
 		check("the player idle", {lane_own, lane_hold}, 2'b00);
 `endif
 		wait_open;
-		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB);
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); sys_drain;
 		if (TB_SEC) begin cause_drain(SEC); sec_wr(21'h10, 32'h0); sec_spi_clear; end
 	end
 endtask
@@ -3151,14 +3250,14 @@ task ls10;
 		$display("-- enable links: at an ENABLE SYS raises STATUS and SECTOR's word is clear until EN rises over a request");
 		ena_short;
 		st_req(st_pat(950)); settle;
-		cause_drain(SYSB);
+		sys_drain;
 		if (TB_SEC) begin sec_stand(32'h00006A00); if (win.sec_lvl) cause_drain(SEC); end
 		host_end;
 		ena_w; wait_open;
-		rd("after the ENABLE: SYS CAUSE shows STATUS", SYSB, 32'h1);
+		if (TB_EVT) rd("after the ENABLE: SYS CAUSE shows STATUS", SYSB, 32'h1);
 		check("LINE_EN 0: no line", lines, 0);
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF); settle;
-		check("SYS's LINE_EN bit: its line rises", lines[1], 1);
+		check("SYS's LINE_EN bit: its line rises", lines[1], TB_EVT != 0);
 		if (TB_SEC) begin
 			rd("after the ENABLE: SECTOR CAUSE clear, its request standing", SEC, 32'd0);
 			check("the request stands", sd_rd[1] | cd_req, 1);
@@ -3167,7 +3266,7 @@ task ls10;
 			sec_wr(21'h10, 32'h3);                 // ABORT: nothing begun, so nothing to fill
 			cause_drain(SEC); sec_wr(21'h10, 32'h0);
 		end
-		cause_drain(SYSB);
+		sys_drain;
 		host_end;
 		if (TB_SEC) sec_spi_clear;
 	end
@@ -3205,7 +3304,7 @@ task ls18;
 		ena_w; wait_open;
 		ena_rd(v);
 		check("the next host holds the enable", v[31], 1);
-		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB);
+		axi_write(LINEN, 32'hFFFFFFFF, 4'hF); sys_drain;
 		rd("after the ENABLE: SECTOR CAUSE clear", SEC, 32'd0);
 		sec_wr(21'h10, 32'h1); settle;
 		rd("EN rises over the standing request: SECTOR CAUSE", SEC, 32'h1);
@@ -3510,10 +3609,17 @@ endtask
 task scramble;
 	begin
 		@(negedge clk_sys);
-		win.pad_x.lwtg_a = $random; win.pad_x.d_v = $random; win.pad_x.cap.lwq_d = {$random, $random};
-		win.pad_x.sync_r.lws0_q = $random; win.pad_x.sync_r.lws1_q = $random;
-		win.sys_status.stflg_lwgray = $random;
+`ifdef MISTER_LW_PAD
+		win.pad.pad.pad_x.lwtg_a = $random; win.pad.pad.pad_x.d_v = $random;
+		win.pad.pad.pad_x.cap.lwq_d = {$random, $random};
+		win.pad.pad.pad_x.sync_r.lws0_q = $random; win.pad.pad.pad_x.sync_r.lws1_q = $random;
+`endif
+`ifdef MISTER_LW_EVT
+		win.evt.evt.stflg_lwgray = $random;
+`endif
+`ifdef MISTER_LW_OSD
 		hdmi_osd.lwhr_s0 = $random; hdmi_osd.lwhr_s1 = $random; vga_osd.lwhr_s0 = $random; vga_osd.lwhr_s1 = $random;
+`endif
 `ifdef MISTER_LW_SECTOR_SLOT
 		win.sec.sector.q = {$random, $random}; win.sec.sector.rptr = $random; win.sec.sector.sector_r_lwgray = $random;
 		win.sec.sector.fs = $random; win.sec.sector.fexp = $random; win.sec.sector.em = $random;
@@ -3586,12 +3692,12 @@ task ls8;
 				ena_hammer(slow(4000), tries);
 				check("an ENABLE is taken", win.en_q, 1);
 			end
-			wait_open; 			axi_write(LINEN, 32'hFFFFFFFF, 4'hF); cause_drain(SYSB);
+			wait_open; 			axi_write(LINEN, 32'hFFFFFFFF, 4'hF); sys_drain;
 			axi_write(pad_addr(8'h02, 0), 32'h00C0FFEE ^ pass, 4'hF); settle;
-			check("a pad store lands under the new enable", joy0, 32'h00C0FFEE ^ pass);
+			if (TB_PAD) check("a pad store lands under the new enable", joy0, 32'h00C0FFEE ^ pass);
 			st_req(st_pat(970 + pass)); settle;
-			check("a status capture raises SYS's line", lines[1], 1);
-			cause_drain(SYSB);
+			if (TB_EVT) check("a status capture raises SYS's line", lines[1], 1);
+			sys_drain;
 `ifdef MISTER_LW_LANE
 			f_set(0, 16'h001E, 2); fw[0] = 16'h8800 + pass; fw[1] = 16'h8880 + pass;
 			lane_vs_link("after the scramble: a lane frame");
@@ -3727,7 +3833,7 @@ task ena_summary(input cov_on);
 		         fc_lane.n_stb);
 		check("the lane's link checker", fc_lane.n_bad, 0);
 `endif
-		if (cov_on) check("a line fell by each of its three reasons", {lm_fall_c > 0, lm_fall_e > 0, lm_fall_l > 0}, 3'b111);
+		if (cov_on && (TB_SEC || TB_EVT)) check("a line fell by each of its three reasons", {lm_fall_c > 0, lm_fall_e > 0, lm_fall_l > 0}, 3'b111);
 	end
 endtask
 
@@ -3811,6 +3917,61 @@ initial begin
 	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
 	$finish;
 end
+`elsif LW_TB_TIER
+// Arm T (each of the 32 tier sets) and arm B (a core side that leaves pieces out): what is listed is what is built
+// and wired; the directory, the decode and the lines follow it, and the linked blocks' OWNED and OPEN bits are
+// theirs alone.
+task tier_cases;
+	reg [31:0] v, pm;
+	begin
+		$display("-- tiers: listed = built and present (PAD %0d of %0d, EVT %0d of %0d, SECTOR %0d of %0d, OSD %0d, LANE %0d)",
+		         TB_PAD, TB_PADB, TB_EVT, TB_EVTB, TB_SEC, TB_SECB, TB_OSD, TB_LANE);
+		check("PAD listed", win.has_pad, TB_PAD);
+		check("EVT listed", win.has_evt, TB_EVT);
+		check("SECTOR listed", win.has_sec, TB_SEC);
+		rd("COUNT", DIRB + 21'h0C, TB_COUNT);
+		pm = (32'd1 << TB_COUNT) - 32'd1;
+		if (TB_SEC) begin
+			$display("-- tiers: a save slot's EN bit is set only while its mux is wired");
+			sec_wr(21'h10, 32'h000000C1);
+			rd("SECTOR CTRL: EN for the primary and both save slots stored", SEC + 21'h10, TB_W1 ? 32'hC1 : 32'h41);
+			sec_wr(21'h10, 32'h0);
+		end
+		$display("-- tiers: each linked block's return shows in its OWNED bit alone, its opening in its OPEN bit alone");
+		ena_take;
+		rd("enabled: OPEN every listed entry", OPENA, pm);
+		rd("enabled: OWNED none", OWNEDA, 32'd0);
+		sys_run = 0; repeat (20) @(negedge clk);       // the far halves cannot answer the fall
+		host_end;
+		rd("clk_sys stopped across the ID view: OWNED the linked entries alone", OWNEDA, TB_LINKED);
+		rd("clk_sys stopped across the ID view: OPEN none", OPENA, 32'd0);
+		sys_run = 1;
+		wait_quiet;
+		rd("clk_sys running: every link returned, OWNED none", OWNEDA, 32'd0);
+		sys_run = 0; repeat (20) @(negedge clk);       // the far halves cannot answer the rise
+		axi_write(ENA, ENA_W, 4'hF);
+		ena_rd(v);
+		check("clk_sys stopped: the ENABLE is taken", v[31], 1);
+		rd("clk_sys stopped: OPEN the unlinked entries alone", OPENA, pm & ~TB_LINKED);
+		sys_run = 1;
+		wait_open;
+		rd("clk_sys running: OPEN every listed entry", OPENA, pm);
+		host_end;
+	end
+endtask
+
+initial begin
+	repeat (4) @(negedge clk);
+	dir_cases;
+	ena_up;
+	decode_sweep;
+	dir_causes;
+	tier_cases;
+	ena_summary(0);
+	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
+	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
+	$finish;
+end
 `else
 initial begin
 	repeat (4) @(negedge clk);
@@ -3826,6 +3987,7 @@ initial begin
 	axi_write(SCR, 32'h00C30000, 4'h4);
 	rd("scratch byte lane", SCR, dg(32'hA5C35A5A));
 
+`ifdef MISTER_LW_PAD
 	$display("-- pads");
 	axi_write(pad_addr(8'h02, 0), 32'h8001F00F, 4'hF); settle;
 	check("joystick_0", joy0, 32'h8001F00F);
@@ -3862,13 +4024,14 @@ initial begin
 	rd("pad block read", pad_addr(8'h02, 0), 32'd0);
 	rd("pad block unhonoured read", pad_addr(8'h05, 3), 32'd0);
 
+`endif
 	$display("-- default responder");
 	rd("LW 0x000000", 21'h000000, 32'hDEADBEEF);
 	rd("below window", 21'h03FFFC, 32'hDEADBEEF);
 	rd("directory page past the entries", DIRB + 21'h40 + 21'h80 * em_n, 32'd0);
 	rd("directory page end, below SECTOR", 21'h040FFC, 32'd0);
-	rd("above SECTOR: SYS CAUSE idle", 21'h043000, 32'd0);
-	rd("SYS block end", 21'h043FFC, 32'd0);
+	rd("above SECTOR: SYS CAUSE idle", 21'h043000, TB_EVT ? 32'd0 : 32'hDEADBEEF);
+	rd("SYS block end", 21'h043FFC, TB_EVT ? 32'd0 : 32'hDEADBEEF);
 	if (TB_LANE) rd("above LANE", 21'h047000, 32'hDEADBEEF);
 	else rd("above OSDBUF", 21'h046000, 32'hDEADBEEF);
 	rd("above window", 21'h0C0000, 32'hDEADBEEF);
@@ -3981,20 +4144,20 @@ initial begin
 		sys_run = 1;
 		settle;
 		// a single beat (AWLEN 0) is a store whatever its burst type
-		axi_read(OSD + 21'h1000, 0, oc, dl, beats);
+		axi_read(FW_CTRL, 0, oc, dl, beats);
 		nw0 = n_lwwr; nb0 = n_lwwb;
 		for (t = 0; t < 4; t = t + 1) begin
 			awburst = t[1:0];
-			axi_write(OSD + 21'h1000, {30'd0, ~t[1:0]}, 4'hF);
-			rd($sformatf("single store, burst type %0d: OSD CTRL", t), OSD + 21'h1000, {30'd0, ~t[1:0]});
+			axi_write(FW_CTRL, {30'd0, ~t[1:0]}, 4'hF);
+			rd($sformatf("single store, burst type %0d: OSD CTRL (LINE_EN)", t), FW_CTRL, {30'd0, ~t[1:0]} & FW_MASK);
 			axi_write(SCR, 32'h5C000000 | t, 4'hF);
 			rd($sformatf("single store, burst type %0d: SCRATCH", t), SCR, dg(32'h5C000000 | t));
 		end
 		awburst = 2'b01;
 		check("single stores: one bus pulse each", n_lwwr - nw0, 8);
 		check("single stores: none dropped", n_lwwb - nb0, 0);
-		axi_write(OSD + 21'h1000, oc, 4'hF);
-		rd("OSD CTRL restored", OSD + 21'h1000, oc);
+		axi_write(FW_CTRL, oc, 4'hF);
+		rd("OSD CTRL (LINE_EN) restored", FW_CTRL, oc);
 	end
 
 	$display("-- clk_sys stopped (core held in reset)");
@@ -4002,19 +4165,25 @@ initial begin
 	rd("magic, clk_sys stopped", 21'h40000, FW_MAGIC);
 	axi_write(SCR, 32'h0BADF00D, 4'hF);
 	rd("scratch, clk_sys stopped", SCR, dg(32'h0BADF00D));
+`ifdef MISTER_LW_PAD
 	for (i = 1; i <= 5; i = i + 1) axi_write(pad_addr(8'h02, 0), i, 4'hF);
 	axi_write(pad_addr(8'h03, 0), 32'h00000077, 4'hF);
 	axi_write(pad_addr(8'h03, 0), 32'h00000000, 4'hF);
 	for (i = 1; i <= 10; i = i + 1) axi_write(pad_addr(8'h1A, 0), i, 4'hF);
 	for (i = 11; i <= 20; i = i + 1) axi_write(pad_addr(8'h3D, 0), i, 4'hF);
+`endif
 	rd("undecoded, clk_sys stopped", 21'h1FFFFC, 32'hDEADBEEF);
+`ifdef MISTER_LW_PAD
 	check("joystick_0 unchanged while stopped", joy0, 32'h0000A0A0);
 	rd("analog drops (16 queued of 20, a pad store in flight)", pad_addr(8'h1A, 0), dg(32'd4));
+`endif
 	sys_run = 1; repeat (slow(300)) @(negedge clk);
+`ifdef MISTER_LW_PAD
 	check("joystick_0 last of 5 lands on restart", joy0, 32'h00000005);
 	check("joystick_1 release (last) lands on restart", joy1, 32'h00000000);
 	check("analog_0 last left queued lands on restart", {16'd0, ana0}, 32'h0000000A);
 	check("right analog_0 last queued lands on restart", {16'd0, rana0}, 32'h00000010);
+`endif
 
 `ifndef MISTER_LW_SECTOR_SLOT
 	$display("-- no SECTOR block: its addresses read 0xDEADBEEF, stores are ignored, no doorbell");
@@ -4558,6 +4727,7 @@ initial begin
 	ena_up;
 `endif
 
+`ifdef MISTER_LW_EVT
 	$display("-- SYS: the status back-channel (hps_io 0x29) as a cause, a line and a snapshot");
 	rd("SYS ID STS1", SYSB + 21'h1C, 32'h31535453);
 	check("SYS line low at reset", sys_irq, 0);
@@ -4651,7 +4821,7 @@ initial begin
 			// the drain's level read after the store-back: a capture the bit no longer shows is in the snapshot
 			st_read(stf0, stf1, stw);
 			if (!sys_irq && (stf0[3:0] !== hps_io.stflg || stw !== st_pat(100 + k))) lost = lost + 1;
-			if (sys_irq) cause_drain(SYSB);
+			if (sys_irq) sys_drain;
 		end
 		$display("     %0d offsets: %0d captures before the clear, %0d in or after it, %0d in its cycle", 64, gone,
 		         kept, same);
@@ -4670,6 +4840,8 @@ initial begin
 	check("STFLG moved across the capture", stf0 != stf1, 1);
 	rd("SYS CAUSE", SYSB, 32'h00000001);
 
+`endif
+`ifdef MISTER_LW_OSD
 	$display("-- OSDBUF: registers");
 	rd("OSD ID OSD1", OSD + 21'h1004, 32'h3144534F);
 	rd("OSD CTRL reset", OSD + 21'h1000, 32'd0);
@@ -4742,6 +4914,8 @@ initial begin
 	osd_check("LWSEL&HR survives DISABLE/ENABLE", 1, 128, 6);
 	axi_write(OSD + 21'h1000, 32'h0, 4'hF);
 	osd_check("SPI highres stays cleared by DISABLE", 0, 64, 3);
+
+`endif
 
 `ifdef MISTER_LW_LANE
 	$display("-- LANE: registers");
@@ -5015,7 +5189,7 @@ initial begin
 		reg [15:0] w;
 		integer m;
 		st_req(st_pat(300)); settle;
-		cause_drain(SYSB);                         // drain the SYS cause the request raised
+		sys_drain;                         // drain the SYS cause the request raised
 		// the link: the reply to each word is io_dout once its ack is seen (the HPS reads gp_in then)
 		@(negedge clk_sys); io_enable = 1; repeat (2) @(negedge clk_sys);
 		for (m = 0; m < 9; m = m + 1) begin hps_word((m == 0) ? 16'h0029 : 16'h0000); ws[m] = hps_bus[15:0]; end
@@ -5123,18 +5297,20 @@ initial begin
 	begin : store_order
 		reg [31:0] v, oc, p, dr, rs, h;
 		integer k, nbad;
-		st_req(st_pat(600)); settle;
-		check("order: SYS cause pending", sys_irq, 1);
-		store_read(SYSB, 32'h1, SYSB, v);
-		check("order: a W1C store on SYS CAUSE, then CAUSE reads clear", v, 32'd0);
+		if (TB_EVT) begin
+			st_req(st_pat(600)); settle;
+			check("order: SYS cause pending", sys_irq, 1);
+			store_read(SYSB, 32'h1, SYSB, v);
+			check("order: a W1C store on SYS CAUSE, then CAUSE reads clear", v, 32'd0);
+		end
 		store_read(SCR, 32'h0D15EA5E, SCR, v);
 		check("order: a store to SCRATCH, then SCRATCH", v, dg(32'h0D15EA5E));
-		axi_read(OSD + 21'h1000, 0, oc, dl, beats);
-		store_read(OSD + 21'h1000, 32'h2, OSD + 21'h1000, v);
-		check("order: a store to OSD CTRL, then OSD CTRL", v, 32'h2);
-		axi_write(OSD + 21'h1000, oc, 4'hF);
+		axi_read(FW_CTRL, 0, oc, dl, beats);
+		store_read(FW_CTRL, 32'h2, FW_CTRL, v);
+		check("order: a store to OSD CTRL (LINE_EN), then OSD CTRL", v, 32'h2 & FW_MASK);
+		axi_write(FW_CTRL, oc, 4'hF);
 		// the read's address accepted two cycles and one before the W1C's data beat, in its cycle and after it
-		for (k = -2; k <= 1; k = k + 1) begin
+		for (k = -2; k <= 1 && TB_EVT; k = k + 1) begin
 			st_req(st_pat(610 + k)); settle;
 			race_store_read(SYSB, 32'h1, SYSB, k, v);
 			check($sformatf("order: CAUSE read accepted %0d cycles from the W1C's data beat", k), v,
@@ -5204,8 +5380,10 @@ initial begin
 		integer m, b, t, nbad, seed, rv;
 		reg [31:0] p, dr, rs;
 		reg [15:0] w;
-		st_req(st_pat(500)); settle;
-		check("pure reads: SYS cause pending", sys_irq, 1);
+		if (TB_EVT) begin
+			st_req(st_pat(500)); settle;
+			check("pure reads: SYS cause pending", sys_irq, 1);
+		end
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1); settle;
 			cd_request(32'h00007000); settle;
@@ -5265,7 +5443,7 @@ initial begin
 		check("pure reads: the window's and SYS's state is unchanged", pure_win() === sw0, 1);
 		check("pure reads: SECTOR's state is unchanged", pure_sec() === ss0, 1);
 		check("pure reads: the lane's state is unchanged", pure_lane() === sl0, 1);
-		check("pure reads: both lines still high", {30'd0, TB_SEC ? doorbell : 1'b1, sys_irq}, 32'd3);
+		check("pure reads: both lines still high", {30'd0, TB_SEC ? doorbell : 1'b1, TB_EVT ? sys_irq : 1'b1}, 32'd3);
 		sys_run = 1;
 		if (TB_SEC) begin
 			frame_data(32'h00007000, 294, 588);
@@ -5274,7 +5452,7 @@ initial begin
 			cause_drain(SEC);
 			sec_wr(21'h10, 32'h0); settle;
 		end
-		cause_drain(SYSB);
+		if (TB_EVT) sys_drain;
 `ifdef MISTER_LW_LANE
 		axi_write(LANE + 21'h8, 32'd0, 4'hF);
 		lane_wait(p + 2);
@@ -5292,7 +5470,7 @@ initial begin
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");
 		rd("lean SCRATCH", SCR, 32'd0);
-		rd("lean analog drops", pad_addr(8'h1A, 0), 32'd0);
+		if (TB_PAD) rd("lean analog drops", pad_addr(8'h1A, 0), 32'd0);
 		if (TB_SEC) begin
 			axi_read(SEC + 21'h14, 0, d, dl, beats);
 			check("lean STATUS[31:4]", d[31:4], 0);
@@ -5305,11 +5483,11 @@ initial begin
 	// the models moved edges in this run: synchroniser bits, a Gray bus, and no bundle capture took a bit in flight
 	if (!$value$plusargs("lw_seed=%d", i)) i = 1;
 	$display("-- CDC models (seed %0d): edges moved: PAD handshake %0d, status flag %0d, the cell bench's Gray counts %0d",
-	         i, win.pad_x.sync_r.m_n + win.pad_x.sync_a.m_n, win.sys_status.flg_sync.m_n, cg_xa.m_n + cg_xb.m_n);
-	check("models: the PAD handshake's toggles took extra cycles", win.pad_x.sync_r.m_n + win.pad_x.sync_a.m_n > 0, 1);
-	check("models: a Gray bus took an extra cycle", win.sys_status.flg_sync.m_n + cg_xa.m_n + cg_xb.m_n > 0, 1);
+	         i, win.pad.pad.pad_x.sync_r.m_n + win.pad.pad.pad_x.sync_a.m_n, win.evt.evt.flg_sync.m_n, cg_xa.m_n + cg_xb.m_n);
+	check("models: the PAD handshake's toggles took extra cycles", win.pad.pad.pad_x.sync_r.m_n + win.pad.pad.pad_x.sync_a.m_n > 0, 1);
+	check("models: a Gray bus took an extra cycle", win.evt.evt.flg_sync.m_n + cg_xa.m_n + cg_xb.m_n > 0, 1);
 	check("models: captures that took a bit still in flight (PAD, the cell bench)",
-	      win.pad_x.cap.m_n + cx_a.cap.m_n + cx_b.cap.m_n, 0);
+	      win.pad.pad.pad_x.cap.m_n + cx_a.cap.m_n + cx_b.cap.m_n, 0);
 `ifdef MISTER_LW_SECTOR_SLOT
 	check("models: SECTOR's crossings took extra cycles",
 	      win.sec.sector.sys_sync.m_n + win.sec.sector.ctl_sync.m_n > 0, 1);

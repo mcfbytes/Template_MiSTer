@@ -73,9 +73,13 @@ set_global_assignment -name SEED 1
 # Disable ALSA audio output to save some resources
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
-# LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io (pads, OSD shadow,
-# status back-channel). Off by default: sys/ then compiles exactly as without this branch. Uncomment to build it.
+# LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io, in tiers, each one
+# opt-in. Off by default: sys/ then compiles exactly as without this branch. Every tier needs MISTER_LW; a tier
+# macro without it stops the build. The floor (the window, its directory and the host enable), then pads (L1)
+# and the status back-channel (L2); uncomment the lines to build them.
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
 
 # LW window diagnostics (SCRATCH, SECTOR counters/timestamps): 0 or absent = shipping, 1 = debug builds
 #set_global_assignment -name VERILOG_MACRO "LW_DIAG=1"
@@ -85,8 +89,11 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=2"
 
-# LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block"); needs MISTER_LW
+# LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"
+
+# LW OSD shadow, a second write source in each osd (docs/LW_BRIDGE.md, "OSDBUF block")
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl
