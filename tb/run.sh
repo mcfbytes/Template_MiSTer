@@ -66,7 +66,8 @@ probe() {
     fi
     for src in lw_probe lw_probe_test; do
       echo "-- $c: tb/hps/$src.c" >> "$1"; n=$((n + 1)); rm -f "$O/$src.$(basename "$c")"
-      if $c $W -o "$O/$src.$(basename "$c")" tb/hps/$src.c >> "$1" 2>&1; then
+      x=""; [ $src = lw_probe_test ] && x=-pthread
+      if $c $W $x -o "$O/$src.$(basename "$c")" tb/hps/$src.c >> "$1" 2>&1; then
         echo "pass $c: compiles, no warning" >> "$1"
       else f=$((f + 1)); echo "FAIL $c: $src.c does not compile without a warning" >> "$1"
       fi

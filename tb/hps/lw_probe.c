@@ -30,9 +30,12 @@
  *   8. The end: it identifies the core again, which clears the enable, and requires every block back at rest
  *      (quiet, OWNED 0, OPEN 0, LINE_EN 0, GPI[22] 0): the core is on stock SPI for whatever program comes next.
  *
- * --die (test only) replaces step 8: it begins a link command with the I/O select asserted through GPO, queues
- * lane capture frames behind it and OSD bytes, and exits with the enable set, to stand in for a host that died
- * in the middle of a command. The next program's identification must find every block off.
+ * --die (test only) replaces step 8: it begins a link command with the I/O select asserted through GPO and queues
+ * lane capture frames behind it; then, as a host does to repaint the OSD, it raises the OSD select in place of the
+ * I/O select (one GPO store, so the link is never quiet in between: both osd selects decode high) and stores OSD
+ * bytes, which wait behind that select; and exits with the select asserted and the enable set, to stand in for a
+ * host that died in the middle of a repaint. The next program's identification must find every block off, and
+ * none of those lane frames or OSD bytes played or written.
  *
  * Every LW access is preceded by a GPI sample that must show GPI[31] = 0 and GPI[25] = 1; a failed sample ends
  * the run with no further LW access. Exit status: 0 every check passed; 1 a check failed; 2 the probe could not
@@ -847,21 +850,26 @@ static void finish(void)
 	say("the core is on stock SPI for whatever program comes next");
 }
 
-static void die(void)
+static void die(int osd_bound)
 {
-	uint32_t i;
-	step("--die: a command begun with the I/O select asserted, lane frames and OSD bytes queued, the enable left");
+	uint32_t i, st = 0;
+	step("--die: a link command begun, lane frames behind it; an OSD repaint begun, its bytes queued; the enable left");
 	sel(GPO_IO_EN, 1);
 	link_w(UIO_GET_STRING);
 	if (blk[K_LANE].present)
 		for (i = 0; i < 4; i++) lane_frame(UIO_GET_STATUS, 8);
-	if (blk[K_OSD].present)
+	/* the OSD select alone: io_osd_hdmi = ss1 & ~ss0 and io_osd_vga = ss1 & ~ss2 both read 1 */
+	gpo_w((gpo & ~(GPO_IO_EN | GPO_FPGA_EN)) | GPO_IO_VIEW | GPO_OSD_EN);
+	if (osd_bound) {
 		for (i = 0; i < 64; i++) bwr(K_OSD, i * 4u, 0xFFFFFFFFu);
+		sleep_ms(10);
+		st = brd(K_OSD, OSD_STATUS);
+		check(((st >> 16) & 0x1FFu) == 64u, "the 64 OSD stores wait behind the osd select (STATUS 0x%08x)", (unsigned)st);
+	}
 	say("GPO 0x%08x; ENABLE 0x%08x; PLAYED %u; RSTAT 0x%08x; OSD STATUS 0x%08x", (unsigned)gpo,
 	    (unsigned)rd(H_ENABLE), blk[K_LANE].present ? (unsigned)brd(K_LANE, LN_PLAYED) & 0xFFFFu : 0u,
-	    blk[K_LANE].present ? (unsigned)brd(K_LANE, LN_RSTAT) : 0u,
-	    blk[K_OSD].present ? (unsigned)brd(K_OSD, OSD_STATUS) : 0u);
-	say("exiting with the select asserted and the enable set");
+	    blk[K_LANE].present ? (unsigned)brd(K_LANE, LN_RSTAT) : 0u, (unsigned)st);
+	say("exiting with the OSD select asserted and the enable set");
 }
 
 static void usage(void)
@@ -869,7 +877,8 @@ static void usage(void)
 	fputs("usage: lw_probe [--template] [--die]\n"
 	      "  Walks the LW bridge protocol on a loaded core. Run it with no other program on the link.\n"
 	      "  --template  drive the Template core's LW example (its pad buttons, its block reader)\n"
-	      "  --die       test only: end with a link command begun and work queued, the enable left set\n", stderr);
+	      "  --die       test only: end mid-repaint, lane frames and OSD bytes queued behind the selects, the enable\n"
+	      "              left set\n", stderr);
 	exit(2);
 }
 
@@ -931,7 +940,7 @@ int main(int argc, char **argv)
 	read_enable("after the walk");
 	check(!(rd(H_ENABLE) & (E_STALE | E_BURST)), "no store was dropped as stale or as a burst");
 
-	if (dying) die();
+	if (dying) die(blk[K_OSD].present && ((opened >> blk[K_OSD].idx) & 1u));
 	else finish();
 	say("%s: %u failures", fails ? "FAILED" : "PASSED", fails);
 	return fails ? 1 : 0;

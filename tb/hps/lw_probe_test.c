@@ -8,6 +8,11 @@
  *      ordinal no other entry names keeps it.
  *   2. The start's pad levels: with PAD's bitmap taking every level opcode, the probe stores each of the 24
  *      latest-wins levels once, the six paddles among them, and nothing else (no spinner, which is an event).
+ *   3. --die: it exits with an osd select asserted as sys_top.v decodes GPO (io_osd_hdmi = ss1 & ~ss0,
+ *      io_osd_vga = ss1 & ~ss2, both high, so a build without the HDMI osd holds its one select too) and the
+ *      I/O view kept, with its 64 OSD stores made: the writer, which writes only while both selects are low, leaves
+ *      them queued for the next program's ID view to discard. A thread plays the link's acknowledge, and the
+ *      model's OSD STATUS shows 64 entries waiting, as a block holding them would.
  *
  * Output: "-- " headings (the probe's own steps print theirs too), a pass or FAIL line per check, then the count:
  * "lw_probe_test: N checks, F failures". The probe's own FAIL lines count as failures.
@@ -16,6 +21,8 @@
 int lw_probe_main(int argc, char **argv);
 #include "lw_probe.c"
 #undef main
+#include <pthread.h>
+#include <stdatomic.h>
 
 #define WSIZE 0x80000u                       /* the model's window, 512 KB */
 static volatile uint32_t m_mgr[PAGE / 4], m_rst[PAGE / 4], m_win[WSIZE / 4];
@@ -119,10 +126,47 @@ static void case_pads(void)
 	t_check(!other, "no other store: no spinner, no index outside the table (%u)", (unsigned)other);
 }
 
+/* the link's acknowledge: GPI[17] follows the strobe, GPO[17] */
+static atomic_int m_run;
+static void *m_link(void *arg)
+{
+	(void)arg;
+	while (atomic_load(&m_run))
+		m_mgr[0x14 / 4] = GPI_LW | GPI_IDLE | ((m_mgr[0x10 / 4] & GPO_STROBE) ? GPI_ACK : 0u);
+	return NULL;
+}
+
+static void case_die(void)
+{
+	pthread_t th;
+	uint32_t i, n = 0, ss0, ss1, ss2;
+	step("probe test 3: --die exits with the osd selects asserted and its OSD bytes stored behind them");
+	reset_model();
+	blk[K_LANE].present = 1;
+	blk[K_LANE].off = 0x07000u;
+	blk[K_OSD].present = 1;
+	blk[K_OSD].off = 0x30000u;
+	m_win[(0x30000u + OSD_STATUS) / 4] = 64u << 16;
+	atomic_store(&m_run, 1);
+	if (pthread_create(&th, NULL, m_link, NULL)) { t_check(0, "the link's thread starts"); return; }
+	die(1);
+	atomic_store(&m_run, 0);
+	pthread_join(th, NULL);
+	for (i = 0; i < 64; i++) n += m_win[(0x30000u + 4 * i) / 4] == 0xFFFFFFFFu;
+	ss0 = (gpo >> 18) & 1u;
+	ss1 = (gpo >> 19) & 1u;
+	ss2 = (gpo >> 20) & 1u;
+	t_check(n == 64, "the 64 OSD stores made (%u)", (unsigned)n);
+	t_check((ss1 & ~ss0 & 1u) && (ss1 & ~ss2 & 1u), "at exit both osd selects decode high: GPO 0x%08x gives "
+	        "io_osd_hdmi %u, io_osd_vga %u", (unsigned)gpo, (unsigned)(ss1 & ~ss0 & 1u), (unsigned)(ss1 & ~ss2 & 1u));
+	t_check((gpo & GPO_IO_VIEW) != 0, "at exit the I/O view is kept: GPO[31] 1");
+}
+
 int main(void)
 {
 	case_walk();
 	case_pads();
+	case_die();
 	printf("lw_probe_test: %u checks, %u failures\n", t_checks, t_fails + fails);
 	return t_fails + fails ? 1 : 0;
 }
