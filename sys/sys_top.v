@@ -231,7 +231,7 @@ end
 
 // MISTER_LW_LANE (with MISTER_LW): the link nets below come from lw_link (LW BRIDGE), the link's own or the
 // LW frame lane's while it plays a frame. Without it the link front is the stock one.
-// MISTER_LW_OSD (with MISTER_LW): each osd takes the LW OSDBUF stores as a second write source.
+// MISTER_LW_OSD (with MISTER_LW): each osd takes the LW OSDBUF writer's bytes through its own write port.
 `ifdef MISTER_LW
 `ifdef MISTER_LW_LANE
 `define LW_LANE_LINK
@@ -617,12 +617,10 @@ cyclonev_hps_interface_peripheral_uart uart
 wire  [2:0] lw_lines;
 
 `ifdef LW_OSD_PORTS
-// OSDBUF stores from lw_sys_window to both osd shadows.
+// The OSDBUF writer's bytes (lw_sys_window, on clk_sys) to every osd's osd_buffer.
 wire        lw_osd_we;
-wire  [9:0] lw_osd_addr;
-wire [31:0] lw_osd_data;
-wire  [3:0] lw_osd_be;
-wire  [1:0] lw_osd_ctrl;
+wire [12:0] lw_osd_addr;
+wire  [7:0] lw_osd_byte;
 `endif
 wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
 `else
@@ -1263,12 +1261,9 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.de_out(hdmi_de_osd)
 `ifdef LW_OSD_PORTS
 		,
-		.clk_lw(clk_100m),
 		.lw_we(lw_osd_we),
 		.lw_addr(lw_osd_addr),
-		.lw_data(lw_osd_data),
-		.lw_be(lw_osd_be),
-		.lw_ctrl(lw_osd_ctrl)
+		.lw_byte(lw_osd_byte)
 `endif
 	);
 
@@ -1493,12 +1488,9 @@ osd vga_osd
 	.de_out(vga_de_osd)
 `ifdef LW_OSD_PORTS
 	,
-	.clk_lw(clk_100m),
 	.lw_we(lw_osd_we),
 	.lw_addr(lw_osd_addr),
-	.lw_data(lw_osd_data),
-	.lw_be(lw_osd_be),
-	.lw_ctrl(lw_osd_ctrl)
+	.lw_byte(lw_osd_byte)
 `endif
 );
 
@@ -1995,17 +1987,21 @@ lw_sys_window #(
 	.clk_sys(clk_sys),
 	.hps_lw(lw_bus),
 `ifdef LW_OSD_PORTS
+`ifdef MISTER_DEBUG_NOHDMI
+	.osd_sel({io_osd_vga, 1'b0}),            // no HDMI osd
+`else
+	.osd_sel({io_osd_vga, io_osd_hdmi}),
+`endif
+	.osd_view(gp_outr[31]),
 	.osd_we(lw_osd_we),
 	.osd_addr(lw_osd_addr),
-	.osd_data(lw_osd_data),
-	.osd_be(lw_osd_be),
-	.osd_ctrl(lw_osd_ctrl),
+	.osd_byte(lw_osd_byte),
 `else
+	.osd_sel(2'b00),
+	.osd_view(1'b0),
 	.osd_we(),
 	.osd_addr(),
-	.osd_data(),
-	.osd_be(),
-	.osd_ctrl(),
+	.osd_byte(),
 `endif
 `ifdef LW_LANE_LINK
 	.lane_busy(|link_sel | ~gp_outr[31]),   // a select, or the ID view: no lane frame starts

@@ -20,8 +20,9 @@
 
 // LW window declared by `SYS_LW_CAPS (emu_ports.vh): the directory (the L0 floor, MISTER_LW), then the blocks of
 // the tiers the core builds: PAD (L1, MISTER_LW_PAD, lw_pad.sv), EVT (L2, MISTER_LW_EVT, lw_evt.sv), SECTOR
-// (MISTER_LW_SECTOR_SLOT, lw_sector.sv), OSDBUF (MISTER_LW_OSD) and LANE (MISTER_LW_LANE, lw_lane.sv). Each
-// tier is a parameter here (sys_top.v sets it from its macro), and a tier set without its macro stops the build.
+// (MISTER_LW_SECTOR_SLOT, lw_sector.sv), OSDBUF (MISTER_LW_OSD, lw_osd.sv) and LANE (MISTER_LW_LANE, lw_lane.sv).
+// Each tier is a parameter here (sys_top.v sets it from its macro), and a tier set without its macro stops the
+// build.
 // Bridge side runs on clk_100m with no reset.
 // HPS_BUS[383:46] is one port, hps_lw, whatever the tiers: this module drives every to-core bit (0 for a tier
 // not built), and a from-core bit is driven only by the core-side piece that owns it. Each core-side piece
@@ -41,7 +42,7 @@
 // (lw_idv low) and every enable link at rest (quiet). en_q has no timer and no host clears it: it clears on lw_hrst
 // and on lw_idv, the ID view or the core reset through GPO, which every program that starts on this link performs
 // first, so each new host meets every block off and the core on stock SPI. en_q is GPI[22] and crosses no clock
-// itself. SECTOR and LANE, whose queues a clk_sys half consumes, each have an enable link (lw_fence, lw_cdc.sv)
+// itself. SECTOR, OSDBUF and LANE, whose queues a clk_sys half consumes, each have an enable link (lw_fence, lw_cdc.sv)
 // that carries en_q to that half as one level and its acknowledge back: a store to such a block also needs the
 // link open (its OPEN bit), which it is only once the half has seen the enable, and a store dropped there sets
 // stale too. quiet keeps a half still returning to SPI from taking work under the next enable. OWNED shows each
@@ -55,9 +56,9 @@
 // 0xDEADBEEF default. An address in no block that is listed reads 0xDEADBEEF and drops stores; an unassigned
 // offset inside a block reads 0.
 // The SECTOR block is one primary hps_io read slot plus up to two save slots ("cards"); its kind words declare
-// each card slot, its DDR image base and extent. OSDBUF decodes image stores and CTRL; the shadow RAMs live in
-// each osd instance (osd.v). EVT raises the status back-channel's cause on its own line. LANE replays ordered
-// link frames onto sys_top's link nets and can capture their replies.
+// each card slot, its DDR image base and extent. OSDBUF queues image stores for a clk_sys writer that writes
+// them through each osd instance's own osd_buffer port (lw_osd.sv, osd.v). EVT raises the status back-channel's
+// cause on its own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), PAD's analog-drop count (reads 0)
 // and lw_sector's diagnostics; LW_DIAG=1 (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
@@ -113,11 +114,11 @@ module lw_sys_window #(
 	output wire        lane_strobe,
 	output wire [15:0] lane_din,
 
-	output wire        osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image
-	output wire  [9:0] osd_addr,
-	output wire [31:0] osd_data,
-	output wire  [3:0] osd_be,
-	output wire  [1:0] osd_ctrl      // {LWSEL & HR, LWSEL}, clk_100m registers; each osd synchronizes them
+	input wire   [1:0] osd_sel,      // clk_sys: both osd selects as each osd sees them, {vga, hdmi}
+	input wire         osd_view,     // clk_sys: GPO[31], 1 = the link's I/O view
+	output wire        osd_we,       // clk_sys: one byte of every osd's osd_buffer (lw_osd.sv)
+	output wire [12:0] osd_addr,
+	output wire  [7:0] osd_byte
 );
 
 `ifdef LW_DIAG
@@ -163,7 +164,7 @@ localparam [31:0] SEC_VER   = 32'h00010001;
 localparam  [7:0] SEC_LINE  = 8'd1;                        // f2h_irq[8], GIC SPI 48
 localparam [15:0] SEC_BITS  = 16'h0001;                    // the request event
 localparam [15:0] OSD_KIND  = 16'd3;
-localparam [31:0] OSD_VER   = 32'h00010000;
+localparam [31:0] OSD_VER   = 32'h00020000;
 localparam  [7:0] OSD_LINE  = 8'd0;
 localparam [15:0] EVT_KIND  = 16'd4;
 localparam [31:0] EVT_VER   = 32'h00010000;
@@ -178,8 +179,12 @@ localparam [15:0] SEC_GAP   = 16'd2;      // clk_sys cycles between write strobe
 localparam  [7:0] MC_FLAGS  = 8'h03;      // RD: BEGIN_S frames; WR: WACK_S, bytes from the DDR image
 localparam        MC_DECL0  = SEC_EN && MC_WSRC0 != 0;
 localparam        MC_DECL1  = SEC_EN && MC_WSRC1 != 0;
-localparam [12:0] OSD_CTRL  = 13'h1000;   // block-relative; the image is 0x0000-0x0FFF
-localparam [31:0] OSD_GEOM  = {16'd128, 16'd256};
+`ifdef MENU_CORE
+localparam [15:0] OSD_ROWS  = 16'd20;     // the image's rows of 256 bytes, header rows 16-19 included
+`else
+localparam [15:0] OSD_ROWS  = 16'd16;
+`endif
+localparam        OSD_AW    = 8;          // FIFO depth 256
 localparam        LANE_AW   = 10;         // FIFO depth 1024: a 256-entry 0x33 gamma table is 770 entries
 localparam  [7:0] LANE_GAP  = 8'd4;       // clk_sys cycles without a wait between strobes, 2..7
 localparam        LANE_RAW  = 8;          // reply FIFO depth 256
@@ -233,8 +238,6 @@ reg            hrst_d  = 1'b1;        // lw_hrst is high from configuration: con
 wire           quiet;                 // every enable link lets an ENABLE through
 
 reg [31:0] scratch = 0;
-reg  [1:0] octrl   = 0;               // OSD CTRL, {HR, LWSEL}
-reg        ohr     = 0;
 
 // Selects: high address bits against a constant, read and write side alike, for listed blocks only.
 wire        r_dir  = lw_raddr[20:12] == DIR_A[20:12];
@@ -254,12 +257,13 @@ wire        w_pad  = has_pad && lw_waddr[20:18] == PAD_A[20:18];
 
 // The gate: ENABLE takes the raw store, every other store needs en_q, and a store to a block with an enable link
 // needs that link open as well.
-wire        sec_open, sec_owned, sec_idle, lane_open, lane_owned, lane_idle;
+wire        sec_open, sec_owned, sec_idle, osd_open, osd_owned, osd_idle, lane_open, lane_owned, lane_idle;
 wire        w_ena_a = w_dir && lw_waddr[11:2] == H_ENA;
 wire        wr      = lw_write & en_q;
 wire        wr_sec  = wr & sec_open;
+wire        wr_osd  = wr & osd_open;
 wire        wr_lane = wr & lane_open;
-assign      quiet   = sec_idle & lane_idle;
+assign      quiet   = sec_idle & osd_idle & lane_idle;
 wire        e_take  = lw_write && w_ena_a && &lw_be && lw_wdata == ENA_W && !en_q && !lw_hrst && !lw_idv && quiet;
 
 // Block-relative addresses: the address bits below each block's size (SECTOR's second page is its upper half).
@@ -275,7 +279,7 @@ wire [17:0] rpad  = lw_raddr[17:0];
 wire [17:2] wpad  = lw_waddr[17:2];
 
 wire        sec_bell, evt_irq;         // each block's CAUSE word is non-zero
-wire [31:0] sec_rdata, evt_rdata, lane_rdata, pad_rdata;
+wire [31:0] sec_rdata, evt_rdata, osd_rdata, lane_rdata, pad_rdata;
 
 // A block's cause level, for the lines and PENDING: only a listed block's.
 wire        sec_lvl = has_sec & sec_bell;
@@ -311,7 +315,8 @@ always @(posedge clk) begin
 		lburst <= 0;
 	end
 	else begin
-		if (lw_write && !w_ena_a && (!en_q || (w_sec && !sec_open) || (w_lane && !lane_open))) stale <= 1;
+		if (lw_write && !w_ena_a && (!en_q || (w_sec && !sec_open) || (w_osd && !osd_open) || (w_lane && !lane_open)))
+			stale <= 1;
 		if (lw_wburst) lburst <= 1;
 	end
 
@@ -325,10 +330,12 @@ wire [31:0] ena_rd = {en_q, quiet, stale, lburst, 12'd0, lw_hrst, 3'd0, lw_idv, 
 wire [31:0] pending = ({31'd0, sec_lvl} << e_sec) | ({31'd0, evt_lvl} << e_evt);
 
 // OPEN and OWNED: bit i is entry i's. A linked block's bits are its link's; every other block's OPEN is en_q.
-wire [31:0] linked  = ({31'd0, has_sec} << e_sec) | ((LANE_EN ? 32'd1 : 32'd0) << e_lane);
+wire [31:0] linked  = ({31'd0, has_sec} << e_sec) | ((OSD_EN ? 32'd1 : 32'd0) << e_osd) |
+                      ((LANE_EN ? 32'd1 : 32'd0) << e_lane);
 wire [31:0] open_w  = ({32{en_q}} & present & ~linked) | ({31'd0, has_sec & sec_open} << e_sec) |
-                      ({31'd0, lane_open} << e_lane);
-wire [31:0] owned_w = ({31'd0, has_sec & sec_owned} << e_sec) | ({31'd0, lane_owned} << e_lane);
+                      ({31'd0, osd_open} << e_osd) | ({31'd0, lane_open} << e_lane);
+wire [31:0] owned_w = ({31'd0, has_sec & sec_owned} << e_sec) | ({31'd0, osd_owned} << e_osd) |
+                      ({31'd0, lane_owned} << e_lane);
 
 // One entry word: the 8 common words, then the kind's word kw (K0-K23).
 function automatic [31:0] ent(input [4:0] w, input [15:0] kind, input [31:0] ver, input [20:0] off,
@@ -367,6 +374,14 @@ function automatic [31:0] sec_kw(input [4:0] k, input [1:0] wd);
 	endcase
 endfunction
 
+function automatic [31:0] osd_kw(input [4:0] k);
+	case (k)
+		5'd0:    osd_kw = {OSD_ROWS, 16'd256};                 // {rows, bytes per row}
+		5'd1:    osd_kw = {16'd1 << OSD_AW, 16'd0};            // FIFO entries
+		default: osd_kw = 32'd0;
+	endcase
+endfunction
+
 function automatic [31:0] lane_kw(input [4:0] k);
 	case (k)
 		5'd8:    lane_kw = LANE_CAPS;
@@ -391,8 +406,7 @@ always @(*) begin
 	if (has_sec && de == e_sec)
 		dir_ent = ent(dew, SEC_KIND, SEC_VER, SEC_OFF, SEC_SIZE, SEC_OFF, SEC_LINE, SEC_BITS, sec_kw(dk, wired[2:1]));
 	if (OSD_EN && de == e_osd)
-		dir_ent = ent(dew, OSD_KIND, OSD_VER, OSD_OFF, OSD_SIZE, 21'd0, OSD_LINE, 16'd0,
-		              (dk == 5'd0) ? OSD_GEOM : 32'd0);       // K0: {height, width} in pixels, 1 bit each
+		dir_ent = ent(dew, OSD_KIND, OSD_VER, OSD_OFF, OSD_SIZE, 21'd0, OSD_LINE, 16'd0, osd_kw(dk));
 	if (has_evt && de == e_evt)
 		dir_ent = ent(dew, EVT_KIND, EVT_VER, EVT_OFF, EVT_SIZE, EVT_OFF, EVT_LINE, EVT_BITS, 32'd0);
 	if (LANE_EN && de == e_lane)
@@ -418,10 +432,6 @@ always @(*) begin
 end
 
 // The read word: one AND-OR over the exclusive selects.
-wire [31:0] osd_rdata = (rosd == OSD_CTRL)          ? {30'd0, octrl} :
-                        (rosd == OSD_CTRL + 13'd4)  ? 32'h3144534F :   // "OSD1"
-                        32'd0;
-
 assign lw_rdata = ({32{r_dir}}  & dir_rdata)  | ({32{r_sec}} & sec_rdata) | ({32{r_evt}} & evt_rdata) |
                   ({32{r_osd}}  & osd_rdata)  | ({32{r_lane}} & lane_rdata) | ({32{r_pad}} & pad_rdata) |
                   ({32{r_none}} & 32'hDEADBEEF);
@@ -576,24 +586,35 @@ else begin : nolane
 end
 endgenerate
 
-// OSDBUF: image stores go to both osd shadows (byte lanes honour BE); CTRL is {HR, LWSEL}, and reads 0 whenever
-// en_q does, so no shadow is shown on a link the host enable does not hold.
-assign osd_we   = wr && w_osd && ~wosd[12];
-assign osd_addr = OSD_EN ? wosd[11:2] : 10'd0;
-assign osd_data = OSD_EN ? lw_wdata : 32'd0;
-assign osd_be   = OSD_EN ? lw_be : 4'd0;
-assign osd_ctrl = {ohr, octrl[0]};
-
-always @(posedge clk) begin
-	if (!en_q) begin
-		octrl <= 0;
-		ohr   <= 0;
-	end
-	else if (wr && w_osd && wosd == OSD_CTRL && lw_be[0]) begin
-		octrl <= lw_wdata[1:0];
-		ohr   <= &lw_wdata[1:0];
-	end
+generate
+`ifdef MISTER_LW_OSD
+if (OSD_EN) begin : osd
+	lw_osd #(.ROWS(OSD_ROWS), .AW(OSD_AW)) osd
+	(
+		.clk(clk),
+		.raddr(rosd), .rdata(osd_rdata),
+		.waddr(wosd), .wsel(w_osd), .write(wr_osd), .wdata(lw_wdata), .be(lw_be), .hen(en_q),
+		.take(e_take), .f_open(osd_open), .f_owned(osd_owned), .f_idle(osd_idle),
+		.clk_sys(clk_sys), .sel(osd_sel), .view(osd_view),
+		.we(osd_we), .addr(osd_addr), .dbyte(osd_byte)
+	);
 end
+`else
+// OSD_EN without the tier macro: lw_osd.sv is empty, so the build stops here, naming the macro
+if (OSD_EN) begin : osd
+	lw_osd_needs_MISTER_LW_OSD guard();
+end
+`endif
+else begin : noosd
+	assign osd_rdata = 32'd0;
+	assign osd_open  = 1'b0;
+	assign osd_owned = 1'b0;
+	assign osd_idle  = 1'b1;
+	assign osd_we    = 1'b0;
+	assign osd_addr  = 13'd0;
+	assign osd_byte  = 8'd0;
+end
+endgenerate
 
 endmodule
 

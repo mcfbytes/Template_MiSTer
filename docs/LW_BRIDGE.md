@@ -45,7 +45,7 @@ validation" at the end.
    With `MISTER_LW` it expands to `"AXI:40000:80000:LW,",` whatever blocks are built: the directory lists the
    blocks and declares their lines. Without it, it expands to nothing.
 
-3. **Nothing else for pads, the OSD shadow and the status back-channel**, each with its tier macro
+3. **Nothing else for pads, the OSD image and the status back-channel**, each with its tier macro
    (`MISTER_LW_PAD`, `MISTER_LW_OSD`, `MISTER_LW_EVT`). A core that passes `HPS_BUS` to `hps_io` gets them. `Template.sv` shows the status back-channel: the first pad button cycles an option and writes the new
    status word back with `status_in`/`status_set`.
 
@@ -65,7 +65,7 @@ beyond it then show no presence bit, and their blocks are not listed in the dire
 | `MISTER_LW` | off | the floor: the bridge, the window, its directory, the host enable and GPI bits 25, 24 and 22 |
 | `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the status back-channel (`lw_evt.sv`), `hps_io`'s exports and its line |
-| `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block and the shadow in each `osd` |
+| `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH, the analog-drop count and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
@@ -157,9 +157,9 @@ inside the window or outside it, and an unassigned offset inside a block reads 0
 | `0x18` | ENABLE | read/write: the host enable (below) |
 | `0x1C` | - | 0, reserved |
 | `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero, enabled or not |
-| `0x24` | OWNED | bit *i* = entry *i*'s block has not yet returned to SPI: its core-clock half has not acknowledged rest since the enable last fell (or since configuration), or the enable fell before the half answered its rise; only blocks with an enable link (SECTOR, LANE) ever set it |
+| `0x24` | OWNED | bit *i* = entry *i*'s block has not yet returned to SPI: its core-clock half has not acknowledged rest since the enable last fell (or since configuration), or the enable fell before the half answered its rise; only blocks with an enable link (SECTOR, OSDBUF, LANE) ever set it |
 | `0x28` | SCRATCH | read/write with `LW_DIAG=1` (while enabled, like every store); 0 otherwise |
-| `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now: the enable for a block without an enable link, and for SECTOR and LANE the enable and the block's core-clock half having answered its rise; a store to a linked block before its bit is set is dropped and sets `stale` |
+| `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now: the enable for a block without an enable link, and for SECTOR, OSDBUF and LANE the enable and the block's core-clock half having answered its rise; a store to a linked block before its bit is set is dropped and sets `stale` |
 | `0x30` | LINE_EN | read/write while enabled: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever the enable does |
 | `0x34` | RESETS | `{freed[15:8], hrst[7:0]}`: the firewall's state machines freed at a reset's release, and the HPS resets the fabric saw; each counts from configuration and stops at 255 |
 | `0x38`-`0x3C` | - | 0, reserved |
@@ -184,7 +184,7 @@ bitstream builds, so an entry's index (and its PENDING bit) depends on the core'
 |---|---|---|---|---|---|---|---|
 | 1 | PAD | `0x00010000` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap |
 | 2 | SECTOR | `0x00010001` | `0x01000` / `0x02000` | `0x01000` | 1 | `0x1` | see SECTOR |
-| 3 | OSDBUF | `0x00010000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0: geometry `{height, width}` = `0x00800100` |
+| 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000` |
 | 4 | SYS | `0x00010000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0x1` | none |
 | 5 | LANE | `0x00010001` | `0x06000` / `0x01000` | 0 | 0 | 0 | see LANE |
 
@@ -231,23 +231,23 @@ A read returns `{en[31], quiet[30], stale[29], burst[28], 12'd0, hrst[15], 3'd0,
 | `hrst` | the fabric sees the HPS reset now; no ENABLE is taken while it is 1 |
 | `idv` | GPO bit 31 reads 0 now (the ID view, or the core reset through GPO); no ENABLE is taken while it is 1 |
 
-**When the enable falls**, every line falls, LINE_EN and OSDBUF CTRL read 0, the SECTOR block's EN bits clear (a
-frame in flight completes, zero-filled from the first word the host did not store, and each slot returns to SPI
-once its frame is done; in this revision a save-slot frame cut this way is zero-filled too), queued SECTOR entries
-are discarded (a BEGIN not yet taken leaves its request standing for SPI), the open LANE frame is abandoned, queued
-LANE frames are discarded unplayed (one already playing finishes), and reply words still to come are discarded. A
-frame stored in full before the fall is delivered whole. PAD levels already delivered stay in the core, as a stock
-program's would, until the next pad store over either path.
+**When the enable falls**, every line falls, LINE_EN reads 0, OSD image stores still queued are discarded unwritten,
+the SECTOR block's EN bits clear (a frame in flight completes, zero-filled from the first word the host did not
+store, and each slot returns to SPI once its frame is done; in this revision a save-slot frame cut this way is
+zero-filled too), queued SECTOR entries are discarded (a BEGIN not yet taken leaves its request standing for SPI),
+the open LANE frame is abandoned, queued LANE frames are discarded unplayed (one already playing finishes), and
+reply words still to come are discarded. A frame stored in full before the fall is delivered whole. PAD levels
+already delivered stay in the core, as a stock program's would, until the next pad store over either path.
 
-**The enable links.** SECTOR and LANE each carry the enable to their core-clock half over a link with one level each
-way: the enable level, and the half's acknowledge that it is at rest (nothing queued, nothing in flight, every
-handshake idle). The half's only enable input is that level, and it reaches rest from any state once the level is
-low. A link opens a block's stores only after the half has seen the level rise, and the level falls only after the
-half has answered it, so an enable that falls within a few cycles of its rise still leaves the link closed until the
-half answers. An ENABLE is taken only while every link is at rest (`quiet`). At an ENABLE the causes are reloaded:
-SYS raises STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that stands.
-While GPO bit 31 is 0 (the ID view) the lane player starts no frame, so nothing queued by a host that has gone plays
-inside the next program's identification.
+**The enable links.** SECTOR, OSDBUF and LANE each carry the enable to their core-clock half over a link with one
+level each way: the enable level, and the half's acknowledge that it is at rest (nothing queued, nothing in flight,
+every handshake idle). The half's only enable input is that level, and it reaches rest from any state once the level
+is low. A link opens a block's stores only after the half has seen the level rise, and the level falls only after
+the half has answered it, so an enable that falls within a few cycles of its rise still leaves the link closed until
+the half answers. An ENABLE is taken only while every link is at rest (`quiet`). At an ENABLE the causes are
+reloaded: SYS raises STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that
+stands. While GPO bit 31 is 0 (the ID view) neither the lane player nor the OSD writer starts anything, so nothing
+queued by a host that has gone plays inside the next program's identification.
 
 **The enable needs the link's I/O view.** A host that holds it never leaves the I/O view, identifies the core
 before it enables, and enables again after its own core reset through GPO.
@@ -310,18 +310,30 @@ One store **is** one SPI set-command: a full 32-bit word (all four byte enables)
 
 ### OSDBUF block (kind 3)
 
-A shadow of `osd_buffer` in each `osd` instance (HDMI and VGA), written over the bridge.
+Image stores written into `osd_buffer` itself, in each `osd` instance (HDMI and VGA), through one write port beside
+the SPI one.
 
 | offset | register | |
 |---|---|---|
-| `0x0000`-`0x0FFF` | IMAGE | byte at `row * 256 + column` (row 0-15), `osd_buffer`'s layout: one byte = 8 vertical pixels. Byte enables honoured |
-| `0x1000` | CTRL | `[0]` LWSEL: video reads the shadow instead of `osd_buffer`. `[1]` HR: with LWSEL, the 16-row (highres) size. Reads 0 whenever the enable does |
-| `0x1004` | ID | `0x3144534F` ("OSD1") |
+| `0x0000`-`0x13FF` | IMAGE | W: byte *a* = `osd_buffer[a]`, row `a[12:8]`, column `a[7:0]`: one byte = 8 vertical pixels. Rows 16-19 (the `MENU_CORE` header rows) only with `MENU_CORE`. Byte enables honoured; reads 0 |
+| `0x1800` | STATUS | R: `{7'd0, level[24:16], drops[15:0]}`: entries waiting (0-256); stores dropped on a full FIFO, free-running |
+| `0x1804` | ID | `0x3244534F` ("OSD2") |
 
-- **Still on SPI:** enable/disable, the info box, rotation and `osd_status`.
-- **Highres:** the SPI rule OR (LWSEL & HR).
-- **Header rows** (the `MENU_CORE` title rows) never read the shadow.
-- **Cost:** four 1024x8 M10K per `osd` instance.
+- **The FIFO:** each store takes one entry `{byte enables, word, data}` of a 256-entry FIFO; a store that finds it
+  full is dropped and counted. The address rides each entry, so a dropped store loses only its own word and storing
+  it again repairs it.
+- **The writer** (on `clk_sys`) writes one enabled byte per cycle to every `osd`, and only while both `osd` selects
+  are low and the link is in its I/O view, in that cycle and the two before it. An SPI OSD write needs its select
+  high, so the two never meet. A word leaves the FIFO once its last byte is written: `level` = 0 means every byte
+  stored is in `osd_buffer`.
+- **Highres:** an LW byte in rows 8-15 sets it, as an SPI write command with bit 3 does; the SPI disable clears it.
+- **Behind the enable:** OSDBUF has an enable link. Stores are taken only while its OPEN bit is set; once the enable
+  falls the writer discards every queued entry unwritten, so a repaint still queued for a host that has gone never
+  draws into the next program's OSD.
+- **Still on SPI:** enable/disable, the info box, rotation and `osd_status`. The pixel path is upstream's.
+- **Host rules:** compare `drops` around a repaint and store again if it moved; send SPI OSD control words only at
+  `level` = 0, so a late byte of rows 8-15 cannot set highres after a disable.
+- **Cost:** the FIFO, 256 x 47 bits (two M10K).
 
 ### SYS block (kind 4): the status back-channel
 
@@ -511,11 +523,9 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
   ratio bound. PLAYED and the reply-drop count cross as toggles, at most one per `strobe_gap + 5` and per
   `strobe_gap + 2` `clk_sys` cycles; each toggle must outlast two `clk_100m` periods, which holds below about
   250 MHz of `clk_sys`.
-- **OSDBUF CTRL:** quasi-static bits through two-flop synchronisers in each `osd`.
-  - In this Template, `clk_100m` and the video clocks are in exclusive clock groups (`sys_top.sdc`), so no extra
-    constraint is needed.
-  - A core whose video clock comes from a PLL outside those groups needs a false path from
-    `*lw_sys_window|octrl[0]` to `*|lwsel_v0`.
+- **OSDBUF:** image stores cross in a dual-clock FIFO with Gray pointers that step one entry per update, into the
+  writer on `clk_sys`, which writes `osd_buffer` on `clk_sys` as the SPI path does. No ratio bound. Nothing of the
+  block reaches a video clock.
 
 ## `HPS_BUS` with `MISTER_LW`
 
@@ -581,7 +591,9 @@ and 3. They cover:
 - frames that are lost, resent, out of order, aborted, rejected or reset mid-frame;
 - card reads and writes, and their priority;
 - the SYS seqlock, including a 64-offset read/capture race;
-- the OSD shadow drawn through both `osd` pixel paths.
+- the OSD image over LW in both `osd_buffer`s byte for byte as over SPI, drawn the same through both pixel paths
+  (plain, rotated, the info box and the `MENU_CORE` header rows), the FIFO full with `clk_sys` stopped, and queued
+  bytes discarded when the enable falls.
 
 Re-run it after any `sys/` merge.
 
@@ -592,8 +604,9 @@ Re-run it after any `sys/` merge.
   built on.
 - **Register map:** the blocks' registers are those of a build validated on a DE10-Nano on 2026-10-25, which
   covered pads, the OSD shadow, SECTOR (CD and save slots) and the SYS status line, except where this document
-  states otherwise: CAUSE words clear by write-one and carry no class tag, and a store is a single-beat write. The
-  directory is layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
+  states otherwise: CAUSE words clear by write-one and carry no class tag, a store is a single-beat write, and
+  OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a shadow beside it. The directory is
+  layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
   directory here and stays on SPI.
 - **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and
   each block's registers, causes and lines. Nothing else about the host is assumed, and a host that never touches

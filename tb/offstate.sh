@@ -4,6 +4,9 @@
 #   1. sys_top.v, hps_io.sv, osd.v, sysmem.sv and emu_ports.vh, preprocessed with MISTER_LW and every tier
 #      macro undefined, give upstream's token stream (comments and whitespace aside) with no macro, with each
 #      macro upstream's own text tests (read from those five files at upstream), alone, and with all of them.
+#   1b. osd.v with MISTER_LW and MISTER_LW_OSD, under each of those macro sets, gives upstream's token stream
+#      from its clk_video half (the pixel path, from ce_pix's declaration) to the end: the OSDBUF tier changes
+#      only its clk_sys write side.
 #   2. Every LW-only file (sys/hps_lw_*.sv, sys/lw_*.sv) preprocesses to no token at all without MISTER_LW,
 #      under each of those macro sets; a tier's file also with MISTER_LW and without its tier macro.
 #   3. Every LW-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro) first,
@@ -35,7 +38,7 @@ import os, re, subprocess, sys
 UP, O = sys.argv[1], sys.argv[2]
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
-        'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE'}
+        'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE', 'lw_osd.sv': 'MISTER_LW_OSD'}
 checks = fails = 0
 
 def check(ok, what):
@@ -83,6 +86,24 @@ for f in STOCK:
             check(False, '%s [%s]: token %d differs: ... %s ... upstream: ... %s ...' % (f, label, n, a, b))
         else:
             check(True, '')
+
+print('-- osd.v\'s clk_video half is upstream\'s token stream with MISTER_LW and MISTER_LW_OSD, under every macro set')
+for label, defs in sets:
+    mine, e1 = pp('sys/osd.v', ['MISTER_LW', 'MISTER_LW_OSD'] + defs)
+    theirs, e2 = pp(os.path.join(UP, 'sys/osd.v'), defs)
+    if not check(mine is not None and theirs is not None, 'sys/osd.v [OSD, %s]: preprocessor error %s%s' %
+                 (label, e1, e2)):
+        continue
+    if not check('direct_enable' in mine and 'direct_enable' in theirs,
+                 'sys/osd.v [OSD, %s]: no clk_video half' % label):
+        continue
+    a_, b_ = mine[mine.index('direct_enable') - 2:], theirs[theirs.index('direct_enable') - 2:]
+    if a_ != b_:
+        n, x, y = first_diff(a_, b_)
+        check(False, 'sys/osd.v [OSD, %s]: the clk_video half differs at token %d: ... %s ... upstream: ... %s ...' %
+              (label, n, x, y))
+    else:
+        check(True, '')
 
 lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_)\w*\.s?v$', x))
 print('-- every LW-only file is empty without its macro (%s)' % ' '.join(lw))

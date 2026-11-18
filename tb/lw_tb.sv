@@ -16,7 +16,7 @@
 //============================================================================
 
 // LW bridge framework testbench: hps_lw_bridge, lw_sys_window (directory, PAD, SECTOR, OSDBUF, SYS), hps_io's
-// LW write path and both osd shadows, driven through a stand-in for the HPS LW bridge atom (lw_stub_atom.sv).
+// LW write path and both osds' osd_buffer, driven through a stand-in for the HPS LW bridge atom (lw_stub_atom.sv).
 // The tier macros choose the blocks (MISTER_LW_PAD, _EVT, _SECTOR_SLOT, _LANE, _OSD): a case that needs a block
 // runs only where it is built, and the directory, the decode and the lines are checked against the set built.
 // HPS_BUS[383:46] is the window's one port with a weak pull-down, as synthesis ties a net with no source low.
@@ -184,11 +184,9 @@ wire  [3:0] lw_be;
 wire  [2:0] lines;           // line ordinal k = lines[k-1]
 wire        doorbell = lines[0];   // ordinal 1: SECTOR's entry
 wire        sys_irq  = lines[1];   // ordinal 2: SYS's entry
-wire        osd_we;
-wire  [9:0] osd_addr;
-wire [31:0] osd_data;
-wire  [3:0] osd_be;
-wire  [1:0] osd_ctrl;
+wire        osd_we;          // the OSDBUF writer's byte to both osds, on clk_sys
+wire [12:0] osd_addr;
+wire  [7:0] osd_byte;
 
 wire        lw_hrst, fw_present, fw_idle;
 wire  [1:0] lw_freed;
@@ -209,13 +207,19 @@ hps_lw_bridge bridge
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be), .lw_wburst(lw_wburst)
 );
 
-// The register bus's store pulses, the dropped burst beats and the OSD image stores, counted.
-integer n_lwwr = 0, n_lwwb = 0, n_osdwe = 0, n_padwe = 0;
-always @(posedge clk_sys) if (lw_pad[48]) n_padwe = n_padwe + 1;
+// The register bus's store pulses, the dropped burst beats, the OSD image stores queued and the bytes the OSD
+// writer wrote, counted.
+integer n_lwwr = 0, n_lwwb = 0, n_osdq = 0, n_osdwe = 0, n_padwe = 0;
+always @(posedge clk_sys) begin
+	if (lw_pad[48]) n_padwe = n_padwe + 1;
+	if (osd_we)     n_osdwe = n_osdwe + 1;
+end
 always @(posedge clk) begin
 	if (lw_write)  n_lwwr  = n_lwwr + 1;
 	if (lw_wburst) n_lwwb  = n_lwwb + 1;
-	if (osd_we)    n_osdwe = n_osdwe + 1;
+`ifdef MISTER_LW_OSD
+	if (win.osd.osd.st && !win.osd.osd.full) n_osdq = n_osdq + 1;
+`endif
 end
 
 // The tiers built (_B), and listed: a built tier whose core-side piece is present.
@@ -269,6 +273,11 @@ localparam TB_LANE = 1;
 localparam TB_LANE = 0;
 `endif
 localparam TB_COUNT = TB_PAD + TB_SEC + TB_OSD + TB_EVT + TB_LANE;
+`ifdef MENU_CORE
+localparam TB_MENU = 1;          // osd_buffer has the header rows 16-19
+`else
+localparam TB_MENU = 0;
+`endif
 
 // HPS_BUS as sys_top wires it: the window's hps_lw is [383:46]; the SPI side is driven by the tb (io_*). A bit no
 // piece drives reads 0 (the pull-down), as synthesis ties it.
@@ -299,7 +308,7 @@ lw_sys_window #(
 	.lw_hrst(lw_hrst), .lw_freed(lw_freed), .lw_idv(lw_idv), .held(lw_held),
 	.lines(lines),
 	.clk_sys(clk_sys), .hps_lw(hps_bus[383:46]),
-	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl),
+	.osd_sel(m_sel[3:2]), .osd_view(gpo31_s), .osd_we(osd_we), .osd_addr(osd_addr), .osd_byte(osd_byte),
 `ifdef MISTER_LW_LANE
 	.lane_busy(io_enable | io_fpga | io_osd | ~gpo31_s), .lane_wait(hps_bus[37] | vs_wait), .lane_dout(hps_bus[15:0]),
 	.lane_own(lane_own), .lane_hold(lane_hold), .lane_sel(lane_sel), .lane_strobe(lane_strobe), .lane_din(lane_din)
@@ -332,7 +341,7 @@ wire        m_strobe = io_strobe;
 wire [15:0] m_din = io_din;
 `endif
 
-// Both osd instances as sys_top wires them: one SPI select (the HPS drives ss0 and ss2 together), one LW store bus.
+// Both osd instances as sys_top wires them: one SPI select (the HPS drives ss0 and ss2 together), one LW write port.
 reg clk_vid = 0;
 always #3.25 clk_vid = ~clk_vid;
 reg   [8:0] vh = 0, vv = 0;           // 272x140 active in 288x148: ce_pix every clock, OSD 256 wide
@@ -353,7 +362,7 @@ osd hdmi_osd
 	.clk_video(clk_vid), .din(24'd0), .de_in(v_de), .vs_in(v_vs), .hs_in(v_hs),
 	.dout(ho_d), .de_out(ho_de), .vs_out(ho_vs), .hs_out(ho_hs)
 `ifdef MISTER_LW_OSD
-	, .clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
+	, .lw_we(osd_we), .lw_addr(osd_addr), .lw_byte(osd_byte)
 `endif
 );
 
@@ -363,12 +372,17 @@ osd vga_osd
 	.clk_video(clk_vid), .din(24'd0), .de_in(v_de), .vs_in(v_vs), .hs_in(v_hs),
 	.dout(vo_d), .de_out(vo_de), .vs_out(vo_vs), .hs_out(vo_hs)
 `ifdef MISTER_LW_OSD
-	, .clk_lw(clk), .lw_we(osd_we), .lw_addr(osd_addr), .lw_data(osd_data), .lw_be(osd_be), .lw_ctrl(osd_ctrl)
+	, .lw_we(osd_we), .lw_addr(osd_addr), .lw_byte(osd_byte)
 `endif
 );
 
 osd_cap cap_h(.clk(clk_vid), .d(ho_d), .de(ho_de), .vs(ho_vs));
 osd_cap cap_v(.clk(clk_vid), .d(vo_d), .de(vo_de), .vs(vo_vs));
+// The pixel path's interlace flag has no initial value in osd.v (a register powers up 0 on the device); the
+// simulation gives it one through the block name LW_TB_PROBES adds, or no frame ever shows the OSD.
+`ifdef LW_TB_PROBES
+initial begin hdmi_osd.pix.f1 = 1'b0; vga_osd.pix.f1 = 1'b0; end
+`endif
 
 wire awready = bridge.hps2fpga_light_weight.awready;
 wire wready  = bridge.hps2fpga_light_weight.wready;
@@ -644,8 +658,12 @@ end
 function [511:0] pure_win;
 	reg [63:0] p;
 	reg [167:0] e;
+	reg [33:0] o;
 	begin
-		p = 0; e = 0;
+		p = 0; e = 0; o = 0;
+`ifdef MISTER_LW_OSD
+		o = {win.osd.osd.wptr, win.osd.osd.osd_w_lwgray, win.osd.osd.drops};
+`endif
 `ifdef MISTER_LW_PAD
 		p = {win.pad.pad.adrop, win.pad.pad.dirty, win.pad.pad.awp, win.pad.pad.arp, win.pad.pad.ds, win.pad.pad.psel,
 		     win.pad.pad.rr};
@@ -653,7 +671,7 @@ function [511:0] pure_win;
 `ifdef MISTER_LW_EVT
 		e = {win.evt.evt.flg, win.evt.evt.seq, win.evt.evt.snap, win.evt.evt.cause};
 `endif
-		pure_win = {215'd0, win.scratch, win.octrl, win.ohr, doorbell, sys_irq, p, e};
+		pure_win = {212'd0, win.scratch, o, doorbell, sys_irq, p, e};
 	end
 endfunction
 function [511:0] pure_sec;
@@ -1067,9 +1085,10 @@ endtask
 // The same on SYS's CAUSE word, where the block is listed.
 task sys_drain; if (TB_EVT) cause_drain(SYSB); endtask
 
-// The entries with an enable link (SECTOR, LANE): a store to one needs its OPEN bit.
+// The entries with an enable link (SECTOR, OSDBUF, LANE): a store to one needs its OPEN bit.
 localparam TB_E_SEC = TB_PAD, TB_E_OSD = TB_E_SEC + TB_SEC, TB_E_SYS = TB_E_OSD + TB_OSD, TB_E_LANE = TB_E_SYS + TB_EVT;
-localparam [31:0] TB_LINKED = (TB_SEC ? 32'd1 << TB_E_SEC : 32'd0) | (TB_LANE ? 32'd1 << TB_E_LANE : 32'd0);
+localparam [31:0] TB_LINKED = (TB_SEC ? 32'd1 << TB_E_SEC : 32'd0) | (TB_OSD ? 32'd1 << TB_E_OSD : 32'd0) |
+                              (TB_LANE ? 32'd1 << TB_E_LANE : 32'd0);
 // The host's step before an ENABLE: ENABLE read until quiet, for a bound (a stopped clk_sys never answers).
 task wait_quiet;
 	reg [31:0] v;
@@ -1132,6 +1151,10 @@ reg fc_off = 0;                    // a case scrambles or forces a link
 fence_chk fc_sec(.clk(clk), .off(fc_off), .st(win.sec.sector.fence.st), .lvl(win.sec.sector.fence.hen_lwx),
                  .ack_s(win.sec.sector.fence.ack_s), .stb(win.sec.sector.wsel & win.sec.sector.write));
 `endif
+`ifdef MISTER_LW_OSD
+fence_chk fc_osd(.clk(clk), .off(fc_off), .st(win.osd.osd.fence.st), .lvl(win.osd.osd.fence.hen_lwx),
+                 .ack_s(win.osd.osd.fence.ack_s), .stb(win.osd.osd.wsel & win.osd.osd.write));
+`endif
 `ifdef MISTER_LW_LANE
 fence_chk fc_lane(.clk(clk), .off(fc_off), .st(win.lane.lane.fence.st), .lvl(win.lane.lane.fence.hen_lwx),
                   .ack_s(win.lane.lane.fence.ack_s), .stb(win.lane.lane.wsel & win.lane.lane.write));
@@ -1142,8 +1165,8 @@ function [10:0] tb_g2b(input [10:0] g);
 endfunction
 // Each linked half at rest, as the bench reads its registers: the enable level low, the machine idle with idle
 // outputs, the queue empty against the synchronised write pointer, the Gray sources current, every EN and mux
-// (SECTOR) on SPI. rh_*: the predicate at the last four clk_sys edges.
-wire tr_sec, tr_lane;
+// (SECTOR) on SPI, no OSD word part written. rh_*: the predicate at the last four clk_sys edges.
+wire tr_sec, tr_osd, tr_lane;
 `ifdef MISTER_LW_SECTOR_SLOT
 assign tr_sec = !win.sec.sector.hen_s && win.sec.sector.cs1 == 0 && !win.sec.sector.en_sys &&
                 win.sec.sector.x_en_sys == 0 && (win.sec.sector.fs == 0 || win.sec.sector.fs == 4) &&
@@ -1153,6 +1176,13 @@ assign tr_sec = !win.sec.sector.hen_s && win.sec.sector.cs1 == 0 && !win.sec.sec
 `else
 assign tr_sec = 1'b1;
 `endif
+`ifdef MISTER_LW_OSD
+assign tr_osd = !win.osd.osd.hen_s && !win.osd.osd.hd &&
+                win.osd.osd.rptr == tb_g2b({2'b00, win.osd.osd.wg_s}) &&
+                win.osd.osd.osd_r_lwgray == (win.osd.osd.rptr ^ (win.osd.osd.rptr >> 1));
+`else
+assign tr_osd = 1'b1;
+`endif
 `ifdef MISTER_LW_LANE
 assign tr_lane = !win.lane.lane.hen_s && win.lane.lane.ps == 0 && !win.lane.lane.own && !win.lane.lane.hold &&
                  !win.lane.lane.strobe && win.lane.lane.sel == 0 && win.lane.lane.rptr == tb_g2b(win.lane.lane.wg_s) &&
@@ -1161,15 +1191,17 @@ assign tr_lane = !win.lane.lane.hen_s && win.lane.lane.ps == 0 && !win.lane.lane
 `else
 assign tr_lane = 1'b1;
 `endif
-reg [3:0] rh_sec = 0, rh_lane = 0;
-always @(posedge clk_sys) begin rh_sec <= {rh_sec[2:0], tr_sec}; rh_lane <= {rh_lane[2:0], tr_lane}; end
+reg [3:0] rh_sec = 0, rh_osd = 0, rh_lane = 0;
+always @(posedge clk_sys) begin
+	rh_sec <= {rh_sec[2:0], tr_sec}; rh_osd <= {rh_osd[2:0], tr_osd}; rh_lane <= {rh_lane[2:0], tr_lane};
+end
 integer n_claims = 0, n_offrest = 0;
 always @(posedge clk) if (win.e_take) begin
 	n_claims = n_claims + 1;
-	if (!(tr_sec && tr_lane && &rh_sec && &rh_lane)) begin
+	if (!(tr_sec && tr_osd && tr_lane && &rh_sec && &rh_osd && &rh_lane)) begin
 		n_offrest = n_offrest + 1;
-		if (n_offrest <= 4) $display("   an ENABLE taken at %0t with a half off rest: SECTOR %b %b, LANE %b %b", $time,
-		                             tr_sec, rh_sec, tr_lane, rh_lane);
+		if (n_offrest <= 4) $display("   an ENABLE taken at %0t with a half off rest: SECTOR %b %b, OSD %b %b, LANE %b %b",
+		                             $time, tr_sec, rh_sec, tr_osd, rh_osd, tr_lane, rh_lane);
 	end
 end
 `ifdef MISTER_LW_LANE
@@ -1411,9 +1443,13 @@ task st_read(output [31:0] f0, output [31:0] f1, output [127:0] w);
 	end
 endtask
 
-localparam [20:0] OSD = 21'h44000;
-reg  [7:0] spi_img [0:4095];
-reg  [7:0] lw_img  [0:4095];
+localparam [20:0] OSD   = 21'h44000;
+localparam [20:0] OSDST = OSD + 21'h1800;      // STATUS {level, drops}
+// The image both osd_buffers must hold, whichever path wrote it (X where nothing has been written).
+reg  [7:0] ob [0:5119];
+integer    ob_i;
+initial for (ob_i = 0; ob_i < 5120; ob_i = ob_i + 1) ob[ob_i] = 8'bx;
+localparam OB_ROWS = TB_MENU ? 20 : 16;
 
 function [7:0] lwp(input integer i, input integer k);
 	lwp = (i * 37) ^ (i >> 4) ^ (k * 8'h5B) ^ 8'hA5;
@@ -1421,28 +1457,91 @@ endfunction
 function [7:0] spp(input integer i, input integer k);
 	spp = (i * 113) ^ (i >> 6) ^ (k * 8'hC7) ^ 8'h3C;
 endfunction
+// pattern f (0: lwp, 1: spp) of image word w, generation k
+function [31:0] pw(input integer w, input integer k, input integer f);
+	integer b;
+	for (b = 0; b < 4; b = b + 1) pw[8*b +: 8] = f ? spp(4*w + b, k) : lwp(4*w + b, k);
+endfunction
+// image word w as each osd_buffer holds it
+function [31:0] bw_h(input integer w);
+	bw_h = {hdmi_osd.osd_buffer[4*w+3], hdmi_osd.osd_buffer[4*w+2], hdmi_osd.osd_buffer[4*w+1], hdmi_osd.osd_buffer[4*w]};
+endfunction
+function [31:0] bw_v(input integer w);
+	bw_v = {vga_osd.osd_buffer[4*w+3], vga_osd.osd_buffer[4*w+2], vga_osd.osd_buffer[4*w+1], vga_osd.osd_buffer[4*w]};
+endfunction
 
+// An image store that, taken, lands: the model follows it.
 task osd_word(input integer w, input [31:0] v, input [3:0] be);
 	integer b;
 	begin
 		axi_write(OSD + 4*w, v, be);
-		for (b = 0; b < 4; b = b + 1) if (be[b]) lw_img[4*w + b] = v[8*b +: 8];
+		for (b = 0; b < 4; b = b + 1) if (be[b]) ob[4*w + b] = v[8*b +: 8];
 	end
 endtask
-
-task lw_row(input integer r, input integer k);
-	integer w;
-	for (w = r*64; w < r*64 + 64; w = w + 1) osd_word(w, {lwp(4*w+3, k), lwp(4*w+2, k), lwp(4*w+1, k), lwp(4*w, k)}, 4'hF);
+// The model follows a whole-word store the case has seen land.
+task ob_word(input integer w, input [31:0] v);
+	integer b;
+	for (b = 0; b < 4; b = b + 1) ob[4*w + b] = v[8*b +: 8];
 endtask
+task osd_st(output [31:0] v); axi_read(OSDST, 0, v, dl, beats); endtask
+// The host's pacing: STATUS read until the FIFO has room for n more entries, for a bound.
+task osd_room(input integer n);
+	reg [31:0] v;
+	integer m;
+	begin
+		m = 0;
+		osd_st(v);
+		while (v[24:16] > 256 - n && m < slow(20000)) begin repeat (10) @(negedge clk); m = m + 10; osd_st(v); end
+	end
+endtask
+// STATUS read until level is 0: every byte stored is in osd_buffer.
+task osd_drain; osd_room(256); endtask
 
+// One row over LW, pattern f, generation k, after waiting for room for it.
+task lw_row_f(input integer r, input integer k, input integer f);
+	integer w;
+	begin
+		osd_room(64);
+		for (w = r*64; w < r*64 + 64; w = w + 1) osd_word(w, pw(w, k, f), 4'hF);
+	end
+endtask
+task lw_row(input integer r, input integer k); lw_row_f(r, k, 0); endtask
+
+task spi_w(input [15:0] v);
+	begin io_din = v; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys); end
+endtask
 task spi_osd_begin(input [7:0] cmd);
 	begin
 		@(negedge clk_sys); io_osd = 1;
-		io_din = {8'h00, cmd}; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys);
+		spi_w({8'h00, cmd}); @(negedge clk_sys);
 	end
 endtask
 task spi_osd_end; begin io_osd = 0; repeat (2) @(negedge clk_sys); end endtask
 task spi_osd_cmd(input [7:0] cmd); begin spi_osd_begin(cmd); spi_osd_end; end endtask
+// OSDCMDENABLE with its five words: the info box (inf) at (x, y), w x h cells of 8 pixels, rotation ro
+task spi_osd_en(input inf, input [11:0] x, input [11:0] y, input [5:0] w, input [5:0] h, input [1:0] ro);
+	begin
+		spi_osd_begin(inf ? 8'h45 : 8'h41);
+		spi_w({4'd0, x}); spi_w({4'd0, y}); spi_w({10'd0, w}); spi_w({10'd0, h}); spi_w({14'd0, ro});
+		spi_osd_end;
+	end
+endtask
+
+// A known OSD state: disabled (highres clear), then enabled with no info box and no rotation: 64 lines.
+task osd_lo; begin spi_osd_cmd(8'h40); spi_osd_en(0, 12'd0, 12'd0, 6'd0, 6'd0, 2'd0); end endtask
+// The model takes both osd_buffers as they are (cases the model does not follow, such as the link's and the lane's
+// OSD frames, write them too), once they agree.
+task ob_sync(input string what);
+	integer i, n;
+	begin
+		n = 0;
+		for (i = 0; i < 5120; i = i + 1) begin
+			if (hdmi_osd.osd_buffer[i] !== vga_osd.osd_buffer[i]) n = n + 1;
+			ob[i] = hdmi_osd.osd_buffer[i];
+		end
+		check({what, ": both osd_buffers alike"}, n, 0);
+	end
+endtask
 
 // OSDCMDWRITE row r: 0x20|r, so bit 3 (rows 8-15) re-arms the SPI highres (osd.v:80)
 task spi_osd_row(input integer r, input integer k);
@@ -1450,15 +1549,26 @@ task spi_osd_row(input integer r, input integer k);
 	begin
 		spi_osd_begin(8'h20 | r[4:0]);
 		for (m = 0; m < 256; m = m + 1) begin
-			spi_img[r*256 + m] = spp(r*256 + m, k);
-			io_din = {8'h00, spi_img[r*256 + m]}; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys);
+			ob[r*256 + m] = spp(r*256 + m, k);
+			spi_w({8'h00, ob[r*256 + m]});
 		end
 		spi_osd_end;
 	end
 endtask
 
+// Both osd_buffers against the model, rows r0 to r1 - 1: the bytes that differ.
+task ob_cmp(input string what, input integer r0, input integer r1);
+	integer i, n;
+	begin
+		n = 0;
+		for (i = r0 * 256; i < r1 * 256; i = i + 1)
+			if (hdmi_osd.osd_buffer[i] !== ob[i] || vga_osd.osd_buffer[i] !== ob[i]) n = n + 1;
+		check({what, ": bytes of both osd_buffers that differ from the image"}, n, 0);
+	end
+endtask
+
 // After `nf` frames, both outputs drew an OSD box `exp_lines` high and 256 wide, bit (y, x) from the image.
-task osd_check(input string what, input from_lw, input integer exp_lines, input integer nf);
+task osd_check(input string what, input integer exp_lines, input integer nf);
 	integer f, y, x, bh, bv;
 	reg [7:0] b;
 	begin
@@ -1468,7 +1578,7 @@ task osd_check(input string what, input from_lw, input integer exp_lines, input 
 		bh = 0; bv = 0;
 		for (y = 0; y < exp_lines && y < 128; y = y + 1)
 			for (x = 0; x < 256; x = x + 1) begin
-				b = from_lw ? lw_img[(y >> 3)*256 + x] : spi_img[(y >> 3)*256 + x];
+				b = ob[(y >> 3)*256 + x];
 				if (cap_h.cap[y*256 + x] !== b[y & 7]) bh = bh + 1;
 				if (cap_v.cap[y*256 + x] !== b[y & 7]) bv = bv + 1;
 			end
@@ -1480,39 +1590,65 @@ task osd_check(input string what, input from_lw, input integer exp_lines, input 
 	end
 endtask
 
-`ifdef MISTER_LW_OSD
-function [31:0] lanes_h(input integer w);
-	lanes_h = {hdmi_osd.lw_buf3[w], hdmi_osd.lw_buf2[w], hdmi_osd.lw_buf1[w], hdmi_osd.lw_buf0[w]};
-endfunction
-function [31:0] lanes_v(input integer w);
-	lanes_v = {vga_osd.lw_buf3[w], vga_osd.lw_buf2[w], vga_osd.lw_buf1[w], vga_osd.lw_buf0[w]};
-endfunction
-`endif
-function [31:0] img_w(input integer w);
-	img_w = {lw_img[4*w+3], lw_img[4*w+2], lw_img[4*w+1], lw_img[4*w]};
-endfunction
+// The pixel path's output, whatever it draws: both captures and their box heights after `nf` frames, kept
+// (cap_snap) or compared with the kept one (cap_diff: the pixels that differ).
+reg     cs_h [0:32767];
+reg     cs_v [0:32767];
+integer cs_lh, cs_lv;
+task cap_wait(input integer nf);
+	integer f;
+	begin f = cap_h.frames; wait (cap_h.frames >= f + nf); @(negedge clk_vid); end
+endtask
+task cap_snap(input integer nf);
+	integer i;
+	begin
+		cap_wait(nf);
+		for (i = 0; i < 32768; i = i + 1) begin cs_h[i] = cap_h.cap[i]; cs_v[i] = cap_v.cap[i]; end
+		cs_lh = cap_h.lines; cs_lv = cap_v.lines;
+	end
+endtask
+task cap_diff(input integer nf, output integer n);
+	integer i;
+	begin
+		cap_wait(nf);
+		n = (cap_h.lines != cs_lh) + (cap_v.lines != cs_lv);
+		for (i = 0; i < 32768; i = i + 1) n = n + (cap_h.cap[i] !== cs_h[i]) + (cap_v.cap[i] !== cs_v[i]);
+	end
+endtask
+// The same buffer drawn the same, LW or SPI: an image over SPI (generation k, rows 0 to nr - 1), its pixels kept;
+// another image over LW must draw otherwise; the SPI image's bytes over LW must then draw exactly as over SPI.
+task osd_same(input string what, input integer nr, input integer k);
+	integer r, n;
+	begin
+		for (r = 0; r < nr; r = r + 1) spi_osd_row(r, k);
+		cap_snap(4);
+		check({what, ": the SPI image is drawn"}, cs_lh > 0 && cs_lv > 0, 1);
+		for (r = 0; r < nr; r = r + 1) lw_row(r, k + 1);
+		osd_drain;
+		cap_diff(3, n);
+		check({what, ": another image over LW draws otherwise"}, n > 0, 1);
+		for (r = 0; r < nr; r = r + 1) lw_row_f(r, k, 1);
+		osd_drain;
+		ob_cmp({what, ": the SPI image's bytes over LW"}, 0, nr);
+		cap_diff(3, n);
+		check({what, ": its pixels, as over SPI"}, n, 0);
+	end
+endtask
 
 integer r, bad;
 string  caps;
 
+// The OSD writer's byte comes only while both osd selects are low and the I/O view selected, in its cycle and
+// the two before it (sampled on clk_sys, as the writer is); osd_held counts the cycles it had a word and waited.
+integer osd_clash = 0, osd_held = 0;
+reg [1:0] osd_qh = 0;
+always @(posedge clk_sys) begin
+	if (osd_we && !(m_sel[3:2] == 2'b00 && gpo31_s && osd_qh == 2'b11)) osd_clash = osd_clash + 1;
 `ifdef MISTER_LW_OSD
-// The header rows (ra[12], MENU_CORE builds) always read osd_buffer, never the shadow: on every pixel step
-// with LWSEL set, a header byte must be the SPI byte. Old values sampled at the edge, pbyte read after.
-integer hdr_n = 0, hdr_bad = 0, shd_n = 0, c_n = 0, l_n = 0;
-always @(posedge clk_vid) begin : hdr_watch
-	reg h, l, c;
-	reg [7:0] o;
-	c = hdmi_osd.ce_pix; h = hdmi_osd.pix.lw_hdr; l = hdmi_osd.lwsel_v1; o = hdmi_osd.pix.osd_byte;
-	#0.5;
-	if (c) c_n = c_n + 1;
-	if (l) l_n = l_n + 1;
-	if (c && l && h) begin
-		hdr_n = hdr_n + 1;
-		if (hdmi_osd.pix.pbyte !== o) hdr_bad = hdr_bad + 1;
-	end
-	if (c && l && !h && hdmi_osd.pix.pbyte !== o) shd_n = shd_n + 1;
-end
+	if (win.osd.osd.hen_s && win.osd.osd.avail && m_sel[3:2] != 2'b00) osd_held = osd_held + 1;
 `endif
+	osd_qh <= {osd_qh[0], m_sel[3:2] == 2'b00 && gpo31_s};
+end
 
 `ifdef MISTER_LW_LANE
 // LANE: frames stored over LW against the same frames sent as link words (the HPS's handshake on io_clk/io_ack).
@@ -1749,10 +1885,10 @@ task sys_rate;
 endtask
 
 // ---- The firewall across an HPS reset ----
-// The store target: OSD CTRL (two readable bits), or without the OSD tier LINE_EN, which like it reads 0 with no
-// enable and holds the listed entries' bits (FW_MASK: the bits a store can set); the directory magic the read target.
-localparam [20:0] FW_CTRL  = TB_OSD ? OSD + 21'h1000 : LINEN;
-localparam [31:0] FW_MASK  = TB_OSD ? 32'h3 : ((32'd1 << TB_COUNT) - 32'd1) & 32'h3;
+// The store target: LINE_EN, which reads 0 with no enable and holds the listed entries' bits (FW_MASK: the bits
+// of the two stored that it can hold); the directory magic the read target.
+localparam [20:0] FW_CTRL  = LINEN;
+localparam [31:0] FW_MASK  = ((32'd1 << TB_COUNT) - 32'd1) & 32'h3;
 localparam [31:0] FW_MAGIC = 32'h5244574C;   // the directory's MAGIC, "LWDR"
 
 // At negedges: until lw_hrst has been high for a full cycle (its rise is behind), or until the cycle it falls in.
@@ -1795,8 +1931,8 @@ task fw_w1(input [31:0] v);
 	begin wdata = v; wstrb = 4'hF; wlast = 1; wvalid = 1; @(negedge clk); wvalid = 0; end
 endtask
 
-// One reset case. A transaction of `kind` (0 a read of the magic, 1 a store to OSD CTRL whose data beat waits,
-// 2 a store to OSD CTRL whose response waits) is issued `off` cycles before hps_rst_n falls (after it when
+// One reset case. A transaction of `kind` (0 a read of the magic, 1 a store to LINE_EN whose data beat waits,
+// 2 a store to LINE_EN whose response waits) is issued `off` cycles before hps_rst_n falls (after it when
 // negative), or, with off 100, so that it is accepted on the edge lw_hrst rises on (seen one cycle ahead in the
 // synchroniser's first stage, which the delay models may hold a cycle), and with 101 in the rise's own cycle;
 // hps_rst_n is low for 10 cycles. Its master then completes it per `pol`: 0 only well after the
@@ -1909,11 +2045,11 @@ task fw_case(input integer kind, input integer off, input integer pol, inout int
 		end
 		if (kind != 0 && n_lwwr - nw0 == 1)
 			check({w, ": the store on the bus, its address and data"}, {fw_wa == a, fw_wd == v}, 2'b11);
-		// the reset ended the enable, so the store had no effect: OSD CTRL reads 0 without one
+		// the reset ended the enable, so the store had no effect: LINE_EN reads 0 without one
 		ena_rd(lv);
 		check({w, ": the enable ended, by the HPS reset"}, lv[31], 0);
 		axi_read(FW_CTRL, 0, rv, dl, beats);
-		check({w, ": OSD CTRL, with no enable"}, rv, 0);
+		check({w, ": LINE_EN, with no enable"}, rv, 0);
 		// the next accesses are answered in the fixed latency (axi_read and axi_write check it)
 		rd({w, ": a read after"}, 21'h40000, FW_MAGIC);
 		ena_take;
@@ -2094,14 +2230,14 @@ task fw_reset_cases;
 		check("records: its AW accepted alone, the write machine waiting for data", bridge.adapter.wstate, 1);
 		hps_rst_n = 1; fw_wait_fall; repeat (4) @(negedge clk);
 		check("no machine freed: each orphan saw a handshake", (n_fr - fr0) + (n_fw - fw0), 0);
-		fw_w1(oc);                                     // its next store's data beat: lands on OSD CTRL's address
+		fw_w1(oc);                                     // its next store's data beat: lands on LINE_EN's address
 		fw_i_mon = 0;
 		repeat (4) @(negedge clk);
 		check("idle read 0 from the orphans to the last data beat", fw_i_ones, 0);
 		check("records: the next beat completes the accepted AW (ID)", fb_id, 12'h0B2);
 		check("idle after", fw_idle, 1);
-		check("the next beat's store on the bus: OSD CTRL's address, its data", {fw_wa == FW_CTRL, fw_wd == oc}, 2'b11);
-		rd("OSD CTRL: no enable after the reset", FW_CTRL, 32'd0);
+		check("the next beat's store on the bus: LINE_EN's address, its data", {fw_wa == FW_CTRL, fw_wd == oc}, 2'b11);
+		rd("LINE_EN: no enable after the reset", FW_CTRL, 32'd0);
 
 		$display("-- firewall, the fabric reset held low with an orphan: idle and the mark stay until the net rises");
 		rready = 0; fr0 = n_fr; fw0 = n_fw;
@@ -2167,8 +2303,9 @@ task dm_build;
 			e = e + 1;
 		end
 		if (TB_OSD) begin
-			dm_entry(e, 3, 32'h00010000, 32'h04000, 32'h02000, 0, 0, 0);           // OSDBUF
-			dm[16 + 32 * e + 8] = 32'h00800100;                                        // K0 {height, width}
+			dm_entry(e, 3, 32'h00020000, 32'h04000, 32'h02000, 0, 0, 0);           // OSDBUF 2.0
+			dm[16 + 32 * e + 8] = TB_MENU ? 32'h00140100 : 32'h00100100;              // K0 {rows, bytes per row}
+			dm[16 + 32 * e + 9] = 32'h01000000;                                        // K1 {FIFO entries, 0}
 			e = e + 1;
 		end
 		if (TB_EVT) begin
@@ -2210,7 +2347,7 @@ task dir_word(input integer src, input [11:0] off, output [31:0] v);
 endtask
 
 function integer kind_major(input [15:0] k);     // the kind majors this host knows; 0 = an unknown kind
-	kind_major = (k >= 16'd1 && k <= 16'd5) ? 1 : 0;
+	kind_major = (k == 16'd3) ? 2 : (k >= 16'd1 && k <= 16'd5) ? 1 : 0;
 endfunction
 
 task dir_walk(input integer src, input [31:0] tok_base, input [31:0] tok_size);
@@ -2380,7 +2517,7 @@ task dir_cases;
 		syn_add(n + 1, 32'h0077, 32'h00010000, 32'h07000, 32'h1000, 0, 32'd4, 0);                // unknown kind
 		syn_add(n + 2, 32'h0001, 32'h00090000, 32'h40000, 32'h40000, 0, 32'd0, 0);               // PAD, major 9
 		syn_add(n + 3, 32'h8001, 32'h00010000, 32'h20000, 32'h1000, 32'h20000, 32'd16, 32'h54534554);  // private
-		syn_add(n + 4, 32'h0003, 32'h00010000, 32'h7F000, 32'h2000, 0, 32'd0, 0);                // OSD, past the end
+		syn_add(n + 4, 32'h0003, 32'h00020000, 32'h7F000, 32'h2000, 0, 32'd0, 0);                // OSD, past the end
 		syn_add(n + 5, 32'h0004, 32'h00010000, 32'h03000, 32'h1000, 32'h05000, 32'd0, 0);        // SYS, CAUSE outside
 		dir_walk(1, tb_off, tb_size); walk_check("six entries to skip", 0, 0);
 		syn[16 + 32 * (n + 1) + 5] = 32'd2;                         // the unknown kind names the SYS entry's ordinal
@@ -2489,7 +2626,7 @@ task decode_sweep;
 		rd("the directory's MAGIC at its offset", DIRB, FW_MAGIC);
 		if (TB_SEC) rd("SECTOR's ID at its offset", SEC + 21'h38, 32'h32434553);
 		if (TB_EVT) rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h31535453);
-		if (TB_OSD) rd("OSDBUF's ID at its offset", OSD + 21'h1004, 32'h3144534F);
+		if (TB_OSD) rd("OSDBUF's ID at its offset", OSD + 21'h1804, 32'h3244534F);
 		if (TB_LANE) rd("LANE's ID at its offset", 21'h46018, 32'h314E414C);
 		if (TB_PAD) rd("PAD reads 0", pad_addr(8'h02, 0), 32'd0);
 		rd("the directory page past the entries reads 0", DIRB + 21'h40 + 21'h80 * em_n, 32'd0);
@@ -2578,10 +2715,9 @@ task ena_cases;
 		rd("no enable: LINE_EN unchanged", LINEN, 32'd0);
 		n = n_padwe; axi_write(pad_addr(8'h02, 0), 32'h00005555, 4'hF); settle;
 		check("no enable: a pad store is dropped, nothing reaches hps_io", n_padwe - n, 0);
-		axi_write(OSD + 21'h1000, 32'h3, 4'hF);
-		if (TB_OSD) rd("no enable: OSD CTRL unchanged", OSD + 21'h1000, 32'd0);
-		n = n_osdwe; axi_write(OSD, 32'hFFFFFFFF, 4'hF);
-		check("no enable: an image store does not reach the osds", n_osdwe - n, 0);
+		n = n_osdq; j = n_osdwe;
+		axi_write(OSD + 21'h4, 32'hFFFFFFFF, 4'hF); axi_write(OSD, 32'hFFFFFFFF, 4'hF); settle;
+		check("no enable: an image store takes no entry and writes no byte", (n_osdq - n) + (n_osdwe - j), 0);
 		st_req(st_pat(900)); settle;
 		axi_write(SYSB, 32'h1, 4'hF);
 		if (TB_EVT) rd("no enable: a W1C store on SYS CAUSE is dropped, the cause stands", SYSB, 32'h1);
@@ -2634,6 +2770,11 @@ task ena_cases;
 		axi_write(pad_addr(8'h02, 0), 32'h00005555, 4'hF); settle;
 		if (TB_PAD) check("enabled: the pad store lands", joy0, 32'h00005555);
 		axi_write(pad_addr(8'h02, 0), 32'h00000000, 4'hF); settle;
+		if (TB_OSD) begin
+			osd_word(15*64 + 63, 32'h600DF00D, 4'hF); osd_drain;
+			check("enabled: an image store lands in both osd_buffers",
+			      {bw_h(15*64 + 63) == 32'h600DF00D, bw_v(15*64 + 63) == 32'h600DF00D}, 2'b11);
+		end
 		axi_write(SYSB, 32'h1, 4'hF);
 		if (TB_EVT) rd("enabled: the W1C clears SYS CAUSE", SYSB, 32'd0);
 		axi_wburst(SCR, 4'd3, 2'b01, n);
@@ -2654,11 +2795,13 @@ task ena_cases;
 			check("clk_sys stopped: the ENABLE is taken, not quiet, nothing stale", {v[31:29]}, 3'b100);
 			rd("clk_sys stopped: OPEN shows the unlinked entries only", OPENA, ((32'd1 << em_n) - 1) & ~TB_LINKED);
 			rd("clk_sys stopped: OWNED none (the links rise under a held enable)", OWNEDA, 32'd0);
-			n = n_lwwr;
+			n = n_lwwr; j = n_osdq;
 			if (TB_SEC) sec_wr(21'h10, 32'h1);
 			if (TB_LANE) axi_write(LANE, 32'h0000001E, 4'hF);
+			if (TB_OSD) axi_write(OSD + 4*(15*64 + 62), 32'hBAD0BAD0, 4'hF);
 			ena_rd(v);
 			check("a store to a linked block, not open: stale set", v[29], 1);
+			if (TB_OSD) check("not open: the OSD store takes no entry", n_osdq - j, 0);
 			if (TB_SEC) check("not open: SECTOR's EN unchanged", win.sec.sector.en_lwx, 0);
 			if (TB_LANE) check("not open: the lane's frame not begun", win.lane.lane.open, 0);
 			axi_write(pad_addr(8'h02, 0), 32'h0BADF00D, 4'hF);   // PAD is not linked: kept for the restart
@@ -2673,6 +2816,10 @@ task ena_cases;
 				sec_wr(21'h10, 32'h1);
 				rd("open: SECTOR's EN store lands", SEC + 21'h10, 32'h1);
 				sec_wr(21'h10, 32'h0);
+			end
+			if (TB_OSD) begin
+				osd_word(15*64 + 62, 32'h0FF1CE00, 4'hF); osd_drain;
+				check("open: the OSD store lands", {bw_h(15*64 + 62) == 32'h0FF1CE00, bw_v(15*64 + 62) == 32'h0FF1CE00}, 2'b11);
 			end
 		end
 
@@ -2858,8 +3005,7 @@ task look_cases;
 		$display("-- the start order: a second host looks at GPO and GPI[22] first, sees the enable and stores nothing");
 		ena_up;
 		if (TB_SEC) sec_wr(21'h10, 32'h1);
-		axi_write(OSD + 21'h1000, 32'h1, 4'hF);
-		axi_write(OSD, 32'h5A5AA5A5, 4'hF);
+		if (TB_OSD) begin osd_word(0, 32'h5A5AA5A5, 4'hF); osd_drain; end
 `ifdef MISTER_LW_LANE
 		lane_count(p, dr);
 		io_enable = 1;                                      // the link busy: frames queue
@@ -2874,10 +3020,11 @@ task look_cases;
 		ena_rd(v);
 		check("the first host's enable as it was", v[31], 1);
 		if (TB_SEC) rd("the first host's SECTOR binding as it was", SEC + 21'h10, 32'h1);
-`ifdef MISTER_LW_OSD
-		rd("the first host's OSD CTRL as it was", OSD + 21'h1000, 32'h1);
-		check("the first host's image word as it was", hdmi_osd.lw_buf0[0], 8'hA5);
-`endif
+		if (TB_OSD) begin
+			check("the first host's image word as it was", {bw_h(0) == 32'h5A5AA5A5, bw_v(0) == 32'h5A5AA5A5}, 2'b11);
+			osd_word(1, 32'h1B1B1B1B, 4'hF); osd_drain;
+			check("the first host's next image store lands", {bw_h(1) == 32'h1B1B1B1B, bw_v(1) == 32'h1B1B1B1B}, 2'b11);
+		end
 `ifdef MISTER_LW_LANE
 		lane_count(v, dr);
 		check("the first host's frames still queued", v, p);
@@ -2899,15 +3046,16 @@ task look_cases;
 		check("the second host enables", win.en_q, 1);
 
 		$display("-- the start order: a stock start (GPO = 0 first) beside a live host: its enable ends, its stores drop");
-		axi_write(OSD + 21'h1000, 32'h2, 4'hF);
+		wait_open;
 		@(negedge clk); gpo31 = 0;                            // the stock first act: GPO = 0, then the ID view
 		repeat (40) @(negedge clk);
-		axi_write(OSD + 21'h1000, 32'h1, 4'hF);              // the live host goes on storing
+		n = n_osdq;
+		axi_write(OSD + 4*2, 32'h2C2C2C2C, 4'hF);            // the live host goes on storing
 		gpo31 = 1; repeat (6) @(negedge clk);                 // the stock program speaks in the I/O view
 		axi_write(SCR, 32'h0C0C0C0C, 4'hF);
 		ena_rd(v);
 		check("a stock start: the enable ended, stale set", {v[31], v[29]}, 2'b01);
-		if (TB_OSD) rd("a stock start: the live host's stores dropped (OSD CTRL cleared with the enable)", OSD + 21'h1000, 32'd0);
+		if (TB_OSD) check("a stock start: the live host's image store dropped", n_osdq - n, 0);
 		rd("a stock start: SCRATCH not stored", SCR, dg(32'h0B0B0B0B));
 		if (TB_SEC) check("a stock start: SECTOR's EN gone", blk_dn[18], 0);
 		$display("     GPI[22] compared with en_q in %0d cycles, %0d of them held", gpi22_n, gpi22_on);
@@ -2915,12 +3063,13 @@ task look_cases;
 endtask
 
 // A new host starts from stock. The bench's host enables and binds every block: SECTOR EN with a frame begun and
-// half stored, OSD LWSEL and HR with an image word, lane frames queued behind a held select, every line. Its
-// successor (any program: a stock Main, a swapped binary, the same one re-executed) starts with the core running:
-// GPO = 0, the ID view for its identification, then the I/O view. With no store to the window, it then finds the
-// fabric off and the core on stock SPI: ENABLE and GPI[22] 0, every line low with causes pending, OSD CTRL 0 and
-// neither osd selecting the shadow, the SECTOR frame completed and the slot SPI's, an SPI frame serving the next
-// request, the successor's link words intact with no queued frame strobed, and an SPI OSD row shown.
+// half stored, an OSD image word written and a repaint (rows 8-15 among it) queued behind a held osd select, lane
+// frames queued behind a held select, every line. Its successor (any program: a stock Main, a swapped binary, the
+// same one re-executed) starts with the core running: GPO = 0, the ID view for its identification, then the I/O
+// view. With no store to the window, it then finds the fabric off and the core on stock SPI: ENABLE and GPI[22] 0,
+// every line low with causes pending, no queued OSD byte written and highres as it was, the SECTOR frame completed
+// and the slot SPI's, an SPI frame serving the next request, the successor's link words intact with no queued
+// frame strobed, and an SPI OSD row shown.
 task fresh_cases;
 	reg [31:0] v, p, dr, lba;
 	integer k, n1, pl0;
@@ -2932,12 +3081,17 @@ task fresh_cases;
 		f_set(0, 16'h001E, 2); fw[0] = 16'h0000; fw[1] = 16'h0000; link_send;
 `endif
 		ena_up;
-		axi_write(OSD + 21'h1000, 32'h3, 4'hF);              // LWSEL and HR
-		axi_write(OSD, 32'h5A5AA5A5, 4'hF);
-		repeat (slow(50)) @(negedge clk);
-`ifdef MISTER_LW_OSD
-		check("bound: both osds select the shadow", {hdmi_osd.lwsel_v1, vga_osd.lwsel_v1}, 2'b11);
-`endif
+		if (TB_OSD) begin
+			osd_lo;                                       // 64 lines
+			ob_sync("bound");
+			osd_word(64, 32'h5A5AA5A5, 4'hF); osd_drain;
+			check("bound: an image word over LW in both osds", {bw_h(64) == 32'h5A5AA5A5, bw_v(64) == 32'h5A5AA5A5}, 2'b11);
+			@(negedge clk_sys); io_osd = 1;              // the dying host's osd select: the repaint queues
+			for (k = 9*64; k < 9*64 + 30; k = k + 1) axi_write(OSD + 4*k, ~pw(k, 31, 0), 4'hF);
+			repeat (slow(50)) @(negedge clk);
+			osd_st(v);
+			check("bound: the repaint queued", v[24:16], 30);
+		end
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1);
 			sec_stand(32'h00004E00); lba = cd_lba; if (win.sec_lvl) cause_drain(SEC);
@@ -2961,6 +3115,7 @@ task fresh_cases;
 		if (TB_EVT) check("bound: SYS's line high", lines[1], 1);
 		// the successor: GPO = 0 (the select drops, the ID view), its identification, then the I/O view
 		@(negedge clk_sys); gpo31 = 0;
+		io_osd = 0;
 `ifdef MISTER_LW_LANE
 		io_enable = 0;
 `endif
@@ -2970,12 +3125,16 @@ task fresh_cases;
 		check("the successor finds ENABLE 0", v[31], 0);
 		check("the successor finds GPI[22] 0", tb_gpi[22], 0);
 		check("every line low, the SYS cause still pending", {lines, win.evt_lvl}, {3'b000, TB_EVT != 0});
-		if (TB_OSD) rd("OSD CTRL 0", OSD + 21'h1000, 32'd0);
 		repeat (slow(50)) @(negedge clk);
-`ifdef MISTER_LW_OSD
-		check("neither osd selects the shadow, neither is in the shadow's highres",
-		      {hdmi_osd.lwsel_v1, vga_osd.lwsel_v1, hdmi_osd.lwhr_s1, vga_osd.lwhr_s1}, 4'b0000);
-`endif
+		if (TB_OSD) begin
+			osd_st(v);
+			check("OSD: nothing waiting", v[24:16], 0);
+			ob_cmp("OSD: no queued byte of the dead host's repaint written", 0, 16);
+			check("OSD: highres as it was, 64 lines", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+			spi_osd_row(3, 33);
+			ob_cmp("OSD: an SPI row lands, and nothing else moved", 0, 16);
+			osd_check("OSD: the SPI image drawn", 64, 6);   // the enable shows after up to 5 frames
+		end
 		if (TB_SEC) begin
 			wait_frame(n1);
 			check_buf("the frame begun completes, filled from its first missing word", lba, 20);
@@ -3161,6 +3320,11 @@ wire [2:0] lk_sec = win.sec.sector.fence.st;
 `else
 wire [2:0] lk_sec = 3'd7;
 `endif
+`ifdef MISTER_LW_OSD
+wire [2:0] lk_osd = win.osd.osd.fence.st;
+`else
+wire [2:0] lk_osd = 3'd7;
+`endif
 `ifdef MISTER_LW_LANE
 wire [2:0] lk_lane = win.lane.lane.fence.st;
 `else
@@ -3329,7 +3493,7 @@ endtask
 // A SECTOR EN store lands or is dropped with stale. A host that waits for OPEN loses nothing.
 task ls11;
 	reg [31:0] v, en;
-	integer k, j, c0, p0, b0, s0;
+	integer k, j, c0, p0, b0, s0, q0;
 	string  w;
 	begin
 		for (k = 0; k < 2; k = k + 1) begin
@@ -3345,8 +3509,10 @@ task ls11;
 `ifdef MISTER_LW_LANE
 			c0 = n_commit; p0 = n_play; b0 = bus_n;
 `endif
+			q0 = n_osdq;
 			axi_write(ENA, ENA_W, 4'hF);
 			check({w, ": the ENABLE is taken"}, win.en_q, 1);
+			if (TB_OSD) axi_write(OSD + 4*(2*64 + k), 32'h11223344 ^ k, 4'hF);
 `ifdef MISTER_LW_LANE
 			f_set(0, 16'h001E, 2);
 			for (j = 0; j < 4; j = j + 1) begin fw[0] = 16'h1100 + j; fw[1] = 16'h1180 + j; lane_send(1); end
@@ -3354,6 +3520,17 @@ task ls11;
 			if (TB_SEC) sec_wr(21'h10, 32'h1);
 			wait_open;
 			ena_rd(v);
+			if (TB_OSD) begin
+				osd_drain;
+				$display("     %s: the OSD store %s", w, n_osdq - q0 == 1 ? "queued" : "dropped");
+				if (n_osdq - q0 == 1) ob_word(2*64 + k, 32'h11223344 ^ k);
+				check({w, ": the OSD store is in both osd_buffers, or was dropped with stale"},
+				      (n_osdq - q0 == 1 && bw_h(2*64 + k) == (32'h11223344 ^ k) && bw_v(2*64 + k) == (32'h11223344 ^ k)) ||
+				      (n_osdq - q0 == 0 && v[29]), 1);
+				osd_word(2*64 + 8 + k, 32'h55667788 ^ k, 4'hF); osd_drain;
+				check({w, ": an OSD store after OPEN lands"},
+				      {bw_h(2*64 + 8 + k) == (32'h55667788 ^ k), bw_v(2*64 + 8 + k) == (32'h55667788 ^ k)}, 2'b11);
+			end
 			if (TB_SEC) begin
 				axi_read(SEC + 21'h10, 0, en, dl, beats);
 				check({w, ": the EN store landed, or was dropped with stale"}, en[0] | v[29], 1);
@@ -3380,7 +3557,7 @@ endtask
 // 3 with clk_sys stopped across the GPO store.
 task ls12_view(input integer v);
 	reg [31:0] p, dr, lv;
-	integer k, n1, pl0;
+	integer k, n1, pl0, oq;
 	string  w;
 	begin
 		w = (v == 0) ? "the selects and bit 31 together" : (v == 1) ? "bit 31 a cycle first" :
@@ -3393,22 +3570,30 @@ task ls12_view(input integer v);
 `endif
 		ena_up;
 		if (TB_SEC) sec_wr(21'h10, 32'h1);
+		if (TB_OSD) begin osd_lo; ob_sync(w); end                        // 64 lines
+		@(negedge clk_sys);
+		io_osd = TB_OSD != 0;                               // the dead host's osd select
 `ifdef MISTER_LW_LANE
-		@(negedge clk_sys); io_enable = 1;                 // the dead host's select
+		io_enable = 1;                                      // and its UIO select
 		f_set(0, 16'h001E, 2);
 		for (k = 0; k < 3; k = k + 1) begin fw[0] = 16'h3D00 + k; fw[1] = 16'h3D80 + k; lane_send(1); end
+`endif
+		// its repaint queued behind the osd select, rows 8-15 among it
+		for (k = 0; k < 24; k = k + 1) if (TB_OSD) axi_write(OSD + 4*(k[0] ? 10*64 + k : 64 + k), ~pw(k, 40 + v, 0), 4'hF);
 		repeat (slow(100)) @(negedge clk);
+`ifdef MISTER_LW_LANE
 		pl0 = n_play;
 `endif
+		oq = n_osdwe;
 		if (v == 3) begin
 			@(negedge clk_sys); sys_run = 0; repeat (20) @(negedge clk);
-			gpo31 = 0; io_enable = 0; repeat (40) @(negedge clk); sys_run = 1;
+			gpo31 = 0; io_enable = 0; io_osd = 0; repeat (40) @(negedge clk); sys_run = 1;
 		end
 		else begin
 			@(negedge clk_sys);
 			gpo31 = 0;
-			if (v == 2) io_enable = 0;
-			else begin repeat (v == 0 ? 1 : 2) @(negedge clk_sys); io_enable = 0; end
+			if (v == 2) begin io_enable = 0; io_osd = 0; end
+			else begin repeat (v == 0 ? 1 : 2) @(negedge clk_sys); io_enable = 0; io_osd = 0; end
 		end
 		repeat (slow(2000)) @(negedge clk);                // the ID view: start-up and identification
 		gpo31 = 1; repeat (2) @(negedge clk_sys);
@@ -3420,6 +3605,13 @@ task ls12_view(input integer v);
 `endif
 		ena_rd(lv);
 		check({w, ": the view ended the enable"}, lv[31], 0);
+		if (TB_OSD) begin
+			check({w, ": no queued OSD byte written"}, n_osdwe - oq, 0);
+			ob_cmp({w, ": both osd_buffers as they were"}, 0, 16);
+			check({w, ": highres unchanged"}, {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+			osd_st(lv);
+			check({w, ": nothing left waiting in the OSD FIFO"}, lv[24:16], 0);
+		end
 		if (TB_SEC) begin
 			check({w, ": SECTOR's slot back on SPI"}, blk_dn[18], 0);
 			sec_stand(32'h00006C00 + v);
@@ -3443,18 +3635,18 @@ endtask
 integer l15_rise = 0, l15_open = 0;
 reg     l15_on = 0;
 always @(negedge win.en_q) if (l15_on) begin
-	if (lk_sec == 3'd2 || lk_lane == 3'd2) l15_rise = l15_rise + 1;
-	if (lk_sec == 3'd3 || lk_lane == 3'd3) l15_open = l15_open + 1;
+	if (lk_sec == 3'd2 || lk_osd == 3'd2 || lk_lane == 3'd2) l15_rise = l15_rise + 1;
+	if (lk_sec == 3'd3 || lk_osd == 3'd3 || lk_lane == 3'd3) l15_open = l15_open + 1;
 end
 task ls15;
 	reg [31:0] v;
-	integer kind, k, past, tries, c0, p0, n1, s0, bad_p, bad_s, nit, r0, o0;
+	integer kind, k, past, tries, c0, p0, n1, s0, bad_p, bad_s, bad_o, nit, r0, o0, q0;
 	string  w;
 	begin
 		for (kind = 1; kind < 3; kind = kind + 1) begin
 			w = (kind == 1) ? "GPO[31] low" : "an HPS reset";
 			$display("-- enable links: an enable ended inside its rise by %s, in every cycle to twenty past OPEN", w);
-			past = 0; bad_p = 0; bad_s = 0; nit = 0; r0 = l15_rise; o0 = l15_open;
+			past = 0; bad_p = 0; bad_s = 0; bad_o = 0; nit = 0; r0 = l15_rise; o0 = l15_open;
 			for (k = -3; past < 20 && k < slow(400); k = k + 1) begin
 				ena_rd(v); if (v[31]) host_end;
 				wait_quiet;
@@ -3478,10 +3670,12 @@ task ls15;
 				c0 = n_commit; p0 = n_play;
 `endif
 				if (TB_SEC) sec_stand(32'h00007500 + k[7:0]);
+				q0 = n_osdq;
 				ena_hammer(slow(4000), tries);
 `ifdef MISTER_LW_LANE
 				f_set(0, 16'h001E, 2); fw[0] = 16'h5100 + k; fw[1] = 16'h5180 + k; lane_send(1); lane_send(1);
 `endif
+				if (TB_OSD) axi_write(OSD + 4*(4*64 + (k & 63)), 32'h15150000 + k, 4'hF);
 				if (TB_SEC) begin
 					n1 = cd_frames;
 					sec_wr(21'h10, 32'h1);
@@ -3494,6 +3688,13 @@ task ls15;
 				ena_rd(v);
 				if (n_play - p0 != n_commit - c0 || (n_commit - c0 != 2 && !v[29])) bad_p = bad_p + 1;
 `endif
+				if (TB_OSD) begin
+					ena_rd(v);
+					osd_drain;
+					if (!((n_osdq - q0 == 1 && bw_h(4*64 + (k & 63)) == 32'h15150000 + k &&
+					       bw_v(4*64 + (k & 63)) == 32'h15150000 + k) || (n_osdq - q0 == 0 && v[29]))) bad_o = bad_o + 1;
+					if (n_osdq - q0 == 1) ob_word(4*64 + (k & 63), 32'h15150000 + k);
+				end
 				if (TB_SEC) begin
 					s0 = 0; while (cd_frames == n1 && s0 < slow(4000)) begin @(negedge clk); s0 = s0 + 1; end
 					sec_wr(21'h10, 32'h0);
@@ -3510,6 +3711,7 @@ task ls15;
 			check({w, ": ends inside the rise were reached"}, l15_rise - r0 > 0, 1);
 			check({w, ": ends in OPEN, twenty"}, past >= 20, 1);
 			check({w, ": every lane frame played or dropped with stale"}, bad_p, 0);
+			check({w, ": every OSD store in both osd_buffers, or dropped with stale"}, bad_o, 0);
 			check({w, ": every BEGIN served, or its request standing for SPI"}, bad_s, 0);
 		end
 		check("enable links: ENABLEs taken with a half off rest", n_offrest, 0);
@@ -3523,6 +3725,7 @@ task ls15;
 		host_end;
 		repeat (40) @(negedge clk);
 		if (TB_SEC) check("stopped: SECTOR's link in RISE", lk_sec, 3'd2);
+		if (TB_OSD) check("stopped: OSD's link in RISE", lk_osd, 3'd2);
 		if (TB_LANE) check("stopped: the lane's link in RISE", lk_lane, 3'd2);
 		rd("stopped: OWNED shows the linked entries", OWNEDA, TB_LINKED);
 		ena_rd(v);
@@ -3541,9 +3744,10 @@ endtask
 // One link's acknowledge forced high across an ENABLE (a half that never answers): that entry never opens,
 // the others do and work, its requests are served over SPI, and with the force gone a late bind works. Forced low
 // after an enable (a half that cannot return): quiet stays 0, OWNED names it alone, no ENABLE is taken, SPI works.
+// SECTOR's link, then OSD's.
 task ls17;
 	reg [31:0] v, p, dr;
-	integer tries, n1;
+	integer tries, n1, q0;
 	begin
 `ifdef MISTER_LW_SECTOR_SLOT
 		$display("-- enable links: a SECTOR half that never answers costs only SECTOR");
@@ -3599,10 +3803,55 @@ task ls17;
 `endif
 		host_end;
 `endif
+`ifdef MISTER_LW_OSD
+		$display("-- enable links: an OSD half that never answers costs only OSD");
+		ob_sync("before the force");
+		ena_rd(v); if (v[31]) host_end;
+		wait_quiet;
+		fc_off = 1;
+		force win.osd.osd.fence.ack_lwx = 1'b1;
+		ena_w;
+		repeat (slow(600)) @(negedge clk);
+		rd("OPEN: every entry but OSD's", OPENA, ((32'd1 << em_n) - 1) & ~(32'd1 << TB_E_OSD));
+		q0 = n_osdq;
+		axi_write(OSD + 4*(6*64), 32'h17171717, 4'hF);
+		ena_rd(v);
+		check("a store to OSD is dropped, with stale", {n_osdq - q0 == 0, v[29]}, 2'b11);
+		if (TB_SEC) begin
+			sec_wr(21'h10, 32'h1);
+			rd("SECTOR works: its EN store lands", SEC + 21'h10, 32'h1);
+			sec_wr(21'h10, 32'h0);
+		end
+		spi_osd_row(6, 34);
+		ob_cmp("the unanswered block's image served over SPI", 0, 16);
+		release win.osd.osd.fence.ack_lwx;
+		wait_open;
+		rd("the force removed under the same enable: OPEN every entry", OPENA, (32'd1 << em_n) - 1);
+		osd_word(6*64, 32'h17171717, 4'hF); osd_drain;
+		check("a late store lands", {bw_h(6*64) == 32'h17171717, bw_v(6*64) == 32'h17171717}, 2'b11);
+		host_end;
+
+		$display("-- enable links: an OSD half that cannot return holds the shared gate (recorded)");
+		repeat (slow(200)) @(negedge clk);
+		force win.osd.osd.fence.ack_lwx = 1'b0;
+		repeat (slow(200)) @(negedge clk);
+		ena_rd(v);
+		check("not quiet", v[30], 0);
+		rd("OWNED names OSD alone", OWNEDA, 32'd1 << TB_E_OSD);
+		ena_hammer(20, tries);
+		check("no ENABLE is taken", win.en_q, 0);
+		spi_osd_row(6, 35);
+		ob_cmp("SPI works", 0, 16);
+		release win.osd.osd.fence.ack_lwx;
+		ena_w;
+		check("the force removed: an ENABLE is taken", win.en_q, 1);
+		fc_off = 0;
+		host_end;
+`endif
 	end
 endtask
 
-// Random values in every clk_sys register of the lane, SECTOR, PAD, SYS and osd halves, and in each enable
+// Random values in every clk_sys register of the lane, SECTOR, PAD, SYS and OSD halves, and in each enable
 // link's clk_sys registers. Pass 1 mid-enable, then an ID view and ENABLEs as fast as the bus allows: none taken
 // before every half is at rest (the ENABLE monitor), a stock SPI transfer before the ENABLE, and a frame of each
 // block correct under the new enable. Pass 2 during the return: the links converge and a later enable works.
@@ -3618,7 +3867,12 @@ task scramble;
 		win.evt.evt.stflg_lwgray = $random;
 `endif
 `ifdef MISTER_LW_OSD
-		hdmi_osd.lwhr_s0 = $random; hdmi_osd.lwhr_s1 = $random; vga_osd.lwhr_s0 = $random; vga_osd.lwhr_s1 = $random;
+		win.osd.osd.rptr = $random; win.osd.osd.q = {$random, $random}; win.osd.osd.fresh = $random;
+		win.osd.osd.left = $random; win.osd.osd.hd = $random; win.osd.osd.qn = $random;
+		win.osd.osd.osd_r_lwgray = $random;
+		win.osd.osd.wg_sync.lws0_q = $random; win.osd.osd.wg_sync.lws1_q = $random;
+		win.osd.osd.fence.rest_n = $random; win.osd.osd.fence.ack_lwx = $random;
+		win.osd.osd.fence.hen_sync.lws0_q = $random; win.osd.osd.fence.hen_sync.lws1_q = $random;
 `endif
 `ifdef MISTER_LW_SECTOR_SLOT
 		win.sec.sector.q = {$random, $random}; win.sec.sector.rptr = $random; win.sec.sector.sector_r_lwgray = $random;
@@ -3702,6 +3956,12 @@ task ls8;
 			f_set(0, 16'h001E, 2); fw[0] = 16'h8800 + pass; fw[1] = 16'h8880 + pass;
 			lane_vs_link("after the scramble: a lane frame");
 `endif
+			if (TB_OSD) begin
+				osd_drain;
+				axi_write(OSD + 4*(11*64 + pass), 32'h88880000 + pass, 4'hF); osd_drain;
+				check("after the scramble: an OSD store lands",
+				      {bw_h(11*64 + pass) == 32'h88880000 + pass, bw_v(11*64 + pass) == 32'h88880000 + pass}, 2'b11);
+			end
 			if (TB_SEC) begin
 				sec_wr(21'h10, 32'h1);
 				sec_stand(32'h00007900 + pass); if (win.sec_lvl) cause_drain(SEC);
@@ -3743,6 +4003,12 @@ task ls8;
 			if (TB_SEC) begin
 				sec_wr(21'h10, 32'h1); rd("a later enable: SECTOR's EN lands", SEC + 21'h10, 32'h1); sec_wr(21'h10, 32'h0);
 				sec_spi_clear;
+			end
+			if (TB_OSD) begin
+				osd_drain;
+				axi_write(OSD + 4*(12*64 + pass), 32'h8A8A0000 + pass, 4'hF); osd_drain;
+				check($sformatf("a later enable (%0d): an OSD store lands", pass),
+				      {bw_h(12*64 + pass) == 32'h8A8A0000 + pass, bw_v(12*64 + pass) == 32'h8A8A0000 + pass}, 2'b11);
 			end
 		end
 `ifdef MISTER_LW_LANE
@@ -3828,6 +4094,10 @@ task ena_summary(input cov_on);
 		$display("     SECTOR's link: %0d rises, %0d falls, %0d store strobes", fc_sec.n_rise, fc_sec.n_fall, fc_sec.n_stb);
 		check("SECTOR's link checker", fc_sec.n_bad, 0);
 `endif
+`ifdef MISTER_LW_OSD
+		$display("     OSD's link: %0d rises, %0d falls, %0d store strobes", fc_osd.n_rise, fc_osd.n_fall, fc_osd.n_stb);
+		check("OSD's link checker", fc_osd.n_bad, 0);
+`endif
 `ifdef MISTER_LW_LANE
 		$display("     the lane's link: %0d rises, %0d falls, %0d store strobes", fc_lane.n_rise, fc_lane.n_fall,
 		         fc_lane.n_stb);
@@ -3838,24 +4108,41 @@ task ena_summary(input cov_on);
 endtask
 
 `ifdef MENU_CORE
-integer f;
 initial begin
 	repeat (4) @(negedge clk);
 	sys_rate;
 	cdc_cells;
+	dir_cases;
 	ena_up;
-	$display("-- MENU_CORE: the header rows never read the shadow");
-	for (r = 0; r < 19; r = r + 1) spi_osd_row(r, 3);
-	for (r = 0; r < 16; r = r + 1) lw_row(r, 3);
-	axi_write(OSD + 21'h1000, 32'h1, 4'hF);    // LWSEL, no HR: 64 + 24 header lines fit the tb's 140
-	spi_osd_cmd(8'h40);                        // clears the highres rows 8-15 re-armed
+	$display("-- MENU_CORE: the OSD lists 20 rows; the header rows 16-19 stored over LW land, and draw as over SPI");
+	rd("OSD K0: 20 rows of 256 bytes", DIRB + 21'h40 + 21'h80 * TB_E_OSD + 21'h20, 32'h00140100);
+	n0 = n_osdq;
+	axi_write(OSD + 21'h1400, 32'h12345678, 4'hF);         // past row 19
+	check("a store past row 19 takes no entry", n_osdq - n0, 0);
+	for (r = 0; r < 20; r = r + 1) spi_osd_row(r, 3);
+	spi_osd_cmd(8'h40);                        // clears the highres rows 8-15 re-armed: 64 + 24 header lines fit
 	spi_osd_cmd(8'h41);
-	f = cap_h.frames;
-	wait (cap_h.frames >= f + 4);
-	$display("     header pixel steps %0d, shadow-differing steps %0d (ce %0d, lwsel %0d)", hdr_n, shd_n, c_n, l_n);
-	check("header steps with LWSEL seen", hdr_n > 0, 1);
-	check("the shadow was read elsewhere", shd_n > 0, 1);
-	check("header bytes all from osd_buffer", hdr_bad, 0);
+	ob_cmp("the SPI image, header rows included", 0, 20);
+	cap_snap(4);
+	$display("     the box: %0d lines", cs_lh);
+	check("the box holds the header lines", cs_lh > 64 && cs_lv > 64, 1);
+	for (r = 0; r < 20; r = r + 1) lw_row(r, 4);
+	osd_drain;
+	ob_cmp("another image over LW, header rows included", 0, 20);
+	spi_osd_cmd(8'h40); spi_osd_cmd(8'h41);
+	cap_diff(3, n0);
+	check("another image over LW draws otherwise", n0 > 0, 1);
+	for (r = 0; r < 16; r = r + 1) lw_row_f(r, 3, 1);
+	osd_drain;
+	spi_osd_cmd(8'h40); spi_osd_cmd(8'h41);
+	cap_diff(3, n0);
+	check("rows 0-15 as over SPI, the header rows still another image's: drawn otherwise", n0 > 0, 1);
+	for (r = 16; r < 20; r = r + 1) lw_row_f(r, 3, 1);
+	osd_drain;
+	ob_cmp("the SPI image's bytes over LW", 0, 20);
+	cap_diff(3, n0);
+	check("drawn exactly as over SPI, header lines included", n0, 0);
+	check("no LW byte written in a cycle with, or two after, an osd select or the ID view", osd_clash, 0);
 	ena_summary(0);
 	$display("%s: %0d checks, %0d failures", fails ? "FAILED" : "PASSED", checks, fails);
 	$finish;
@@ -4104,7 +4391,7 @@ initial begin
 		repeat (50) @(negedge clk);
 		sw0 = pure_win(); ss0 = pure_sec(); sl0 = pure_lane();
 		pure_view(0, nbad);
-		nw0 = n_lwwr; nb0 = n_lwwb; no0 = n_osdwe; nbeats = 0;
+		nw0 = n_lwwr; nb0 = n_lwwb; no0 = n_osdq; nbeats = 0;
 		for (b = 0; b < 13; b = b + 1) begin
 			case (b)
 				0:  a = SEC + 21'h10;                  // SECTOR CTRL
@@ -4115,7 +4402,7 @@ initial begin
 				5:  a = pad_addr(8'h02, 0);            // PAD
 				6:  a = pad_addr(8'h1A, 0);            // PAD, analog
 				7:  a = OSD;                           // IMAGE
-				8:  a = OSD + 21'h1000;                // OSD CTRL
+				8:  a = OSD + 21'h1800;                // OSD STATUS
 				9:  a = SYSB;                          // SYS CAUSE
 				10: a = SCR;                     // SCRATCH
 				11: a = 21'h46000;                     // LANE BEGIN, WORD, END, RPOP
@@ -4134,7 +4421,7 @@ initial begin
 				end
 		end
 		check("burst writes: no beat reached the register bus", n_lwwr - nw0, 0);
-		check("burst writes: no beat reached the OSD image", n_osdwe - no0, 0);
+		check("burst writes: no beat reached the OSD FIFO", n_osdq - no0, 0);
 		check("burst writes: every beat reported dropped", n_lwwb - nb0, nbeats);
 		pure_view(1, nbad);
 		check("burst writes: the readable view is unchanged", nbad, 0);
@@ -4149,7 +4436,7 @@ initial begin
 		for (t = 0; t < 4; t = t + 1) begin
 			awburst = t[1:0];
 			axi_write(FW_CTRL, {30'd0, ~t[1:0]}, 4'hF);
-			rd($sformatf("single store, burst type %0d: OSD CTRL (LINE_EN)", t), FW_CTRL, {30'd0, ~t[1:0]} & FW_MASK);
+			rd($sformatf("single store, burst type %0d: LINE_EN", t), FW_CTRL, {30'd0, ~t[1:0]} & FW_MASK);
 			axi_write(SCR, 32'h5C000000 | t, 4'hF);
 			rd($sformatf("single store, burst type %0d: SCRATCH", t), SCR, dg(32'h5C000000 | t));
 		end
@@ -4157,7 +4444,7 @@ initial begin
 		check("single stores: one bus pulse each", n_lwwr - nw0, 8);
 		check("single stores: none dropped", n_lwwb - nb0, 0);
 		axi_write(FW_CTRL, oc, 4'hF);
-		rd("OSD CTRL (LINE_EN) restored", FW_CTRL, oc);
+		rd("LINE_EN restored", FW_CTRL, oc);
 	end
 
 	$display("-- clk_sys stopped (core held in reset)");
@@ -4843,80 +5130,135 @@ initial begin
 `endif
 `ifdef MISTER_LW_OSD
 	$display("-- OSDBUF: registers");
-	rd("OSD ID OSD1", OSD + 21'h1004, 32'h3144534F);
-	rd("OSD CTRL reset", OSD + 21'h1000, 32'd0);
+	rd("OSD ID OSD2", OSD + 21'h1804, 32'h3244534F);
+	osd_st(d);
+	check("OSD STATUS: nothing waiting", d[24:16], 0);
 	rd("OSD image reads 0", OSD + 21'h0000, 32'd0);
 	rd("OSD image end reads 0", OSD + 21'h0FFC, 32'd0);
-	rd("OSD register hole", OSD + 21'h1008, 32'd0);
+	rd("OSD register hole", OSD + 21'h1808, 32'd0);
 	rd("OSD block end", OSD + 21'h1FFC, 32'd0);
-	check("LWSEL/HR low at reset", osd_ctrl, 0);
+	n0 = n_osdq;
+	axi_write(OSD + 21'h1000, 32'h12345678, 4'hF);          // row 16: only with MENU_CORE
+	axi_write(OSD + 21'h1800, 32'h12345678, 4'hF);          // STATUS
+	axi_write(OSD + 21'h0000, 32'h12345678, 4'h0);          // no byte enabled
+	check("a store past row 15, to STATUS or with no byte enabled takes no entry", n_osdq - n0, 0);
 
-	$display("-- OSDBUF: fill both images (LW 1024 stores, SPI 16 rows)");
-	for (r = 0; r < 16; r = r + 1) lw_row(r, 0);
+	$display("-- OSDBUF: an image over LW equals it over SPI, byte for byte, in both osds");
+	osd_st(d); d0 = d;
 	for (r = 0; r < 16; r = r + 1) spi_osd_row(r, 0);
 	spi_osd_cmd(8'h40);                   // rows 8-15 re-armed highres; DISABLE clears it
 	spi_osd_cmd(8'h41);
 	check("osd_status after ENABLE", osd_status, 1);
+	ob_cmp("the SPI image", 0, 16);
+	for (r = 0; r < 16; r = r + 1) lw_row(r, 1);
+	osd_drain;
+	ob_cmp("another image over LW", 0, 16);
+	for (r = 0; r < 16; r = r + 1) lw_row_f(r, 0, 1);
+	osd_drain;
 	bad = 0;
-	for (i = 0; i < 1024; i = i + 1) if (lanes_h(i) !== img_w(i) || lanes_v(i) !== img_w(i)) bad = bad + 1;
-	check("both shadows hold the LW image", bad, 0);
-	bad = 0;
-	for (i = 0; i < 4096; i = i + 1) if (hdmi_osd.osd_buffer[i] !== spi_img[i] || vga_osd.osd_buffer[i] !== spi_img[i]) bad = bad + 1;
-	check("both SPI buffers hold the SPI image", bad, 0);
+	for (i = 0; i < 4096; i = i + 1)
+		if (hdmi_osd.osd_buffer[i] !== spp(i, 0) || vga_osd.osd_buffer[i] !== spp(i, 0)) bad = bad + 1;
+	check("the SPI image's bytes over LW: both osd_buffers byte for byte as over SPI", bad, 0);
+	osd_st(d);
+	check("STATUS: nothing waiting, nothing dropped (the stores paced by level)", {d[24:16], d[15:0]}, {9'd0, d0[15:0]});
 
-	$display("-- OSDBUF: one store at (row 12, col 100) and a byte-lane store at (row 3, col 41)");
-	osd_word(12*64 + 25, 32'hC3A55A3C, 4'hF);
-	repeat (4) @(negedge clk);
-	check("hdmi shadow word (12, 100..103)", lanes_h(12*64 + 25), 32'hC3A55A3C);
-	check("vga shadow word (12, 100..103)", lanes_v(12*64 + 25), 32'hC3A55A3C);
+	$display("-- OSDBUF: byte-lane stores");
 	osd_word(3*64 + 10, 32'h0000E700, 4'h2);
-	repeat (4) @(negedge clk);
-	check("hdmi byte lane 1 only", lanes_h(3*64 + 10), img_w(3*64 + 10));
-	check("vga byte lane 1 only", lanes_v(3*64 + 10), img_w(3*64 + 10));
-	check("the stored byte", lw_img[3*256 + 41], 32'hE7);
-	check("SPI buffer untouched by LW stores", hdmi_osd.osd_buffer[12*256 + 100], spi_img[12*256 + 100]);
+	osd_word(12*64 + 25, 32'hC3A55A3C, 4'hF);
+	osd_word(7*64 + 1, 32'hAB0000CD, 4'h9);
+	osd_word(9*64 + 2, 32'h00FE0000, 4'h4);
+	osd_drain;
+	ob_cmp("byte lanes: only the enabled bytes", 0, 16);
+	check("the lane-1 byte (row 3, column 41)", hdmi_osd.osd_buffer[3*256 + 41], 8'hE7);
+	check("its neighbours as they were", {hdmi_osd.osd_buffer[3*256 + 40], hdmi_osd.osd_buffer[3*256 + 42]},
+	      {spp(3*256 + 40, 0), spp(3*256 + 42, 0)});
 
-	$display("-- OSDBUF: pixel path, SPI image (LWSEL=0, highres 0)");
-	osd_check("LWSEL=0", 0, 64, 6);
-	axi_write(OSD + 21'h1000, 32'h1, 4'hF);
-	rd("CTRL LWSEL", OSD + 21'h1000, 32'h1);
-	osd_check("LWSEL=1 HR=0", 1, 64, 3);
-	axi_write(OSD + 21'h1000, 32'h3, 4'hF);
-	osd_check("LWSEL=1 HR=1: 128 lines", 1, 128, 3);
-	axi_write(OSD + 21'h1000, 32'h2, 4'hF);
-	rd("CTRL HR only", OSD + 21'h1000, 32'h2);
-	osd_check("HR without LWSEL is ignored", 0, 64, 3);
-
-	$display("-- OSDBUF: SPI row and LW row in flight together (LWSEL=1)");
-	axi_write(OSD + 21'h1000, 32'h3, 4'hF);
+	$display("-- OSDBUF: an SPI row and an LW row in flight together: SPI goes first, nothing is lost");
+	n0 = osd_held; d0 = d;
 	fork
 		spi_osd_row(2, 1);
 		lw_row(5, 1);
 	join
-	bad = 0;
-	for (i = 0; i < 256; i = i + 1) if (hdmi_osd.osd_buffer[2*256 + i] !== spi_img[2*256 + i] || vga_osd.osd_buffer[2*256 + i] !== spi_img[2*256 + i]) bad = bad + 1;
-	check("SPI row 2 landed in both SPI buffers", bad, 0);
-	bad = 0;
-	for (i = 5*64; i < 6*64; i = i + 1) if (lanes_h(i) !== img_w(i) || lanes_v(i) !== img_w(i)) bad = bad + 1;
-	check("LW row 5 landed in both shadows", bad, 0);
-	osd_check("LWSEL=1 shows the shadow", 1, 128, 3);
-	axi_write(OSD + 21'h1000, 32'h0, 4'hF);
-	osd_check("LWSEL=0 shows the SPI buffer (row 2 new)", 0, 64, 3);
+	osd_drain;
+	ob_cmp("both rows landed", 0, 16);
+	osd_st(d);
+	check("nothing dropped", d[15:0], d0[15:0]);
+	$display("     the writer held a word while a select was high in %0d cycles", osd_held - n0);
+	check("the writer waited for the SPI row", osd_held - n0 > 0, 1);
+	check("no LW byte written in a cycle with, or two after, an osd select or the ID view", osd_clash, 0);
 
-	$display("-- OSDBUF: highres = spi_highres | (LWSEL & HR)");
-	spi_osd_row(9, 2);
-	osd_check("SPI row 9 (bit 3) re-arms SPI highres", 0, 128, 3);
+	$display("-- OSDBUF: rows 8-15 over LW set highres as OSDCMDWRITE's bit 3 does; the disable clears it");
+	osd_lo;
+	check("after DISABLE and ENABLE: 64 lines in both osds", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+	lw_row(0, 3); lw_row(7, 3); osd_drain;
+	check("rows 0 and 7 over LW: still 64", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+	osd_check("rows 0-15 drawn, 64 lines", 64, 6);
+	osd_word(9*64 + 3, 32'h5A5A5A5A, 4'h8); osd_drain;
+	check("a byte of row 9 over LW: 128 lines", {hdmi_osd.osd_h == 128, vga_osd.osd_h == 128}, 2'b11);
+	osd_check("highres from an LW byte: 128 lines", 128, 3);
 	spi_osd_cmd(8'h40);
 	check("osd_status after DISABLE", osd_status, 0);
-	osd_check("OSD disabled: no box", 0, 0, 3);
-	axi_write(OSD + 21'h1000, 32'h3, 4'hF);
+	check("the disable clears it: 64", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+	osd_check("OSD disabled: no box", 0, 3);
 	spi_osd_cmd(8'h41);
-	osd_check("LWSEL&HR survives DISABLE/ENABLE", 1, 128, 6);
-	axi_write(OSD + 21'h1000, 32'h0, 4'hF);
-	osd_check("SPI highres stays cleared by DISABLE", 0, 64, 3);
+
+	$display("-- OSDBUF: the pixel path draws the same buffer the same, LW or SPI (1x, rotated, info)");
+	osd_same("1x", 16, 20);
+	spi_osd_en(0, 12'd0, 12'd0, 6'd0, 6'd0, 2'd1);
+	osd_same("rotated", 16, 22);
+	spi_osd_en(1, 12'd16, 12'd8, 6'd16, 6'd6, 2'd0);
+	check("info box: osd_status low", osd_status, 0);
+	osd_same("info box", 16, 24);
+	spi_osd_en(0, 12'd0, 12'd0, 6'd0, 6'd0, 2'd0);
+	spi_osd_cmd(8'h40); spi_osd_cmd(8'h41);
+
+	$display("-- OSDBUF: with clk_sys stopped the FIFO fills and drops count; after the restart a re-store completes it");
+	osd_st(d0);
+	sys_run = 0; repeat (20) @(negedge clk);
+	for (i = 0; i < 300; i = i + 1) axi_write(OSD + 4*i, pw(i, 30, 0), 4'hF);
+	osd_st(d);
+	check("stopped: level 256", d[24:16], 256);
+	check("stopped: 44 stores dropped", d[15:0] - d0[15:0], 44);
+	sys_run = 1;
+	osd_drain;
+	bad = 0;
+	for (i = 0; i < 256; i = i + 1) if (bw_h(i) !== pw(i, 30, 0) || bw_v(i) !== pw(i, 30, 0)) bad = bad + 1;
+	check("restarted: the 256 queued words landed", bad, 0);
+	bad = 0;
+	for (i = 256; i < 300; i = i + 1) if (bw_h(i) === pw(i, 30, 0) || bw_v(i) === pw(i, 30, 0)) bad = bad + 1;
+	check("restarted: the 44 dropped did not", bad, 0);
+	for (i = 0; i < 300; i = i + 1) begin
+		if (i % 64 == 0) osd_room(64);
+		osd_word(i, pw(i, 30, 0), 4'hF);
+	end
+	osd_drain;
+	ob_cmp("the re-store completes the image", 0, 16);
+
+	$display("-- OSDBUF: bytes queued behind an asserted osd select when the enable ends are discarded");
+	osd_lo;
+	@(negedge clk_sys); io_osd = 1;                    // a host's select left asserted, no strobe
+	for (i = 9*64; i < 9*64 + 40; i = i + 1) axi_write(OSD + 4*i, ~pw(i, 30, 0), 4'hF);   // rows 8-15: highres
+	for (i = 64; i < 64 + 40; i = i + 1) axi_write(OSD + 4*i, ~pw(i, 30, 0), 4'hF);
+	osd_st(d);
+	check("queued behind the select: 80 entries waiting", d[24:16], 80);
+	host_end;
+	wait_quiet;
+	rd("after the ID view: OWNED clear", OWNEDA, 32'd0);
+	osd_st(d);
+	check("after the ID view: nothing waiting", d[24:16], 0);
+	@(negedge clk_sys); io_osd = 0;
+	repeat (slow(300)) @(negedge clk);
+	ob_cmp("no queued byte was written", 0, 16);
+	check("highres unchanged: 64", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+	ena_take;
+	osd_word(64 + 5, 32'h0F1E2D3C, 4'hF);
+	osd_drain;
+	check("a store after OPEN under the next enable lands",
+	      {bw_h(64 + 5) == 32'h0F1E2D3C, bw_v(64 + 5) == 32'h0F1E2D3C}, 2'b11);
+	ob_cmp("the image after it", 0, 16);
+	ena_up;
 
 `endif
-
 `ifdef MISTER_LW_LANE
 	$display("-- LANE: registers");
 	rd("LANE ID LAN1", LANE + 21'h18, 32'h314E414C);
@@ -5307,7 +5649,7 @@ initial begin
 		check("order: a store to SCRATCH, then SCRATCH", v, dg(32'h0D15EA5E));
 		axi_read(FW_CTRL, 0, oc, dl, beats);
 		store_read(FW_CTRL, 32'h2, FW_CTRL, v);
-		check("order: a store to OSD CTRL (LINE_EN), then OSD CTRL", v, 32'h2 & FW_MASK);
+		check("order: a store to LINE_EN, then LINE_EN", v, 32'h2 & FW_MASK);
 		axi_write(FW_CTRL, oc, 4'hF);
 		// the read's address accepted two cycles and one before the W1C's data beat, in its cycle and after it
 		for (k = -2; k <= 1 && TB_EVT; k = k + 1) begin
