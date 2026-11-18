@@ -3958,6 +3958,52 @@ task sec_view_save(input integer sc, input stopped);
 		ena_take; cause_drain(SEC); host_end;
 	end
 endtask
+// A save-slot READ stored in full, so committed, queued behind a primary frame that plays: the enable falls (the
+// next program's ID view) before the feeder reaches it. clk_sys is stopped from before the frames' last stores to
+// after the fall, so the primary still has 200 words to play when the feeder sees the enable low. The primary's
+// frame completes whole; slot 1's frame is discarded unplayed, its request stands, and SPI serves it.
+task sec_view_queued;
+	reg [31:0] v, lba;
+	reg  [6:0] l;
+	reg        ok;
+	integer a0, s0x, t, lp;
+	string  w;
+	begin
+		w = "a save-slot frame stored in full behind a playing primary frame";
+		$display("-- SECTOR at an ID view: %s is discarded unplayed, its request standing for SPI", w);
+		lba = 32'h00007C00; l = 7'h4C; lp = TB_FRAME - 200;
+		ena_short;
+		sec_wr(S_CTRL, C_EN0 | C_EN1); settle;
+		check({w, ": both slots bound"}, {blk_dn[18], save_dn[9]}, 2'b11);
+		a0 = sv1.acks; s0x = sv1.strobes; n0 = cd_frames;
+		cd_request(lba); sv1.go(0, l); settle; cause_drain(SEC);
+		sec_wr(S_BEGIN0, lba);
+		frame_data(lba, 0, lp);
+		repeat (slow(6000)) @(negedge clk);              // those words played: the frame waits for more
+		check({w, ": the primary's frame plays"}, win.sec.sector.fs, 2);
+		@(negedge clk_sys); sys_run = 0; repeat (20) @(negedge clk);
+		frame_data(lba, lp, TB_FRAME);
+		rd({w, ": the primary's frame stored in full"}, SEC + S_ACCEPT, {19'h40000, TB_FRAME[12:0]});
+		sec_wr(S_BEGIN1, {25'd0, l});
+		sv_store({25'd0, l}, 0, TB_XFRAME0);
+		rd({w, ": slot 1's frame stored in full: ACCEPT ok"}, SEC + S_ACCEPT, {19'h40000, TB_XFRAME0});
+		host_end;
+		ena_rd(v);
+		check({w, ": the ID view ended the enable"}, v[31], 0);
+		repeat (200) @(negedge clk);
+		sys_run = 1;
+		wait_frame(n0);
+		check_buf({w, ": the frame playing at the fall completes whole"}, lba, TB_FRAME);
+		t = 0; while ((blk_dn[18] || blk_dn[17]) && t < slow(5000)) begin @(negedge clk); t = t + 1; end
+		repeat (slow(2000)) @(negedge clk);
+		check({w, ": no ack, no strobe: the committed frame was discarded unplayed"},
+		      (sv1.acks - a0) + (sv1.strobes - s0x), 0);
+		sv1_spi_wait(ok);
+		check({w, ": slot 1 back on SPI, its request seen by hps_io"}, ok, 1);
+		sv1_spi_serve(w, 16'h3C00);
+		ena_take; cause_drain(SEC); host_end;
+	end
+endtask
 task sec_view_cases;
 	integer sc;
 	begin
@@ -3969,6 +4015,7 @@ task sec_view_cases;
 		sec_view_save(1, 1'b1);
 		sec_view_save(3, 1'b1);
 		sec_view_save(4, 1'b1);
+		sec_view_queued;
 	end
 endtask
 `endif

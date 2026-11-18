@@ -356,13 +356,15 @@ A read returns `{en[31], quiet[30], stale[29], burst[28], 12'd0, hrst[15], 3'd0,
 | `idv` | GPO bit 31 reads 0 now (the ID view, or the core reset through GPO); no ENABLE is taken while it is 1 |
 
 **When the enable falls**, every line falls, LINE_EN reads 0, OSD image stores still queued are discarded unwritten,
-the SECTOR block's EN bits clear (a primary frame in flight completes, zero-filled from the first word the host
-did not store; a save-slot frame not stored in full never reached the core and is withdrawn, its request standing
-for SPI; each slot returns to SPI once its frame is done), queued SECTOR entries are discarded (a BEGIN not yet
-taken leaves its request standing for SPI), the open LANE frame is abandoned, queued LANE frames are discarded
-unplayed (one already playing finishes), and reply words still to come are discarded. A frame stored in full
-before the fall is delivered whole. PAD levels already delivered stay in the core, as a stock program's would,
-until the next pad store over either path.
+and the SECTOR block's EN bits clear. Only a frame already playing completes: the SECTOR frame the feeder has begun
+(a primary frame zero-filled from the first word the host did not store; each slot returns to SPI once its frame is
+done) and the LANE frame being played. Every entry queued behind it is discarded unplayed, **committed or not**:
+a SECTOR BEGIN_S or WACK_S among them goes with its DATA and leaves its request standing for SPI, so the core gets
+none of that block over LW, and a stock Main serves it. A host or tool must not take a block as delivered because
+its frame was stored in full, or because ACCEPT read `ok`. A save-slot frame not stored in full never reached the
+core. The open LANE frame is abandoned, queued LANE frames are discarded unplayed, and reply words still to come
+are discarded. PAD levels already delivered stay in the core, as a stock program's would, until the next pad store
+over either path.
 
 **The enable links.** SECTOR, OSDBUF and LANE each carry the enable to their core-clock half over a link with one
 level each way: the enable level, and the half's acknowledge that it is at rest (nothing queued, nothing in flight,
@@ -598,7 +600,8 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero 
 - A save slot's WRITE is answered by its WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`
   (below).
 - **A save slot's READ frame is all or nothing.** None of it reaches the core until its last word is stored; from
-  then it plays out whole, whatever follows. A frame not stored in full is withdrawn by ABORT, by any BEGIN_S or
+  then no store aborts it, and once the feeder has begun it, it plays out whole. One still queued when the enable
+  falls is discarded unplayed, its request standing for SPI ("When the enable falls"). A frame not stored in full is withdrawn by ABORT, by any BEGIN_S or
   WACK_S, and when the enable falls: its request stands, its answered mark clears, and while EN is set its CAUSE bit
   rises again, unless the store that withdrew it answers the same slot. So a host that dies mid-frame leaves the
   core's save block untouched, for the next host or SPI. A save slot's frame must fit the FIFO: 1-510 words.

@@ -54,7 +54,8 @@
 #      "image"). And the guide, docs/LW_BRIDGE.md, names no register, verb or field the host interface no longer
 #      has (a lease and its TTL, timebase, renew, release, claim, owner and epoch), no planning label (a finding,
 #      rule or step id, a section sign) and no IPv4 address. Its drain rules end on a level a drain brings to 0:
-#      the lane's on RSTAT's replies field, never on RSTAT whole (its reply_drops field is never cleared).
+#      the lane's on RSTAT's replies field, never on RSTAT whole (its reply_drops field is never cleared). Its
+#      enable-fall contract promises no queued frame, committed or not: only a frame already playing completes.
 # Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
 #  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
 #      get_keepers name pattern (the Gray loop's expanded per bus) matches a register of an LW module, as a
@@ -930,6 +931,17 @@ for n, l in bad[:8]: print('     %s:%d: %s' % (GUIDE, n, l.strip()[:100]))
 check(not bad, '%s: %d lines that drain the lane until RSTAT reads 0, not its replies field' % (GUIDE, len(bad)))
 check(any(re.search(r'RPOP until RSTAT', l) and re.search(r'\[15:0\]', l) for n, l in gtxt),
       '%s: no lane drain rule names RSTAT[15:0]' % GUIDE)
+# at the enable's fall only a frame already playing completes; queued entries, committed or not, are discarded
+GWHOLE = re.compile(r'(?i)delivered whole|plays out whole, whatever follows')
+bad = [(n, l) for n, l in gtxt if GWHOLE.search(l)]
+for n, l in bad[:8]: print('     %s:%d: %s' % (GUIDE, n, l.strip()[:100]))
+check(not bad, '%s: %d lines that promise a queued frame plays at the enable\'s fall' % (GUIDE, len(bad)))
+gall = '\n'.join(l for n, l in gtxt)
+fall = re.search(r'\*\*When the enable falls\*\*(.*?)\n\n', gall, re.S)
+check(fall is not None and re.search(r'committed\s+or\s+not', fall.group(1)) is not None and
+      re.search(r'already\s+playing\s+completes', fall.group(1)) is not None,
+      '%s: "When the enable falls" does not say that only a frame already playing completes and that queued '
+      'entries, committed or not, are discarded' % GUIDE)
 
 # ---- The constraints: every bound names both ends, every pattern matches, every source is covered ----
 print('-- lw_bridge.sdc: -from and -to on every bound, every name pattern matched, every lw_sync source covered')
