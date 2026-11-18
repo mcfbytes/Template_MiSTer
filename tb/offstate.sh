@@ -16,8 +16,12 @@
 #      with LW_ and is undefined before the guard closes; it undefines no macro it did not define; it defines
 #      no LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
-#      SYSTEMVERILOG_FILE lines for LW-only files and at most one SDC_FILE line for lw_bridge.sdc;
-#      Template.qsf's assignments (its comment and blank lines removed) are upstream's.
+#      SYSTEMVERILOG_FILE lines for LW-only files and one SDC_FILE line for lw_bridge.sdc, right after
+#      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's.
+#   5. sys/lw_bridge.sdc is inert in a build without MISTER_LW: its one command outside a guard collects the
+#      first synchroniser stages (lws0_*, which only sys/lw_cdc.sv declares, and check 2 empties without
+#      MISTER_LW), and every other command sits inside "if {[get_collection_size $lw_s0] > 0} {", which the file
+#      ends by closing.
 # Upstream's tree is read with git into $LW_TB_OUT/upstream. Where git cannot reach the repository (the
 # container tb/run.sh starts), run "tb/offstate.sh --extract" outside first; tb/run.sh does.
 # Output: "-- " headings, a FAIL line per failed check, then PASSED/FAILED with the counts (tb/run.sh's verdict).
@@ -210,7 +214,25 @@ sdc = re.compile(r'set_global_assignment -name SDC_FILE +\[file join \$::quartus
 rest = [l for l in qip if not add.match(l) and not sdc.match(l)]
 check(rest == open(os.path.join(UP, 'sys/sys.qip')).read().splitlines(),
       'sys/sys.qip: differs from upstream beyond the LW-only file lines')
-check(sum(1 for l in qip if sdc.match(l)) <= 1, 'sys/sys.qip: more than one lw_bridge.sdc line')
+at = [i for i, l in enumerate(qip) if sdc.match(l)]
+check(len(at) == 1 and at[0] > 0 and re.search(r'\bsys_top\.sdc \]$', qip[at[0] - 1]) is not None,
+      'sys/sys.qip: %d lw_bridge.sdc lines, not one right after sys_top.sdc\'s' % len(at))
+print('-- lw_bridge.sdc constrains nothing without MISTER_LW')
+GUARD_Q = 'set lw_s0 [get_keepers -nowarn {*|lws0_*}]'
+GUARD_IF = 'if {[get_collection_size $lw_s0] > 0} {'
+sd = [l.strip() for l in open('sys/lw_bridge.sdc').read().split('\n')] if os.path.exists('sys/lw_bridge.sdc') else []
+sd = [l for l in sd if l and not l.startswith('#')]
+depth, out = 0, []   # out: the commands after the guard's first close
+for n, l in enumerate(sd):
+    if n > 1 and depth == 0: out.append(l)
+    depth += l.count('{') - l.count('}')
+check(sd[:2] == [GUARD_Q, GUARD_IF] and not out and depth == 0 and sd[-1] == '}',
+      'sys/lw_bridge.sdc: not one query of the first stages, then every other command inside %s: %s' %
+      (GUARD_IF, ' / '.join(out) or ' / '.join(sd[:2]) or 'no file'))
+check(re.search(r'lws0_', open('sys/lw_cdc.sv').read()) is not None and
+      not any(re.search(r'lws0_', open(os.path.join('sys', x), errors='replace').read())
+              for x in os.listdir('sys') if x != 'lw_cdc.sv' and re.search(r'\.(s?v|vh?|vhd)$', x)),
+      'sys/lw_bridge.sdc\'s guard: lws0_ is named outside sys/lw_cdc.sv, or not in it')
 asg = lambda p: [l for l in open(p).read().splitlines() if l.strip() and not l.lstrip().startswith('#')]
 check(asg('Template.qsf') == asg(os.path.join(UP, 'Template.qsf')), 'Template.qsf: an assignment differs from upstream')
 
