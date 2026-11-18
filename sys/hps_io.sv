@@ -35,6 +35,13 @@
 //  0 - not used, Main never polls it (default)
 //  1 - core drives joystick_N_ffb, read by Main with UIO_GET_FFB
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_EVT
+// LW_EVT_X: the events tier (MISTER_LW_EVT, with MISTER_LW) exports uio_block's core->host flags.
+`define LW_EVT_X
+`endif
+`endif
+
 //
 module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, BLKSZ=2, PS2WE=0, STRLEN=$size(CONF_STR)>>3, F12KEYMOD=0, FFB=0)
 (
@@ -233,12 +240,28 @@ wire [31:0] lw_dat   = HPS_BUS[77:46];
 assign HPS_BUS[375] = 1'b1;
 `endif
 
-// The status back-channel's own flag and snapshot (0x29), exported to sys_top's LW EVT block (lw_evt.sv);
-// HPS_BUS[376]: the exports are present.
+`ifdef LW_EVT_X
+// The core->host flags, exported to sys_top's LW EVT block (lw_evt.sv): HPS_BUS[239:237] one-cycle pulses
+// {upload, info, blk} from the edges uio_block uses, [371:240] the 0x29 flag and snapshot {status_req, stflg},
+// [374:372] the levels {upload pending, info pending, a block request stands}, [376] the exports are present.
+// uio_block's own registers, declared here so the exports can read them:
 reg   [3:0] stflg = 0;
 reg [127:0] status_req = 0;
-`ifdef MISTER_LW_EVT
+reg         old_upload_req = 0;
+reg         upload_req = 0;
+reg         old_info = 0;
+reg   [7:0] info_n = 0;
+// blk: a rise of a slot's request, or a fall of its SPI ack that leaves the request raised
+wire [VD:0] ev_rq = sd_rd | sd_wr;
+reg  [VD:0] ev_rq_d = 0, ev_ack_d = 0;
+always @(posedge clk_sys) begin
+	ev_rq_d  <= ev_rq;
+	ev_ack_d <= sd_ack;
+end
+assign HPS_BUS[239:237] = {~old_upload_req & ioctl_upload_req, ~old_info & info_req,
+                           |((ev_rq & ~ev_rq_d) | (ev_ack_d & ~sd_ack & ev_rq))};
 assign HPS_BUS[371:240] = {status_req, stflg};
+assign HPS_BUS[374:372] = {upload_req, info_n != 8'd0, |ev_rq};
 assign HPS_BUS[376] = 1'b1;
 `endif
 `else
@@ -342,16 +365,20 @@ always@(posedge clk_sys) begin : uio_block
 	reg  [7:0] atrig_idx;
 	reg  [3:0] pdsp_idx;
 	reg        ps2skip = 0;
-`ifndef MISTER_LW
+`ifndef LW_EVT_X
 	reg  [3:0] stflg = 0;
 	reg[127:0] status_req;
 `endif
 	reg        old_status_set = 0;
+`ifndef LW_EVT_X
 	reg        old_upload_req = 0;
+`endif
 	reg [47:0] ffb_data;
+`ifndef LW_EVT_X
 	reg        upload_req = 0;
 	reg        old_info = 0;
 	reg  [7:0] info_n = 0;
+`endif
 	reg [15:0] tmp1;
 	reg  [7:0] tmp2;
 	reg  [3:0] sdn_r;
@@ -852,6 +879,10 @@ always@(posedge clk_sys) begin : fio_block
 end
 
 endmodule
+
+`ifdef LW_EVT_X
+`undef LW_EVT_X
+`endif
 
 //////////////////////////////////////////////////////////////////////////////////
 

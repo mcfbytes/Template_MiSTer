@@ -30,7 +30,8 @@
 //     of the run, each moving when its source is forced; without MISTER_LW bits 27:21 are clear;
 //   - an ENABLE stored through the bridge atom sets GPI[22]; GPO[31] low raises lw_idv, which clears it;
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
-//     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window, each when its tier is built;
+//     hps_io decodes it, the status hold, the event pulses and the event levels from hps_io to lw_sys_window, each
+//     when its tier is built;
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
 //   - with the OSD tier, each osd instance that exists carries the window's OSDBUF write port, and the window takes
 //     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd) and GPO[31] on clk_sys;
@@ -139,6 +140,13 @@ task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 `ifdef MISTER_LW
 // HPS_BUS[383:46]: a net with no source reads 0, as synthesis ties it; a bit any piece drives overrides the pull.
 assign (weak0, weak1) dut.lw_bus = 338'd0;
+`ifdef MISTER_LW_EVT
+// The Template leaves these hps_io inputs open, and synthesis ties an open input port low; the event exports read them.
+assign (weak0, weak1) dut.emu.hps_io.info_req = 1'b0;
+assign (weak0, weak1) dut.emu.hps_io.ioctl_upload_req = 1'b0;
+assign (weak0, weak1) dut.emu.hps_io.sd_rd = 1'b0;
+assign (weak0, weak1) dut.emu.hps_io.sd_wr = 1'b0;
+`endif
 
 `ifdef MISTER_LW_PAD
 localparam TB_PAD = 1;
@@ -162,14 +170,15 @@ localparam TB_LANE = 0;
 `endif
 
 // The bits of HPS_BUS[383:46] some piece drives in this configuration (bit i - 46 of the mask is bus bit i): every
-// to-core bit [131:46]; with PAD hps_io's presence bit [375]; with EVT the status hold [371:240] and [376].
+// to-core bit [131:46]; with PAD hps_io's presence bit [375]; with EVT the event pulses [239:237], the status
+// hold [371:240], the event levels [374:372] and [376].
 function [383:46] bus_driven;
 	reg [383:0] m;
 	begin
 		m = 0;
 		m[131:46] = '1;
 		if (TB_PAD) m[375] = 1'b1;
-		if (TB_EVT) begin m[371:240] = '1; m[376] = 1'b1; end
+		if (TB_EVT) begin m[374:237] = '1; m[376] = 1'b1; end
 		bus_driven = m[383:46];
 	end
 endfunction
@@ -334,9 +343,21 @@ initial begin
 		force dut.emu.hps_io.status_req = st[127:0];
 		sys_cycles(1);
 		check("status hold at lw_evt {stflg, status_req}",
-		      {dut.lw_sys_window.evt.evt.stflg, dut.lw_sys_window.evt.evt.status_req}, st);
+		      {dut.lw_sys_window.evt.evt.st[3:0], dut.lw_sys_window.evt.evt.st[131:4]}, st);
 		release dut.emu.hps_io.stflg;
 		release dut.emu.hps_io.status_req;
+		// the pulses {upload, info, blk} and the levels {upload pending, info pending, a request stands}
+		force dut.emu.hps_io.ioctl_upload_req = 1'b1; force dut.emu.hps_io.old_upload_req = k[0];
+		force dut.emu.hps_io.info_req = 1'b1; force dut.emu.hps_io.old_info = !k[0];
+		force dut.emu.hps_io.ev_rq = !k[0]; force dut.emu.hps_io.ev_rq_d = 1'b0; force dut.emu.hps_io.ev_ack_d = 1'b0;
+		force dut.emu.hps_io.upload_req = !k[0]; force dut.emu.hps_io.info_n = k[0] ? 8'h5A : 8'h00;
+		sys_cycles(1);
+		check("event pulses at lw_evt {upload, info, blk}", dut.lw_sys_window.evt.evt.ev, k[0] ? 3'b010 : 3'b101);
+		check("event levels at lw_evt {upload, info, request}", dut.lw_sys_window.evt.evt.lvl, k[0] ? 3'b010 : 3'b101);
+		release dut.emu.hps_io.ioctl_upload_req; release dut.emu.hps_io.old_upload_req;
+		release dut.emu.hps_io.info_req; release dut.emu.hps_io.old_info;
+		release dut.emu.hps_io.ev_rq; release dut.emu.hps_io.ev_rq_d; release dut.emu.hps_io.ev_ack_d;
+		release dut.emu.hps_io.upload_req; release dut.emu.hps_io.info_n;
 `endif
 	end
 	sys_cycles(4);
@@ -428,7 +449,7 @@ initial begin
 	lw_read(21'h4000C, d);
 	check("COUNT: PAD, EVT, OSDBUF and LANE as built", d, TB_PAD + TB_EVT + TB_OSD + TB_LANE);
 	lw_read(21'h80000, d); check("the PAD block's first word", d, TB_PAD ? 32'd0 : 32'hDEADBEEF);
-	lw_read(21'h4301C, d); check("the EVT block's ID word", d, TB_EVT ? 32'h31535453 : 32'hDEADBEEF);
+	lw_read(21'h4301C, d); check("the EVT block's ID word", d, TB_EVT ? 32'h32545645 : 32'hDEADBEEF);
 	lw_read(21'h41000, d); check("the SECTOR block's first word", d, 32'hDEADBEEF);
 
 	$display("-- the host enable: GPI[22] is the window's enable register; GPO[31] low clears it");

@@ -64,7 +64,7 @@ beyond it then show no presence bit, and their blocks are not listed in the dire
 |---|---|---|
 | `MISTER_LW` | off | the floor: the bridge, the window, its directory, the host enable and GPI bits 25, 24 and 22 |
 | `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
-| `MISTER_LW_EVT` | absent | with `MISTER_LW`: the status back-channel (`lw_evt.sv`), `hps_io`'s exports and its line |
+| `MISTER_LW_EVT` | absent | with `MISTER_LW`: the EVT block (`lw_evt.sv`): `hps_io`'s status, block-request, info and upload flags as causes, `hps_io`'s exports and its line |
 | `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
@@ -136,7 +136,7 @@ inside the window or outside it, and an unassigned offset inside a block reads 0
 |---|---|---|---|
 | `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
 | `0x01000` | `0x41000` | `0x2000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`) |
-| `0x03000` | `0x43000` | `0x1000` | SYS |
+| `0x03000` | `0x43000` | `0x1000` | EVT |
 | `0x04000` | `0x44000` | `0x2000` | OSDBUF |
 | `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`) |
 | `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
@@ -185,7 +185,7 @@ bitstream builds, so an entry's index (and its PENDING bit) depends on the core'
 | 1 | PAD | `0x00010001` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap; K8 `{spinner FIFO, keyed slots}` = `0x00100018` |
 | 2 | SECTOR | `0x00010001` | `0x01000` / `0x02000` | `0x01000` | 1 | `0x1` | see SECTOR |
 | 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000` |
-| 4 | SYS | `0x00010000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0x1` | none |
+| 4 | EVT | `0x00020000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0xF` | K0 = 4: the status words |
 | 5 | LANE | `0x00010001` | `0x06000` / `0x01000` | 0 | 0 | 0 | see LANE |
 
 **Walking it.** A host:
@@ -245,7 +245,7 @@ every handshake idle). The half's only enable input is that level, and it reache
 is low. A link opens a block's stores only after the half has seen the level rise, and the level falls only after
 the half has answered it, so an enable that falls within a few cycles of its rise still leaves the link closed until
 the half answers. An ENABLE is taken only while every link is at rest (`quiet`). At an ENABLE the causes are
-reloaded: SYS raises STATUS; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that
+reloaded: EVT ORs in STATUS and every level PEND shows; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that
 stands. While GPO bit 31 is 0 (the ID view) neither the lane player nor the OSD writer starts anything, so nothing
 queued by a host that has gone plays inside the next program's identification.
 
@@ -271,7 +271,7 @@ shared interrupt 47 + *k*, and no two entries name the same ordinal.
 | ordinal | f2h line | GIC SPI | entry in this revision |
 |---|---|---|---|
 | 1 | `f2h_irq[8]` | 48 | SECTOR |
-| 2 | `f2h_irq[9]` | 49 | SYS |
+| 2 | `f2h_irq[9]` | 49 | EVT |
 | 3-15 | `f2h_irq[10]`-`[22]` | 50-62 | framework kinds to come |
 | 16-31 | `f2h_irq[23]`-`[38]` | 63-78 | a core's own kinds |
 
@@ -341,27 +341,32 @@ the SPI one.
   `level` = 0, so a late byte of rows 8-15 cannot set highres after a disable.
 - **Cost:** the FIFO, 256 x 47 bits (two M10K).
 
-### SYS block (kind 4): the status back-channel
+### EVT block (kind 4, "EVT2"): the core's flags
 
-`hps_io`'s `0x29` back-channel without the poll: when the core raises `status_set`, the block captures
-`status_req` and raises STATUS on its entry's line (ordinal 2, `f2h_irq[9]`). The SPI `0x29` arm still answers as
-before.
+`hps_io`'s core-to-host flags as causes on one line (ordinal 2, `f2h_irq[9]`), so a host need not poll `0x16`,
+`0x29`, `0x36` or `0x3C` on any core, including one whose blocks stay on SPI. The SPI arms still answer as before,
+and serving them is how a host clears the levels.
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | `0x00000001` while pending, else 0: bit 0 = STATUS, raised by every capture and by a taken ENABLE; a store of bit 0 clears it |
-| `0x04` | STFLG | `{SEQ[15:0], 8'h00, 4'hA, flag[3:0]}`: the `0x29` head byte, plus a capture count |
-| `0x08`-`0x14` | STATUS[0..3] | the captured `status_req`, `[31:0]` first |
-| `0x1C` | ID | `0x31535453` ("STS1") |
+| `0x00` | CAUSE | bit 0 STATUS: a status transfer landed (and at a taken ENABLE); bit 1 BLK: a slot's block request rose, or a slot's SPI ack fell with its request still raised; bit 2 INFO: `info_req` rose; bit 3 UPLOAD: `ioctl_upload_req` rose. A store clears each bit written as 1 |
+| `0x04` | STFLG | `{SEQ[15:0], 8'h00, 4'hA, flag[3:0]}`: the `0x29` head byte, plus a count of status transfers |
+| `0x08`-`0x14` | STATUS[0..3] | the transferred `status_req`, `[31:0]` first |
+| `0x18` | PEND | levels: bit 1 a block request stands at `hps_io`, bit 2 info pending (`0x36` clears it), bit 3 upload pending (`0x3C` clears it); each bit an independent sample |
+| `0x1C` | ID | `0x32545645` ("EVT2") |
 
-**Read it as a seqlock:**
-1. Read CAUSE and store the value back.
-2. Read STFLG.
-3. Read the four STATUS words.
-4. Read STFLG again.
-
-If the two STFLG words are equal, the four words are one capture. If not, read again. Captures that arrive faster
-than the host reads coalesce into the latest. None is lost.
+- **The status crosses whole.** When the core raises `status_set`, `{status_req, flag}` crosses to the bridge in
+  one held-data handshake: a transfer is never torn, at any `clk_sys`. Requests faster than the handshake coalesce
+  into the latest, and the latest always arrives. STFLG's flag and the four words read one register; SEQ moves one
+  cycle after them.
+- **Read the status in a bracket:** STFLG, any of the four words, STFLG. If the two STFLG words are equal, the
+  words are one transfer, whichever words were read and however (single reads or a burst). If not, read again. A
+  host that reads no STATUS word needs no bracket.
+- **Drain:** read CAUSE and store it back; read STFLG and the words if STATUS was set; then serve over SPI what
+  the level bits show (the block request with `0x16`, info with `0x36`, upload with `0x3C`) and read PEND again
+  until the bits served read 0.
+- **BLK** is raised again when a slot's SPI ack falls with its request still raised, the request an SPI host serves
+  next; a slot the SECTOR block has claimed raises none.
 
 ### SECTOR block (kind 2, "SEC2")
 
@@ -513,8 +518,8 @@ lw_blk_mux blk_lw
 The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core is on the core's `clk_sys`.
 
 - **PAD:** a toggle handshake with the data held at least two `clk_sys` cycles. No ratio bound.
-- **SYS:** the flag crosses as a registered Gray code. `hps_io` moves it at most once per two `clk_sys` cycles, so
-  `clk_sys` must stay below about 100 MHz (50 MHz has margin). A faster core must widen the crossing to a handshake.
+- **EVT:** the status flag and snapshot cross whole in one held-data handshake, the BLK/INFO/UPLOAD pulses in a
+  second; both land on `clk_100m`. No ratio bound. The PEND levels cross through two-flop synchronisers.
 - **SECTOR reject path:** a rejected answer's `{slot, tag}` and its toggle coexist for one `clk_sys` period. Keep
   `clk_sys` below about 50 MHz, the conservative bound; the analysed edge is near 70-100 MHz. A faster core must hold
   `F_REJECT` for `ceil(2 x f_sys / 100 MHz)` cycles, or widen the crossing.
@@ -550,10 +555,12 @@ its descriptor and an EN bit that cannot be set).
 | `[128]`, `[129]` / `[130]`, `[131]` | to core | save slot 0 / 1 `en_sys`, `ack` (`lw_card_mux`) |
 | `[166:132]` | from core | SECTOR primary `{lba[31:0], req, hps_ack, reset}` (bit 132 = reset) |
 | `[201:167]`, `[236:202]` | from core | save slot 0, 1 `{lba[31:0], rd, wr, hps_ack}` (low bit = hps_ack; `lba[6:0]` used) |
+| `[239:237]` | from core | event pulses, one `clk_sys` cycle: `{upload, info, blk}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[243:240]`, `[371:244]` | from core | `stflg[3:0]`, `status_req[127:0]` (`hps_io`, with `MISTER_LW_EVT`) |
+| `[374:372]` | from core | event levels `{upload pending, info pending, a block request stands}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
-| `[239:237]`, `[374:372]`, `[383:380]` | - | reserved: nothing drives them; every reader ignores them |
+| `[383:380]` | - | reserved: nothing drives them; every reader ignores them |
 
 ## Verification
 
@@ -596,7 +603,8 @@ and 3. They cover:
 - the default responder and fixed latency;
 - frames that are lost, resent, out of order, aborted, rejected or reset mid-frame;
 - card reads and writes, and their priority;
-- the SYS seqlock, including a 64-offset read/capture race;
+- the EVT block: status brackets of four shapes at 64 phase offsets, a 64-offset read/capture race, and BLK, INFO
+  and UPLOAD pulses at every spacing to sixteen `clk_sys` cycles, none lost;
 - the OSD image over LW in both `osd_buffer`s byte for byte as over SPI, drawn the same through both pixel paths
   (plain, rotated, the info box and the `MENU_CORE` header rows), the FIFO full with `clk_sys` stopped, and queued
   bytes discarded when the enable falls.
@@ -609,10 +617,11 @@ Re-run it after any `sys/` merge.
   that revision's own `sys/`; its `hps_io` (FFB, analog triggers) is newer than the one the framework was first
   built on.
 - **Register map:** the blocks' registers are those of a build validated on a DE10-Nano on 2026-10-25, which
-  covered pads, the OSD shadow, SECTOR (CD and save slots) and the SYS status line, except where this document
+  covered pads, the OSD shadow, SECTOR (CD and save slots) and the status line, except where this document
   states otherwise: CAUSE words clear by write-one and carry no class tag, a store is a single-beat write, PAD is
   version 1.1, which keeps every level latest-wins where that build queued the sticks and paddles with the
-  spinners, and OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a shadow beside it.
+  spinners, EVT is version 2.0, which crosses the status whole and adds the BLK, INFO and UPLOAD causes where that
+  build had a status block alone, and OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a shadow beside it.
   The directory is layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
   directory here and stays on SPI.
 - **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and

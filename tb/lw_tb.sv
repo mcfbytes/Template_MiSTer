@@ -486,12 +486,13 @@ reg  [31:0] cd_lba = 32'hFFFFFFFF;
 wire        cd_ack, cd_wr;
 wire [15:0] cd_data;
 wire  [3:0] sd_rd, sd_wr, sd_ack;
+reg         blk0_rd = 0;                // a consumer on hps_io slot 0 that holds its request (the EVT cases)
 wire [15:0] sd_buff_dout;
 wire        sd_buff_wr;
 wire  [8:0] sd_buff_addr;
 wire [31:0] sd_lba [4];
 wire [15:0] sd_buff_din [4];
-assign sd_rd[0] = 0;
+assign sd_rd[0] = blk0_rd;
 assign sd_wr[1:0] = 0;
 assign sd_lba[0] = 0;
 assign sd_lba[1] = cd_lba;
@@ -505,6 +506,15 @@ assign sd_buff_din[3] = mc2.dout;
 // The core's status request: a rising edge of status_set latches status_in.
 reg [127:0] st_in = 0;
 reg         st_set = 0;
+// hps_io's status flag: at module scope with the events tier, in uio_block without it.
+`ifdef MISTER_LW_EVT
+`define TB_STFLG hps_io.stflg
+`else
+`define TB_STFLG hps_io.uio_block.stflg
+`endif
+// The core's info and upload requests: a rising edge of each (hps_io's 0x36 and 0x3C).
+reg         info_rq = 0, up_rq = 0;
+reg   [7:0] info_v = 8'h00;
 
 `ifdef MISTER_LW_LANE
 // The hps_io registers the lane cases compare (gamma_bus[21]: the core has gamma).
@@ -542,7 +552,8 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 	.ioctl_wait(ioctl_wait), .status(hst), .RTC(rtc), .TIMESTAMP(tstamp), .img_mounted(img_m), .img_readonly(img_ro),
 	.img_size(img_sz), .gamma_bus(gbus), .sdram_sz(sdsz), .uart_mode(umode), .uart_speed(uspeed), .EXT_BUS(ebus),
 `endif
-	.status_in(st_in), .status_set(st_set),
+	.status_in(st_in), .status_set(st_set), .info_req(info_rq), .info(info_v), .ioctl_upload_req(up_rq),
+	.ioctl_upload_index(8'h5C),
 	.joystick_0(joy0), .joystick_1(joy1), .joystick_2(joy2), .joystick_3(joy3), .joystick_4(joy4), .joystick_5(joy5),
 	.joystick_l_analog_0(lstk[15:0]), .joystick_l_analog_1(lstk[31:16]), .joystick_l_analog_2(lstk[47:32]),
 	.joystick_l_analog_3(lstk[63:48]), .joystick_l_analog_4(lstk[79:64]), .joystick_l_analog_5(lstk[95:80]),
@@ -678,7 +689,7 @@ function [511:0] pure_win;
 		p = {win.pad.pad.sdrop, win.pad.pad.dirty, win.pad.pad.awp, win.pad.pad.arp, win.pad.pad.ds, win.pad.pad.psel};
 `endif
 `ifdef MISTER_LW_EVT
-		e = {win.evt.evt.flg, win.evt.evt.seq, win.evt.evt.snap, win.evt.evt.cause};
+		e = {win.evt.evt.seq, win.evt.evt.cause, win.evt.evt.s_q, win.evt.evt.e_q};
 `endif
 		pure_win = {180'd0, win.scratch, o, doorbell, sys_irq, p, e};
 	end
@@ -1515,7 +1526,7 @@ endfunction
 // The last capture of the snapshot, for the race sweep's level property.
 realtime t_cap = 0;
 `ifdef MISTER_LW_EVT
-always @(posedge clk) if (win.evt.evt.capture) t_cap = $realtime;
+always @(posedge clk) if (win.evt.evt.s_v) t_cap = $realtime;
 `endif
 
 task st_req(input [127:0] v);
@@ -1536,6 +1547,231 @@ task st_read(output [31:0] f0, output [31:0] f1, output [127:0] w);
 		axi_read(SYSB + 21'h04, 0, f1, dl, beats);
 	end
 endtask
+
+// One SPI command word and the reply word hps_io gives for it (0x36 info, 0x3C upload, 0x0N17 a slot's read).
+task spi_get(input [15:0] cmd, output [15:0] r);
+	begin
+		@(negedge clk_sys); io_enable = 1;
+		io_din = cmd; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys); r = hps_io.io_dout;
+		io_enable = 0; @(negedge clk_sys);
+	end
+endtask
+
+`ifdef MISTER_LW_EVT
+// T-EVT1's checker: each pulse hps_io sends on HPS_BUS[239:237] ({upload, info, blk}) is owed a raise of its
+// CAUSE bit after it; a raise is the event cell's valid pulse with the bit set. ev_nl and ev_nb count pulses met
+// in a launch cycle of the event handshake and while it was busy.
+realtime ev_tp [0:2], ev_tr [0:2];
+integer  ev_np [0:2], ev_nr [0:2], ev_nl = 0, ev_nb = 0;
+initial for (i = 0; i < 3; i = i + 1) begin ev_tp[i] = 0; ev_tr[i] = 0; ev_np[i] = 0; ev_nr[i] = 0; end
+always @(posedge clk_sys) begin : ev_mon
+	integer b;
+	for (b = 0; b < 3; b = b + 1) if (hps_bus[237 + b] === 1'b1) begin ev_tp[b] = $realtime; ev_np[b] = ev_np[b] + 1; end
+	if (|hps_bus[239:237] === 1'b1) begin
+		if (win.evt.evt.e_go && !win.evt.evt.e_busy) ev_nl = ev_nl + 1;
+		if (win.evt.evt.e_busy) ev_nb = ev_nb + 1;
+	end
+end
+always @(posedge clk) begin : ev_rmon
+	integer b;
+	if (win.evt.evt.e_v)
+		for (b = 0; b < 3; b = b + 1) if (win.evt.evt.e_q[b]) begin ev_tr[b] = $realtime; ev_nr[b] = ev_nr[b] + 1; end
+end
+// bits whose last pulse has no raise after it
+function integer ev_owed;
+	integer b;
+	begin ev_owed = 0; for (b = 0; b < 3; b = b + 1) if (ev_tp[b] > ev_tr[b]) ev_owed = ev_owed + 1; end
+endfunction
+
+localparam [20:0] EVPEND = SYSB + 21'h18;
+
+// T-EVT1: BLK, INFO and UPLOAD, one pulse each, then pulses at every spacing to sixteen clk_sys cycles.
+task evt1_cases;
+	reg [15:0] r;
+	integer k, n0, n1, nr0, lost, j;
+	begin
+		$display("-- EVT: BLK, INFO, UPLOAD: one pulse raises its cause once; PEND follows the levels; serving raises nothing");
+		sys_drain;
+		rd("PEND: nothing stands", EVPEND, 32'd0);
+		nr0 = ev_nr[1];
+		info_v = 8'h21; @(negedge clk_sys) info_rq = 1; settle;
+		rd("an info_req rise: CAUSE INFO", SYSB, 32'h4);
+		check("one raise of INFO", ev_nr[1] - nr0, 1);
+		rd("PEND: info pending", EVPEND, 32'h4);
+		axi_write(SYSB, 32'h4, 4'hF); settle;
+		rd("info_req held: no second INFO", SYSB, 32'd0);
+		spi_get(16'h0036, r);
+		check("0x36 answers the info byte", r, 16'h0021);
+		settle;
+		rd("0x36 served it: PEND clear", EVPEND, 32'd0);
+		rd("serving raised nothing", SYSB, 32'd0);
+		@(negedge clk_sys) info_rq = 0; settle;
+		rd("info_req falls: nothing raised", SYSB, 32'd0);
+
+		nr0 = ev_nr[2];
+		@(negedge clk_sys) up_rq = 1; settle;
+		rd("an ioctl_upload_req rise: CAUSE UPLOAD", SYSB, 32'h8);
+		check("one raise of UPLOAD", ev_nr[2] - nr0, 1);
+		rd("PEND: upload pending", EVPEND, 32'h8);
+		axi_write(SYSB, 32'h8, 4'hF);
+		spi_get(16'h003C, r);
+		check("0x3C answers {index, 1}", r, 16'h5C01);
+		settle;
+		rd("0x3C served it: PEND clear, nothing raised", EVPEND, 32'd0);
+		rd("CAUSE clear", SYSB, 32'd0);
+		@(negedge clk_sys) up_rq = 0;
+
+		nr0 = ev_nr[0];
+		@(negedge clk_sys) blk0_rd = 1; settle;
+		rd("a slot's request rises: CAUSE BLK", SYSB, 32'h2);
+		check("one raise of BLK", ev_nr[0] - nr0, 1);
+		rd("PEND: a block request stands", EVPEND, 32'h2);
+		axi_write(SYSB, 32'h2, 4'hF);
+		spi_get(16'h0017, r);                            // slot 0's read: the ack rises, and falls at the command's end
+		settle;
+		rd("its SPI ack fell with the request still raised: BLK again", SYSB, 32'h2);
+		check("a second raise of BLK", ev_nr[0] - nr0, 2);
+		axi_write(SYSB, 32'h2, 4'hF);
+		@(negedge clk_sys) blk0_rd = 0; settle;
+		rd("the request falls: nothing raised", SYSB, 32'd0);
+		rd("PEND clear", EVPEND, 32'd0);
+		nr0 = ev_nr[0];
+		cd_request(32'h00005A00); settle;
+		if (!TB_SEC || !blk_dn[18]) rd("the CD's request on SPI: CAUSE BLK", SYSB, 32'h2);
+		axi_write(SYSB, 32'h2, 4'hF);
+		n1 = cd_frames; spi_frame(cd_lba); wait_frame(n1); settle;
+		rd("served over SPI, the request dropped on the ack: no second BLK", SYSB, 32'd0);
+		check("one raise of BLK for the CD's request", ev_nr[0] - nr0, 1);
+		if (TB_SEC) begin
+			$display("-- EVT: a slot the SECTOR mux has claimed raises no BLK; back on SPI its standing request does");
+			sec_wr(21'h10, 32'h1); settle;
+			nr0 = ev_nr[0];
+			cd_request(32'h00005B00); settle;
+			if (win.sec_lvl) cause_drain(SEC);
+			check("SECTOR's EN: the CD's request raises no BLK", ev_nr[0] - nr0, 0);
+			rd("PEND: no block request at hps_io", EVPEND, 32'd0);
+			sec_wr(21'h10, 32'h0); settle;
+			rd("EN cleared: the request reaches hps_io, BLK", SYSB, 32'h2);
+			if (win.sec_lvl) cause_drain(SEC);
+			sec_spi_clear; settle;
+			sys_drain;
+		end
+
+		$display("-- EVT: pulses one cycle apart, in the launch cycle and during a handshake are not lost");
+		lost = 0; n0 = ev_nl; n1 = ev_nb;
+		for (k = 0; k < 17; k = k + 1) for (j = 0; j < 2; j = j + 1) begin
+			fork
+				begin @(negedge clk_sys); info_rq = 1; @(negedge clk_sys); info_rq = 0;
+				      if (j) begin repeat (k) @(negedge clk_sys); info_rq = 1; @(negedge clk_sys); info_rq = 0; end end
+				begin repeat (k + 1) @(negedge clk_sys); up_rq = 1; @(negedge clk_sys); up_rq = 0; end
+				begin repeat (k + 2) @(negedge clk_sys); blk0_rd = 1; end
+			join
+			settle;
+			lost = lost + ev_owed();
+			if (TB_EVT) rd($sformatf("pulses %0d apart (%0d): all three causes", k, j), SYSB, 32'hE);
+			@(negedge clk_sys) blk0_rd = 0;
+			spi_get(16'h0036, r); spi_get(16'h003C, r); settle;
+			sys_drain;
+		end
+		$display("     %0d pulses in a launch cycle, %0d during a handshake", ev_nl - n0, ev_nb - n1);
+		check("no pulse lost", lost, 0);
+		check("pulses met a launch cycle and a busy handshake", {ev_nl > n0, ev_nb > n1}, 2'b11);
+		rd("PEND clear after the sweep", EVPEND, 32'd0);
+		rd("CAUSE clear after the sweep", SYSB, 32'd0);
+	end
+endtask
+
+// T-EVT2: status_set rising two clk_sys cycles apart, read with brackets of four shapes at 64 phase offsets.
+// st_fl[x] is the flag hps_io gave st_pat(3000 + x).
+reg [3:0] st_fl [0:1023];
+// a status word's value index (the inverse of st_pat for word j), or -1
+function integer st_idx(input integer j, input [31:0] w);
+	integer x;
+	reg [127:0] v;
+	begin
+		case (j)
+			0: x = w[31:8];
+			1: x = w[15:0];
+			2: x = w - 32'h5A000000;
+			default: x = w ^ 32'hA5000000;
+		endcase
+		v = st_pat(x);
+		st_idx = (x >= 3000 && x < 3000 + 1024 && v[32 * j +: 32] == w) ? x - 3000 : -1;
+	end
+endfunction
+task evt2_cases;
+	reg [31:0] f0, f1, f, vl;
+	reg [31:0] w [0:3];
+	reg [3:0] got;
+	integer k, sh, j, m, x, x0, ok, acc, rej, bad, nb, last, done;
+	begin
+		$display("-- EVT: status_set two cycles apart at 64 phase offsets; every accepted bracket is one value, in full");
+		acc = 0; rej = 0; bad = 0;
+		st_req(st_pat(3000)); st_fl[0] = `TB_STFLG; last = 0; settle;
+		for (k = 0; k < 64; k = k + 1) begin
+			sh = k % 4; done = 0;
+			fork
+				begin
+					for (m = 1; m <= 12; m = m + 1) begin
+						st_req(st_pat(3000 + 12 * k + m)); st_fl[12 * k + m] = `TB_STFLG;
+					end
+					last = 12 * k + 12;
+					repeat (8) @(negedge clk_sys); done = 1;
+				end
+				begin
+					#(k * 1.25);
+					while (!done) begin
+						got = 0;
+						if (sh == 3) begin
+							axi_read(SYSB + 21'h04, 4'd4, f, vl, nb);
+							f0 = rb_d[0]; for (j = 0; j < 4; j = j + 1) w[j] = rb_d[1 + j]; got = 4'hF;
+						end
+						else begin
+							axi_read(SYSB + 21'h04, 0, f0, vl, nb);
+							if (sh == 2) begin
+								axi_read(SYSB + 21'h08, 4'd3, f, vl, nb);
+								for (j = 0; j < 4; j = j + 1) w[j] = rb_d[j]; got = 4'hF;
+							end
+							else if (sh == 1) begin
+								j = (k / 4) % 4; axi_read(SYSB + 21'h08 + 4 * j, 0, w[j], vl, nb); got = 4'd1 << j;
+							end
+							else begin
+								for (j = 0; j < 4; j = j + 1) axi_read(SYSB + 21'h08 + 4 * j, 0, w[j], vl, nb);
+								got = 4'hF;
+							end
+						end
+						axi_read(SYSB + 21'h04, 0, f1, vl, nb);
+						if (f0 != f1) rej = rej + 1;
+						else begin
+							acc = acc + 1; x0 = -2; ok = 1;
+							for (j = 0; j < 4; j = j + 1) if (got[j]) begin
+								x = st_idx(j, w[j]);
+								if (x < 0 || (x0 != -2 && x != x0)) ok = 0;
+								x0 = x;
+							end
+							if (ok && st_fl[x0] !== f0[3:0]) ok = 0;
+							if (!ok) begin
+								bad = bad + 1;
+								if (bad <= 4) $display("     shape %0d offset %0d: STFLG %08h, words %08h %08h %08h %08h (read %b)", sh, k, f0,
+								                       w[0], w[1], w[2], w[3], got);
+							end
+						end
+					end
+				end
+			join
+			settle;
+			st_read(f0, f1, stw);
+			if (f0 !== f1 || stw !== st_pat(3000 + last) || f0[3:0] !== st_fl[last]) begin
+				bad = bad + 1; $display("     offset %0d: the last value did not arrive", k);
+			end
+		end
+		$display("     %0d brackets accepted, %0d rejected", acc, rej);
+		check("every accepted bracket equals one value status_in had, with its flag", bad, 0);
+		check("brackets accepted and brackets rejected", {acc > 0, rej > 0}, 2'b11);
+		sys_drain;
+	end
+endtask
+`endif
 
 localparam [20:0] OSD   = 21'h44000;
 localparam [20:0] OSDST = OSD + 21'h1800;      // STATUS {level, drops}
@@ -2404,7 +2640,8 @@ task dm_build;
 			e = e + 1;
 		end
 		if (TB_EVT) begin
-			dm_entry(e, 4, 32'h00010000, 32'h03000, 32'h01000, 32'h03000, 2, 1);   // SYS: line 2, STATUS
+			dm_entry(e, 4, 32'h00020000, 32'h03000, 32'h01000, 32'h03000, 2, 32'hF);   // EVT 2.0: line 2, four causes
+			dm[16 + 32 * e + 8] = 32'd4;                                               // K0: the status words
 			e = e + 1;
 		end
 		if (TB_LANE) begin
@@ -2442,7 +2679,7 @@ task dir_word(input integer src, input [11:0] off, output [31:0] v);
 endtask
 
 function integer kind_major(input [15:0] k);     // the kind majors this host knows; 0 = an unknown kind
-	kind_major = (k == 16'd3) ? 2 : (k >= 16'd1 && k <= 16'd5) ? 1 : 0;
+	kind_major = (k == 16'd3 || k == 16'd4) ? 2 : (k >= 16'd1 && k <= 16'd5) ? 1 : 0;
 endfunction
 
 task dir_walk(input integer src, input [31:0] tok_base, input [31:0] tok_size);
@@ -2613,7 +2850,7 @@ task dir_cases;
 		syn_add(n + 2, 32'h0001, 32'h00090000, 32'h40000, 32'h40000, 0, 32'd0, 0);               // PAD, major 9
 		syn_add(n + 3, 32'h8001, 32'h00010000, 32'h20000, 32'h1000, 32'h20000, 32'd16, 32'h54534554);  // private
 		syn_add(n + 4, 32'h0003, 32'h00020000, 32'h7F000, 32'h2000, 0, 32'd0, 0);                // OSD, past the end
-		syn_add(n + 5, 32'h0004, 32'h00010000, 32'h03000, 32'h1000, 32'h05000, 32'd0, 0);        // SYS, CAUSE outside
+		syn_add(n + 5, 32'h0004, 32'h00020000, 32'h03000, 32'h1000, 32'h05000, 32'd0, 0);        // SYS, CAUSE outside
 		dir_walk(1, tb_off, tb_size); walk_check("six entries to skip", 0, 0);
 		syn[16 + 32 * (n + 1) + 5] = 32'd2;                         // the unknown kind names the SYS entry's ordinal
 		dir_walk(1, tb_off, tb_size); walk_check("an ordinal two entries name: no line for either", 4, 0);
@@ -2659,7 +2896,8 @@ task dir_causes;
 			for (j = 0; j < wk_n; j = j + 1) if (wk_cause[j] != 0) cause_drain(DIRB + wk_cause[j]);
 			rd($sformatf("kind %0d: PENDING clear before", wk_kind[i]), DIRB + 21'h20, 32'd0);
 			check($sformatf("kind %0d: lines low before", wk_kind[i]), lines, 0);
-			if (wk_kind[i] == 2) cd_request(32'h00007700);
+			// SECTOR's request with its EN set: the mux claims the slot, so hps_io shows it nowhere (no EVT BLK)
+			if (wk_kind[i] == 2) begin sec_wr(21'h10, 32'h1); settle; cd_request(32'h00007700); end
 			else st_req(st_pat(700));
 			settle;
 			rd($sformatf("kind %0d: PENDING has its bit alone", wk_kind[i]), DIRB + 21'h20, 32'd1 << wk_idx[i]);
@@ -2674,6 +2912,7 @@ task dir_causes;
 			if (wk_kind[i] == 2) begin
 				@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
 				if (doorbell) cause_drain(SEC);
+				sec_wr(21'h10, 32'h0); settle;
 			end
 		end
 		check("no entry names ordinal 3: its line never rose", line3_high, 0);
@@ -2720,7 +2959,7 @@ task decode_sweep;
 		check("every page reads as the map says", bad, 0);
 		rd("the directory's MAGIC at its offset", DIRB, FW_MAGIC);
 		if (TB_SEC) rd("SECTOR's ID at its offset", SEC + 21'h38, 32'h32434553);
-		if (TB_EVT) rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h31535453);
+		if (TB_EVT) rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h32545645);
 		if (TB_OSD) rd("OSDBUF's ID at its offset", OSD + 21'h1804, 32'h3244534F);
 		if (TB_LANE) rd("LANE's ID at its offset", 21'h46018, 32'h314E414C);
 		if (TB_PAD) rd("PAD's ID at its offset", PADB + 21'h4, 32'h31444150);
@@ -3506,15 +3745,20 @@ endtask
 // A predecessor read and cleared the causes and died with nothing served; the next ENABLE reloads them.
 task ls10;
 	reg [31:0] v;
+	reg [15:0] r;
 	begin
-		$display("-- enable links: at an ENABLE SYS raises STATUS and SECTOR's word is clear until EN rises over a request");
+		$display("-- enable links: at an ENABLE EVT ORs in STATUS and every standing level; SECTOR's word is clear until EN rises over a request");
 		ena_short;
-		st_req(st_pat(950)); settle;
+		st_req(st_pat(950));
+		sec_stand(32'h00006A00);                     // SECTOR's EN is 0: the request stands at hps_io
+		info_v = 8'h3B; @(negedge clk_sys) info_rq = 1; @(negedge clk_sys) up_rq = 1; settle;
+		if (TB_EVT) rd("before: EVT CAUSE shows all four", SYSB, 32'hF);
+		if (TB_EVT) rd("before: PEND shows the three levels", SYSB + 21'h18, 32'hE);
 		sys_drain;
-		if (TB_SEC) begin sec_stand(32'h00006A00); if (win.sec_lvl) cause_drain(SEC); end
+		if (TB_SEC) if (win.sec_lvl) cause_drain(SEC);
 		host_end;
 		ena_w; wait_open;
-		if (TB_EVT) rd("after the ENABLE: SYS CAUSE shows STATUS", SYSB, 32'h1);
+		if (TB_EVT) rd("after the ENABLE: EVT CAUSE shows STATUS, BLK, INFO and UPLOAD", SYSB, 32'hF);
 		check("LINE_EN 0: no line", lines, 0);
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF); settle;
 		check("SYS's LINE_EN bit: its line rises", lines[1], TB_EVT != 0);
@@ -3526,9 +3770,12 @@ task ls10;
 			sec_wr(21'h10, 32'h3);                 // ABORT: nothing begun, so nothing to fill
 			cause_drain(SEC); sec_wr(21'h10, 32'h0);
 		end
+		spi_get(16'h0036, r); spi_get(16'h003C, r);
+		@(negedge clk_sys) info_rq = 0; up_rq = 0;
+		sec_spi_clear; settle;
+		if (TB_EVT) rd("served over SPI: PEND clear", SYSB + 21'h18, 32'd0);
 		sys_drain;
 		host_end;
-		if (TB_SEC) sec_spi_clear;
 	end
 endtask
 
@@ -3960,7 +4207,12 @@ task scramble;
 		win.pad.pad.pad_x.sync_r.lws0_q = $random; win.pad.pad.pad_x.sync_r.lws1_q = $random;
 `endif
 `ifdef MISTER_LW_EVT
-		win.evt.evt.stflg_lwgray = $random;
+		win.evt.evt.flg_d = $random; win.evt.evt.sdirty = $random; win.evt.evt.epend = $random;
+		win.evt.evt.lvl_lwx = $random;
+		win.evt.evt.st_x.lwsrc_d = {5{$random}}; win.evt.evt.st_x.lwtg_r = $random;
+		win.evt.evt.st_x.sync_a.lws0_q = $random; win.evt.evt.st_x.sync_a.lws1_q = $random;
+		win.evt.evt.ev_x.lwsrc_d = $random; win.evt.evt.ev_x.lwtg_r = $random;
+		win.evt.evt.ev_x.sync_a.lws0_q = $random; win.evt.evt.ev_x.sync_a.lws1_q = $random;
 `endif
 `ifdef MISTER_LW_OSD
 		win.osd.osd.rptr = $random; win.osd.osd.q = {$random, $random}; win.osd.osd.fresh = $random;
@@ -4084,8 +4336,9 @@ task ls8;
 `ifdef MISTER_LW_LANE
 			@(negedge clk_sys); io_enable = 0;
 `endif
-			t = 0; while (t < slow(20000)) begin
-				axi_read(ENA, 0, v, dl, beats); if (v[30]) t = slow(20000); else t = t + 10;
+			// (a scrambled lane half may play up to a FIFO of stray entries, 2048, before its pointer meets the write's)
+			t = 0; while (t < slow(200000)) begin
+				axi_read(ENA, 0, v, dl, beats); if (v[30]) t = slow(200000); else t = t + 10;
 			end
 			check($sformatf("scrambled in the return (%0d): quiet again", pass), v[30], 1);
 			repeat (slow(50)) @(negedge clk);
@@ -4850,8 +5103,10 @@ initial begin
 		@(negedge clk_sys) t0 = $realtime; axi_write(SEC + 21'h00, 32'h00000000, 4'hF); lat_w = t_wsec - t0;
 		m = $rtoi(64.0 / (2.0 * SYS_HP_NS)) + 2; lead = m * 2.0 * SYS_HP_NS;
 		lost = 0; kept = 0; same = 0; gone = 0; stale = 0;
-		for (k = 0; k < 64; k = k + 1) begin
-			off = lat_f - lat_w + (k - 32) * 1.5;
+		// 128 offsets 0.75 ns apart: at 150 MHz clk_sys is nearly locked to clk_100m (3:2), so each offset's raise
+		// and clear meet at a phase that drifts little, and 64 coarser steps can miss the clear's own cycle
+		for (k = 0; k < 128; k = k + 1) begin
+			off = lat_f - lat_w + (k - 64) * 0.75;
 			fork
 				begin @(negedge clk_sys); if (lead + off > 0) #(lead + off); axi_write(SEC + 21'h00, 32'h00000001, 4'hF); end
 				begin repeat (m) @(negedge clk_sys); cd_request(32'h00002200 + k); end
@@ -4866,9 +5121,9 @@ initial begin
 			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
 			if (doorbell) cause_drain(SEC);
 		end
-		$display("     %0d offsets: %0d raises before the clear, %0d in or after it, %0d in its cycle", 64, gone, kept,
+		$display("     %0d offsets: %0d raises before the clear, %0d in or after it, %0d in its cycle", 128, gone, kept,
 		         same);
-		check("no request lost across 64 offsets", lost, 0);
+		check("no request lost across 128 offsets", lost, 0);
 		check("some raises came before the clear", gone > 0, 1);
 		check("the store cleared every raise before it", stale, 0);
 		check("some raises landed in the clear's own cycle (the raise won)", same > 0, 1);
@@ -5135,7 +5390,7 @@ initial begin
 
 `ifdef MISTER_LW_EVT
 	$display("-- SYS: the status back-channel (hps_io 0x29) as a cause, a line and a snapshot");
-	rd("SYS ID STS1", SYSB + 21'h1C, 32'h31535453);
+	rd("SYS ID EVT2", SYSB + 21'h1C, 32'h32545645);
 	check("SYS line low at reset", sys_irq, 0);
 	rd("SYS CAUSE idle", SYSB, 32'd0);
 	rd("SYS STFLG at reset", SYSB + 21'h04, 32'h000000A0);
@@ -5245,6 +5500,10 @@ initial begin
 	axi_read(SYSB + 21'h04, 0, stf1, dl, beats);
 	check("STFLG moved across the capture", stf0 != stf1, 1);
 	rd("SYS CAUSE", SYSB, 32'h00000001);
+
+	evt1_cases;
+	evt2_cases;
+	rd("SYS PEND: nothing stands", EVPEND, 32'd0);
 
 `endif
 `ifdef MISTER_LW_OSD
@@ -5655,7 +5914,7 @@ initial begin
 		@(negedge clk_sys); io_enable = 1; repeat (2) @(negedge clk_sys);
 		for (m = 0; m < 9; m = m + 1) begin hps_word((m == 0) ? 16'h0029 : 16'h0000); ws[m] = hps_bus[15:0]; end
 		@(negedge clk_sys); io_enable = 0; repeat (3) @(negedge clk_sys);
-		check("lane 13 link: the head {A, flag}", {ws[0][15:4], ws[0][3:0] == hps_io.stflg}, {12'h00A, 1'b1});
+		check("lane 13 link: the head {A, flag}", {ws[0][15:4], ws[0][3:0] == `TB_STFLG}, {12'h00A, 1'b1});
 		lane_count(p, dr);
 		f_set(0, 16'h0029, 8);
 		for (i = 0; i < 8; i = i + 1) fw[i] = 16'h0000;
@@ -5942,12 +6201,16 @@ initial begin
 `ifdef LW_TB_CDC
 	// the models moved edges in this run: synchroniser bits, a Gray bus, and no bundle capture took a bit in flight
 	if (!$value$plusargs("lw_seed=%d", i)) i = 1;
-	$display("-- CDC models (seed %0d): edges moved: PAD handshake %0d, status flag %0d, the cell bench's Gray counts %0d",
-	         i, win.pad.pad.pad_x.sync_r.m_n + win.pad.pad.pad_x.sync_a.m_n, win.evt.evt.flg_sync.m_n, cg_xa.m_n + cg_xb.m_n);
+	$display("-- CDC models (seed %0d): edges moved: PAD handshake %0d, EVT handshakes and levels %0d, the cell bench's Gray counts %0d",
+	         i, win.pad.pad.pad_x.sync_r.m_n + win.pad.pad.pad_x.sync_a.m_n,
+	         win.evt.evt.st_x.sync_r.m_n + win.evt.evt.st_x.sync_a.m_n + win.evt.evt.ev_x.sync_r.m_n +
+	         win.evt.evt.ev_x.sync_a.m_n + win.evt.evt.lvl_sync.m_n, cg_xa.m_n + cg_xb.m_n);
 	check("models: the PAD handshake's toggles took extra cycles", win.pad.pad.pad_x.sync_r.m_n + win.pad.pad.pad_x.sync_a.m_n > 0, 1);
-	check("models: a Gray bus took an extra cycle", win.evt.evt.flg_sync.m_n + cg_xa.m_n + cg_xb.m_n > 0, 1);
-	check("models: captures that took a bit still in flight (PAD, the cell bench)",
-	      win.pad.pad.pad_x.cap.m_n + cx_a.cap.m_n + cx_b.cap.m_n, 0);
+	check("models: the EVT handshakes' toggles took extra cycles",
+	      win.evt.evt.st_x.sync_r.m_n + win.evt.evt.st_x.sync_a.m_n + win.evt.evt.ev_x.sync_r.m_n + win.evt.evt.ev_x.sync_a.m_n > 0, 1);
+	check("models: a Gray bus took an extra cycle", cg_xa.m_n + cg_xb.m_n > 0, 1);
+	check("models: captures that took a bit still in flight (PAD, EVT's status and events, the cell bench)",
+	      win.pad.pad.pad_x.cap.m_n + win.evt.evt.st_x.cap.m_n + win.evt.evt.ev_x.cap.m_n + cx_a.cap.m_n + cx_b.cap.m_n, 0);
 `ifdef MISTER_LW_SECTOR_SLOT
 	check("models: SECTOR's crossings took extra cycles",
 	      win.sec.sector.sys_sync.m_n + win.sec.sector.ctl_sync.m_n > 0, 1);
