@@ -368,9 +368,8 @@ SYNATTR = 'SYNCHRONIZER_IDENTIFICATION'
 # The stock files' LW text holds no synchroniser: the list is empty
 SYNC_ALLOW = {}
 GRAYBUS = ['sector_w', 'sector_r', 'lane_w', 'lane_r', 'lane_rw', 'lane_rr', 'osd_w', 'osd_r']
-# Reads across clocks outside the cells, as (module, register, source): the request LBAs, until requests cross as
-# records. Each must still be there.
-XREAD_ALLOW = {('lw_sector', 'lba', 'c_lba'), ('lw_sector', 'xlba', 'x_lba')}
+# Reads across clocks outside the cells, as (module, register, source); each must still be there. None is left.
+XREAD_ALLOW = set()
 # The input and inout ports on a block's second clock. Every other one is on the block's port clk, or on the one clock
 # of a block that has no clk port.
 PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack x_rd x_wr x_lba x_hps_ack'),

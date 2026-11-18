@@ -164,7 +164,6 @@ localparam  [7:0] PAD_LINE  = 8'd0;
 localparam [15:0] SEC_KIND  = 16'd2;
 localparam [31:0] SEC_VER   = 32'h00010001;
 localparam  [7:0] SEC_LINE  = 8'd1;                        // f2h_irq[8], GIC SPI 48
-localparam [15:0] SEC_BITS  = 16'h0001;                    // the request event
 localparam [15:0] OSD_KIND  = 16'd3;
 localparam [31:0] OSD_VER   = 32'h00020000;
 localparam  [7:0] OSD_LINE  = 8'd0;
@@ -409,8 +408,9 @@ always @(*) begin
 	dir_ent = 32'd0;
 	if (has_pad && de == e_pad)
 		dir_ent = ent(dew, PAD_KIND, PAD_VER, PAD_OFF, PAD_SIZE, 21'd0, PAD_LINE, 16'd0, pad_kw(dk));
-	if (has_sec && de == e_sec)
-		dir_ent = ent(dew, SEC_KIND, SEC_VER, SEC_OFF, SEC_SIZE, SEC_OFF, SEC_LINE, SEC_BITS, sec_kw(dk, wired[2:1]));
+	if (has_sec && de == e_sec)             // CAUSE_BITS: one per wired slot
+		dir_ent = ent(dew, SEC_KIND, SEC_VER, SEC_OFF, SEC_SIZE, SEC_OFF, SEC_LINE, {13'd0, wired},
+		              sec_kw(dk, wired[2:1]));
 	if (OSD_EN && de == e_osd)
 		dir_ent = ent(dew, OSD_KIND, OSD_VER, OSD_OFF, OSD_SIZE, 21'd0, OSD_LINE, 16'd0, osd_kw(dk));
 	if (has_evt && de == e_evt)
