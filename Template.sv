@@ -61,7 +61,7 @@ assign VIDEO_ARY = (!ar) ? 12'd3 : 12'd0;
 // an S line that lets a stock Main mount an image on the block reader's slot. Without MISTER_LW, CONF_STR is the
 // stock string byte for byte.
 `ifdef MISTER_LW_SECTOR_SLOT
-localparam       BLK_SLOT  = `MISTER_LW_SECTOR_SLOT;   // the hps_io slot the SECTOR block feeds: 1-9 here
+localparam       BLK_SLOT  = `MISTER_LW_SECTOR_SLOT;   // the hps_io slot the SECTOR block feeds: 1-9 here (below)
 localparam [7:0] BLK_DIGIT = "0" + BLK_SLOT;
 `define TPL_LW_J "S", BLK_DIGIT, ",IMG,Block image;", "J,Colour,Read block;",
 `else
@@ -247,6 +247,11 @@ assign LED_USER    = act_cnt[26]  ? act_cnt[25:18]  > act_cnt[7:0]  : act_cnt[25
 // SPI (a stock Main, from the image mounted on the S line); with it set, the SECTOR block serves it over LW. The
 // reader is the same either way. It expects the default geometry: a 128-word frame (one 512-byte block,
 // MISTER_LW_BLKSZ 2), 256 strobes of 16 bits.
+// Its slot is 1-9, or the build stops naming lw_template_block_slot_1_to_9: the S line names one digit, slot 0 is
+// the CONF_STR's own P2S0 line, and hps_io takes at most ten slots (VDNUM is the slot + 1).
+generate if (BLK_SLOT < 1 || BLK_SLOT > 9) begin : blk_slot
+	lw_template_block_slot_1_to_9 guard();
+end endgenerate
 wire        blk_hreq, blk_ack, blk_wr;
 wire [13:0] blk_addr;
 wire [15:0] blk_data;

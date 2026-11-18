@@ -88,7 +88,8 @@ set_global_assignment -name SEED 1
 # LW SECTOR block, for a core that reads blocks through hps_io (see docs/LW_BRIDGE.md, "Hooking the SECTOR block"):
 # its hps_io slot (0-15), frame in 32-bit words (1-4096), clk_sys cycles between strobes (2-15) and BLKSZ. An
 # unservable geometry stops the build, naming lw_sector_unservable_geometry. With it Template.sv builds its block
-# reader on that slot (1-9 here), which expects the default frame and BLKSZ.
+# reader on that slot, which expects the default frame and BLKSZ; here the slot is 1-9, or the build stops, naming
+# lw_template_block_slot_1_to_9.
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_GAP=2"

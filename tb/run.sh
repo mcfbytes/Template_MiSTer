@@ -26,7 +26,8 @@
 #   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
 #   X  each tier macro without MISTER_LW: the compile of hps_io fails, naming lw_tier_needs_MISTER_LW (and
 #      compiles without the macro, and with MISTER_LW); and each unservable SECTOR geometry: the compile of the
-#      window fails, naming lw_sector_unservable_geometry (and the servable edges compile)
+#      window fails, naming lw_sector_unservable_geometry (and the servable edges compile); and the Template's
+#      block reader outside hps_io slots 1-9: emu's compile fails, naming lw_template_block_slot_1_to_9
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -255,6 +256,31 @@ ok|the edges: a 4096-word primary on slot 15, gap 15, save slots of 510 words ke
 ok|a one-word primary, gap 2, a one-word save slot|FRAME=1 S0FRAME=1
 ok|an undeclared save slot, whatever its geometry|S1EN=0 S1SLOT=1 S1FRAME=0 S1LBA=0 S1WSRC=0
 EOG
+  # the Template's block reader (emu, Template.sv, with stand-ins for its PLL, its core's lcell and cos): on hps_io
+  # slots 1-9 it compiles; on slot 0 (the CONF_STR's own P2S0 line) and above 9 (an S line names one digit, hps_io
+  # takes ten slots) the compile stops, naming lw_template_block_slot_1_to_9
+  printf '`define BUILD_DATE "000000"\n' > "$O/build_id.v"
+  cat > "$O/lw_xt_stubs.sv" <<'EOS'
+module pll(input wire refclk, input wire rst, output wire outclk_0, output wire locked);
+assign outclk_0 = refclk, locked = 1'b1;
+endmodule
+module lcell(input wire in, output wire out); assign out = in; endmodule
+module cos(input wire [9:0] x, output wire [7:0] y); assign y = x[7:0]; endmodule
+EOS
+  for t in bad:0 ok:1 ok:9 bad:10 bad:15; do
+    want=${t%%:*}; k=${t#*:}
+    echo "-- Template: the block reader on hps_io slot $k" >> "$1"
+    iverilog -g2012 -DMISTER_LW -DMISTER_LW_SECTOR_SLOT=$k -I "$O" -I sys -s emu -o "$O/lw_xt.vvp" Template.sv \
+      sys/hps_io.sv sys/lw_blk_mux.sv rtl/mycore.v rtl/lfsr.v "$O/lw_xt_stubs.sv" > "$O/lw_xt.err" 2>&1
+    r=$?; n=$((n + 1)); g=$(grep -c lw_template_block_slot_1_to_9 "$O/lw_xt.err")
+    if [ "$want" = bad ]; then
+      if [ $r -ne 0 ] && [ "$g" -gt 0 ]; then echo "pass slot $k: stops, naming the guard" >> "$1"
+      else f=$((f + 1)); echo "FAIL Template, slot $k: status $r, the guard $g times in the errors" >> "$1"
+      fi
+    elif [ $r -eq 0 ]; then echo "pass slot $k: compiles" >> "$1"
+    else f=$((f + 1)); echo "FAIL Template, slot $k: does not compile" >> "$1"; grep -i error "$O/lw_xt.err" | head -5 | sed 's/^/   /' >> "$1"
+    fi
+  done
   if [ $f -eq 0 ]; then echo "PASSED: $n checks, 0 failures" >> "$1"; else echo "FAILED: $n checks, $f failures" >> "$1"; fi
 }
 
