@@ -2,7 +2,8 @@
 # LW bridge framework testbench (tb/lw_tb.sv, tb/top_tb.sv and the scripts below), one run per arm:
 #   S  the off-state guard (tb/offstate.sh): without MISTER_LW, sys/ reads upstream's text under every upstream
 #      macro set; every LW-only file is empty without its macro and keeps no macro defined; sys.qip lists
-#      sys/lw_bridge.sdc after sys_top.sdc, and that file constrains nothing without MISTER_LW
+#      sys/lw_bridge.sdc after sys_top.sdc, and that file constrains nothing without MISTER_LW; Template.sv reads
+#      upstream's text without MISTER_LW, and its CONF_STR value is upstream's, or with MISTER_LW the example's
 #   N  static checks on the preprocessed top level (tb/static.sh): the GPI terms with both LW instances or
 #      neither, the f2h_irq lines, the LW nets arm E checks, in every configuration arm E builds; and the
 #      crossing structure: every crossing built from the cells of sys/lw_cdc.sv, every source register named;

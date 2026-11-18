@@ -22,6 +22,11 @@
 #      first synchroniser stages (lws0_*, which only sys/lw_cdc.sv declares, and check 2 empties without
 #      MISTER_LW), and every other command sits inside "if {[get_collection_size $lw_s0] > 0} {", which the file
 #      ends by closing.
+#   6. Template.sv, preprocessed without MISTER_LW, gives upstream's token stream under each of those macro sets
+#      (the LW example and its CONF_STR text are all inside MISTER_LW). Its CONF_STR value, evaluated by Icarus
+#      from emu's localparams: upstream's without MISTER_LW; with it, upstream's with field 1 "AXI:40000:80000:LW,"
+#      and, before "T[0],Reset;", the example's J line, and with the SECTOR block also the block reader's S line
+#      on that slot (slots 1 and 3 tried).
 # Upstream's tree is read with git into $LW_TB_OUT/upstream. Where git cannot reach the repository (the
 # container tb/run.sh starts), run "tb/offstate.sh --extract" outside first; tb/run.sh does.
 # Output: "-- " headings, a FAIL line per failed check, then PASSED/FAILED with the counts (tb/run.sh's verdict).
@@ -29,13 +34,14 @@ UPSTREAM=e901a9f
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}; UP="$O/upstream"
 if git rev-parse --verify -q "$UPSTREAM^{commit}" >/dev/null 2>&1; then
-  if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ]; then
-    rm -rf "$UP" && mkdir -p "$UP" && git archive "$UPSTREAM" sys files.qip Template.qsf | tar -x -C "$UP" &&
+  if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ] || [ ! -f "$UP/Template.sv" ]; then
+    rm -rf "$UP" && mkdir -p "$UP" &&
+      git archive "$UPSTREAM" sys files.qip Template.qsf Template.sv | tar -x -C "$UP" &&
       echo "$UPSTREAM" > "$UP/.rev" || { echo "tb/offstate.sh: cannot extract $UPSTREAM" >&2; exit 2; }
   fi
 fi
 [ "$1" = --extract ] && exit 0
-if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ]; then
+if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ] || [ ! -f "$UP/Template.sv" ]; then
   echo "FAILED: upstream tree $UPSTREAM not available in $UP (run tb/offstate.sh --extract where git works)"; exit 1
 fi
 command -v iverilog >/dev/null 2>&1 || { echo "FAILED: no iverilog on PATH"; exit 1; }
@@ -60,10 +66,11 @@ TOK = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|`?[A-Za-z_$][\w$]*|\d[
 def tokens(text):
     return [t for t in TOK.findall(text) if not t.startswith('//') and not t.startswith('/*')]
 
-def pp(path, defs):
-    out = os.path.join(O, 'offstate.pp')
-    r = subprocess.run(['iverilog', '-E', '-o', out] + ['-D' + d for d in defs] + [path],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+def pp(path, defs, cwd=None):
+    # cwd: where the file's `include "sys/..." resolves (upstream's tree for upstream's Template.sv); build_id.v from O
+    out = os.path.abspath(os.path.join(O, 'offstate.pp'))
+    r = subprocess.run(['iverilog', '-E', '-I', os.path.abspath(O), '-o', out] + ['-D' + d for d in defs] + [path],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cwd)
     if r.returncode != 0:
         return None, r.stdout.strip()
     return tokens(open(out, errors='replace').read()), ''
@@ -235,6 +242,59 @@ check(re.search(r'lws0_', open('sys/lw_cdc.sv').read()) is not None and
       'sys/lw_bridge.sdc\'s guard: lws0_ is named outside sys/lw_cdc.sv, or not in it')
 asg = lambda p: [l for l in open(p).read().splitlines() if l.strip() and not l.lstrip().startswith('#')]
 check(asg('Template.qsf') == asg(os.path.join(UP, 'Template.qsf')), 'Template.qsf: an assignment differs from upstream')
+
+print('-- Template.sv is upstream\'s token stream without MISTER_LW; its CONF_STR value with and without it')
+open(os.path.join(O, 'build_id.v'), 'w').write('`define BUILD_DATE "000000"\n')
+for label, defs in sets:
+    mine, e1 = pp('Template.sv', defs)
+    theirs, e2 = pp('Template.sv', defs, cwd=UP)
+    if not check(mine is not None and theirs is not None,
+                 'Template.sv [%s]: preprocessor error %s%s' % (label, e1, e2)):
+        continue
+    if mine != theirs:
+        n, a, b = first_diff(mine, theirs)
+        check(False, 'Template.sv [%s]: token %d differs: ... %s ... upstream: ... %s ...' % (label, n, a, b))
+    else:
+        check(True, '')
+
+def conf_str(defs, cwd=None):
+    """CONF_STR as Icarus evaluates it from emu's localparams, or an error text."""
+    t, e = pp('Template.sv', defs, cwd)
+    if t is None:
+        return None, e
+    lp, i = [], 0
+    while i < len(t):
+        if t[i] == 'localparam':
+            j, d = i, 0
+            while j < len(t) and not (t[j] == ';' and d == 0):
+                d += t[j] in '({['; d -= t[j] in ')}]'; j += 1
+            lp.append(' '.join(t[i:j + 1])); i = j
+        i += 1
+    m = os.path.abspath(os.path.join(O, 'offstate_cs.v'))
+    open(m, 'w').write('module offstate_cs;\n%s\ninitial $display("%%s", CONF_STR);\nendmodule\n' % '\n'.join(lp))
+    r = subprocess.run(['iverilog', '-g2012', '-o', m + 'vp', m], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True)
+    if r.returncode:
+        return None, r.stdout.strip()
+    r = subprocess.run(['vvp', '-n', m + 'vp'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return r.stdout.split('\n')[0], ''
+
+up, e = conf_str([], cwd=UP)
+if check(up is not None and up.startswith('Template;;') and up.count('T[0],Reset;') == 1,
+         'upstream\'s Template.sv: no CONF_STR value, or not the expected shape: %s%s' % (up, e)):
+    lw_up = up.replace('Template;;', 'Template;AXI:40000:80000:LW,;', 1)
+    for label, defs, extra in [
+            ('no macro', [], ''),
+            ('MISTER_LW', ['MISTER_LW'], 'J,Colour;'),
+            ('MISTER_LW, PAD, EVT', ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT'], 'J,Colour;'),
+            ('every tier, SECTOR on slot 1', ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_SECTOR_SLOT=1',
+                                              'MISTER_LW_LANE', 'MISTER_LW_OSD'],
+             'S1,IMG,Block image;J,Colour,Read block;'),
+            ('MISTER_LW, SECTOR on slot 3', ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=3'],
+             'S3,IMG,Block image;J,Colour,Read block;')]:
+        want = up if not extra else lw_up.replace('T[0],Reset;', extra + 'T[0],Reset;', 1)
+        got, e = conf_str(defs)
+        check(got == want, 'Template.sv [%s]: CONF_STR %s, expected %s %s' % (label, got, want, e))
 
 print('%s: %d checks, %d failures' % ('FAILED' if fails else 'PASSED', checks, fails))
 sys.exit(1 if fails else 0)

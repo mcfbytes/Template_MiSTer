@@ -76,7 +76,8 @@ set_global_assignment -name SEED 1
 # LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io, in tiers, each one
 # opt-in. Off by default: sys/ then compiles exactly as without this branch. Every tier needs MISTER_LW; a tier
 # macro without it stops the build. The floor (the window, its directory and the host enable), then pads (L1)
-# and the status back-channel (L2); uncomment the lines to build them.
+# and the status back-channel (L2); uncomment the lines to build them. Template.sv's LW example (a pad button
+# that writes the status back) is built only with MISTER_LW.
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
@@ -86,7 +87,8 @@ set_global_assignment -name SEED 1
 
 # LW SECTOR block, for a core that reads blocks through hps_io (see docs/LW_BRIDGE.md, "Hooking the SECTOR block"):
 # its hps_io slot (0-15), frame in 32-bit words (1-4096), clk_sys cycles between strobes (2-15) and BLKSZ. An
-# unservable geometry stops the build, naming lw_sector_unservable_geometry.
+# unservable geometry stops the build, naming lw_sector_unservable_geometry. With it Template.sv builds its block
+# reader on that slot (1-9 here), which expects the default frame and BLKSZ.
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_GAP=2"
