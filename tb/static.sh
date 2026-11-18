@@ -53,7 +53,8 @@
 #      (the words are listed in the check, in pieces): the framework's names are its own ("slot", "save slot",
 #      "image"). And the guide, docs/LW_BRIDGE.md, names no register, verb or field the host interface no longer
 #      has (a lease and its TTL, timebase, renew, release, claim, owner and epoch), no planning label (a finding,
-#      rule or step id, a section sign) and no IPv4 address.
+#      rule or step id, a section sign) and no IPv4 address. Its drain rules end on a level a drain brings to 0:
+#      the lane's on RSTAT's replies field, never on RSTAT whole (its reply_drops field is never cleared).
 # Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
 #  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
 #      get_keepers name pattern (the Gray loop's expanded per bus) matches a register of an LW module, as a
@@ -922,6 +923,13 @@ for rx, what in ((GRET, 'a retired term of the host interface'), (GLAB, 'a plann
     bad = [(n, l) for n, l in gtxt if rx.search(l)]
     for n, l in bad[:8]: print('     %s:%d: %s' % (GUIDE, n, l.strip()[:100]))
     check(not bad, '%s: %d lines with %s' % (GUIDE, len(bad), what))
+# a drain ends on a level the drain brings to 0: RSTAT's reply_drops is never cleared, so RSTAT whole is no such level
+GDRN = re.compile(r'\bRSTAT\s+(?:reads|is|==|equals)\s+0\b')
+bad = [(n, l) for n, l in gtxt if GDRN.search(l)]
+for n, l in bad[:8]: print('     %s:%d: %s' % (GUIDE, n, l.strip()[:100]))
+check(not bad, '%s: %d lines that drain the lane until RSTAT reads 0, not its replies field' % (GUIDE, len(bad)))
+check(any(re.search(r'RPOP until RSTAT', l) and re.search(r'\[15:0\]', l) for n, l in gtxt),
+      '%s: no lane drain rule names RSTAT[15:0]' % GUIDE)
 
 # ---- The constraints: every bound names both ends, every pattern matches, every source is covered ----
 print('-- lw_bridge.sdc: -from and -to on every bound, every name pattern matched, every lw_sync source covered')

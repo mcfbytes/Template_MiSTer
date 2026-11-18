@@ -444,8 +444,8 @@ so a level read after an event shows it.
 
 **Drain:** read CAUSE; store the value back; once that store's response has returned, read the block's level
 registers and serve what they show; after the last service, read the level again until it shows nothing; then
-re-arm the interrupt. That is: RPOP until RSTAT reads 0 (LANE); BEGIN_S or WACK_S until REQ reads 0 (SECTOR); the
-SPI service until PEND's bits read 0 (EVT). An event before the store-back is in the level read after it, and one
+re-arm the interrupt. That is: RPOP until RSTAT's replies field, `[15:0]`, reads 0 (LANE: its `reply_drops` field
+never returns to 0); BEGIN_S or WACK_S until REQ reads 0 (SECTOR); the SPI service until PEND's bits read 0 (EVT). An event before the store-back is in the level read after it, and one
 after it sets its bit again, so the line is high at the re-arm. The re-read costs one access and keeps a host safe
 from a block that gets the event rule wrong. A bit the host does not know is cleared by the store-back.
 
@@ -643,7 +643,7 @@ request/reply mailbox for any opcode.
 | `0x10` | R | PLAYED: frames played, free-running 16-bit; compare modulo 2^16 |
 | `0x14` | R | DROPS: frames discarded whole at END because they did not fit, free-running 16-bit |
 | `0x18` | R | ID `0x314E414C` ("LAN1") |
-| `0x1C` | R | RSTAT `{reply_drops[31:16], replies[15:0]}`: reply words dropped on a full reply FIFO (free-running), and waiting |
+| `0x1C` | R | RSTAT `{reply_drops[31:16], replies[15:0]}`: reply words dropped on a full reply FIFO (free-running, never cleared), and waiting |
 | `0x20` | R | RHEAD `[15:0]`: the oldest reply word, 0 when none is waiting. Reading it has no side effect |
 | `0x24` | R, W1C | CAUSE: `[0]` PLAYED, a frame finished playing; `[1]` REPLY, a reply word landed; `[2]` DROP, a frame was discarded at END or a reply word was dropped. Clear at an ENABLE |
 
@@ -689,7 +689,9 @@ Stores must be full words (all four byte enables). Every other offset reads 0.
 - A reply that finds the FIFO full is dropped and counted in RSTAT; the frame still plays whole.
 - **The lane's line (ordinal 3).** CAUSE's bits are raised per event: PLAYED per frame played, REPLY in every
   cycle a reply word lands (a word that lands while another waits, or as the last one is popped, raises it too),
-  DROP per frame or reply word dropped. The levels are RSTAT and PLAYED: drain by RPOP until RSTAT reads 0.
+  DROP per frame or reply word dropped. The levels are RSTAT's replies field and PLAYED: drain by RPOP until
+  RSTAT`[15:0]` reads 0. RSTAT as a whole is no drain test: `reply_drops` is a free-running count that nothing
+  clears (an ENABLE neither), so after one dropped reply RSTAT never reads 0 again until the count wraps.
 
 ## Hooking the SECTOR block
 
