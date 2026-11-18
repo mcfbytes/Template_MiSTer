@@ -19,19 +19,24 @@
 `ifdef MISTER_LW_SECTOR_SLOT
 `default_nettype none
 
-// SECTOR block (LW directory kind 2, minor 1, "SEC2"): one hps_io read slot (the primary, slot index 0) plus two
-// save slots (X0, X1: slot indices 1, 2) served over the LW bridge by ONE feeder. A save slot READ is a BEGIN_S
-// frame of XFRAME words with a strobe address; a save slot WRITE is answered by WACK_S (ack, no strobes): the HPS
-// takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1. A slot's EN bit can be set
-// only while the slot is wired (its mux's presence bit on HPS_BUS reads 1).
+// SECTOR block (LW directory kind 2, version 2.0, "SEC3"): one hps_io read slot (the primary, slot index k = 0)
+// plus two save slots (X0, X1: k = 1, 2) served over the LW bridge by ONE feeder. A save slot READ is a BEGIN_S
+// frame of that slot's length (XFRAME0, XFRAME1) with a strobe address; a save slot WRITE is answered by WACK_S
+// (ack, no strobes): the HPS takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1.
+// A slot's EN bit can be set only while the slot is wired (its mux's presence bit on HPS_BUS reads 1).
+// Registers (block-relative): CAUSE 0x000, REQ 0x004 {any, 0, k[17:16], GET_SDSTAT word}, CTRL 0x008 (EN [2:0] by
+// k, ABORT [8], TEST [9], CLR [10]), STATUS 0x00C ({frames[31:16]}, sd_commit [10], ABORT held [9], busy [8], ack
+// [6:4] and en_sys [2:0] by k: independent samples), ACCEPT 0x010, ID 0x014, DIAG 0x018-0x030 (DROPS, COUNTS,
+// RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM); per slot k at 0x100 + 0x20k: RSTAT_S {offered, answered, 0,
+// GET_SDSTAT word}, LBA_S, BEGIN_S, WACK_S (k = 1, 2); DATA at 0x4000 + 4i. Every slot field is indexed by k.
 // Requests cross as records. On clk_sys a slot's request is offered while its mux is on this block (en_sys), the
 // core's request is raised and the slot's ack is low and has been for two cycles (so a request still raised then
 // is offered again, as hps_io shows it to an SPI host). A rise of offered sets the slot's new mark, a rejected
 // answer its rej mark and that entry's tag, and any change marks the slot dirty. One lw_xfer carries one dirty
 // slot's record at a time, round robin: {slot, offered, new, rej, tag, wr, rd, LBA}, latched at launch; a change in
 // the launch cycle keeps the slot dirty, so its next record carries it. On clk_100m, the cycle after a record
-// lands, REQ, LBA and LBA_S take it; the slot's answered mark clears on new, on a withdrawn request, or on a reject
-// of its latest answer (the entry's tag counts the slot's BEGIN/WACK entries) unless an answer enters in that
+// lands, REQ, RSTAT_S and LBA_S take it; the slot's answered mark clears on new, on a withdrawn request, or on a
+// reject of its latest answer (the entry's tag counts the slot's BEGIN/WACK entries) unless an answer enters in that
 // cycle; and the slot's CAUSE bit rises for an offered request that is new or re-opened. So a cause needs the
 // slot's EN, and a reject arrives with the LBA the core asks for now.
 // CAUSE: bit k = slot k; a full-word store clears each bit written as 1, and a raise in the store's cycle wins.
@@ -63,19 +68,19 @@
 // coalesce into the next word: FRAMES adds them all, SUM shows the latest data frame's.
 // Bridge side has no reset and answers in fixed cycles (no back-pressure); a full FIFO drops the store and
 // counts it.
-// DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:4], DROPS, COUNTS, GEN, TSTAMP_*, CYCLES, SUM and TEST:
-// they read 0 and CTRL.TEST/CLR are ignored. CAUSE, REQ, LBA, BEGIN, CTRL.EN/ABORT, STATUS[3:0], ACCEPT, ID stay.
+// DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:16], DROPS, COUNTS, RINGS, TSTAMP_*, CYCLES, SUM and TEST:
+// they read 0 and CTRL.TEST/CLR are ignored. Every other register stays.
 
 module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3,
                    parameter AW = 9, parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3,
-                   parameter [9:0] XFRAME = 256)
+                   parameter [9:0] XFRAME0 = 256, parameter [9:0] XFRAME1 = 256)
 (
 	input wire        clk,          // clk_100m
 
-	input wire [12:0] raddr,        // block-relative
+	input wire [14:0] raddr,        // block-relative
 	input wire        rsel,
 	output reg [31:0] rdata,
-	input wire [12:0] waddr,
+	input wire [14:0] waddr,
 	input wire        wsel,
 	input wire        write,
 	input wire [31:0] wdata,
@@ -109,14 +114,12 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	output wire [1:0] x_ack
 );
 
-localparam [15:0] SDSTAT = {1'b1, 6'd0, BLKSZ, SLOT[3:0], 1'b0, 1'b1};
-localparam [3:0]  PSLOT  = SLOT[3:0];
 localparam [1:0]  T_DATA = 2'd0, T_BEGIN = 2'd1, T_ABORT = 2'd2;
 
 // Servable geometry: frames of 1-1023 words; a save-slot frame of at most 256 words (the 9-bit strobe address).
 // synthesis translate_off
-initial if (FRAME == 0 || XFRAME == 0 || XFRAME > 256) begin
-	$display("lw_sector: unservable geometry FRAME=%0d XFRAME=%0d", FRAME, XFRAME);
+initial if (FRAME == 0 || XFRAME0 == 0 || XFRAME0 > 256 || XFRAME1 == 0 || XFRAME1 > 256) begin
+	$display("lw_sector: unservable geometry FRAME=%0d XFRAME0=%0d XFRAME1=%0d", FRAME, XFRAME0, XFRAME1);
 	$finish;
 end
 // synthesis translate_on
@@ -164,19 +167,20 @@ reg   [3:0] dcnt = 0, dsent = 0;    // DIAG: done events counted, and the count 
 reg  [19:0] dsum = 0;               // DIAG: the last data frame's SUM
 
 reg   [2:0] cause = 0;              // CAUSE: bit k = slot k's request opened or re-opened
-reg  [31:0] gen = 0, tsreq = 0, tsdone = 0, cycles = 0;
-reg         rq_off0 = 0;            // the primary's last record: offered, LBA
+reg  [31:0] rings = 0, tsreq = 0, tsdone = 0, cycles = 0;
+reg         rq_off0 = 0, rq_rd0 = 0;   // the primary's last record: offered, rd, LBA
 reg  [31:0] rq_lba = 0;
 reg   [1:0] rq_xoff = 0, rq_xrd = 0, rq_xwr = 0;   // the save slots' last records: offered, rd, wr, LBA
 reg  [13:0] rq_xlba = 0;
 (* preserve *) reg       en_lwx   = 0;   // CTRL[0]
-(* preserve *) reg       test_lwx = 0;   // CTRL[3]
-(* preserve *) reg [1:0] xen_lwx  = 0;   // CTRL[4+XSLOT0], CTRL[4+XSLOT1]
+(* preserve *) reg       test_lwx = 0;   // CTRL[9]
+(* preserve *) reg [1:0] xen_lwx  = 0;   // CTRL[2:1]
 reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the offered request entered the FIFO
 reg   [8:0] btag = 0;               // per slot, 3 bits: the count of its BEGIN/WACK entries, carried in each entry
 reg         abort_pend = 0;         // an ABORT store found the FIFO full: it enters in the first cycle with room
 reg   [9:0] flen_w = FRAME;
-reg   [9:0] exp_w = 0, fdrops = 0;
+reg   [9:0] exp_w = 0;
+reg  [11:0] fdrops = 0;
 reg         bfail = 0;
 reg  [15:0] drops = 0, frames = 0;
 reg   [7:0] hw = 0;
@@ -186,17 +190,17 @@ reg   [3:0] dseen = 0;              // the done count of the last word taken
 wire        f_lvl, f_fall, hen_s, rest;   // the enable link's level and its fall; on clk_sys, the level and rest
 
 // clk_sys -> clk_100m: the feeder's status levels and its DIAG event toggles
-(* preserve *) reg [6:0] sys_lwx = 0;
-wire  [6:0] sb1;
-reg   [6:0] sb2 = 0;
+(* preserve *) reg [11:0] sys_lwx = 0;
+wire [11:0] sb1;
+reg  [11:0] sb2 = 0;
 wire [23:0] dn_q;                   // DIAG: {done count, SUM} from the feeder
 wire        dn_v, dn_busy;
 wire  [3:0] dn_add = dn_v ? dn_q[23:20] - dseen : 4'd0;
 
 lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(sector_r_lwgray), .q(rg_s));
-lw_sync #(.W(7)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
-wire  [2:0] st_s = sb1[2:0];          // {streaming, ack, en_sys}
-wire  [3:0] ev   = sb1[6:3] ^ sb2[6:3]; // {reset_fill, abort, skip, reject}
+lw_sync #(.W(12)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
+wire  [7:0] st_s = sb1[7:0];            // {sd_commit, busy, ack[2:0], en_sys[2:0]}, each by slot index k
+wire  [3:0] ev   = sb1[11:8] ^ sb2[11:8]; // {reset_fill, abort, skip, reject}
 
 // clk_sys -> clk_100m: the request records, {slot[41:40], offered, new, rej, tag[36:34], wr, rd, lba[31:0]}
 wire [41:0] rc_q;
@@ -205,24 +209,26 @@ wire  [2:0] rc_sel = {3{rc_v}} & onehot(rc_q[41:40]);
 wire        rc_off = rc_q[39], rc_new = rc_q[38], rc_rej = rc_q[37];
 wire  [2:0] rc_tag = rc_q[36:34];
 
-wire        rreg  = rsel & ~raddr[12] & ~|raddr[11:7];
-wire        wreg  = wsel & write & ~waddr[12] & ~|waddr[11:7] & &be;
-wire        wdat  = wsel & write &  waddr[12] & &be & (waddr[11:2] < flen_w);   // the OPEN frame's length
-wire  [4:0] widx  = waddr[6:2];
-wire  [3:0] ws    = {2'b00, waddr[3:2]};          // BEGIN_S/WACK_S slot number
-wire        w_cause = wreg && widx == 5'h00;
-wire        w_ctrl  = wreg && widx == 5'h04;
-wire        w_bs    = wreg && (widx == 5'h03 || widx[4:2] == 3'b100);   // BEGIN, BEGIN_S[s]
-wire        w_wk    = wreg && widx[4:2] == 3'b101;                       // WACK_S[s]
-wire  [3:0] bslot   = (widx == 5'h03) ? PSLOT : ws;
-wire        b_p     = w_bs && bslot == PSLOT;
-wire        b_x0    = (w_bs | w_wk) && ws == XSLOT0 && widx != 5'h03;
-wire        b_x1    = (w_bs | w_wk) && ws == XSLOT1 && widx != 5'h03;
+// Registers in 0x000-0x1FF: the common words, then a 0x20-byte block per slot index k at 0x100 + 0x20k (word j:
+// RSTAT_S, LBA_S, BEGIN_S, WACK_S); DATA from 0x4000.
+wire        rreg  = rsel & ~raddr[14] & ~|raddr[13:9];
+wire        wreg  = wsel & write & ~waddr[14] & ~|waddr[13:9] & &be;
+wire        wdat  = wsel & write &  waddr[14] & &be & (waddr[13:2] < {2'b00, flen_w});   // the OPEN frame's length
+wire  [6:0] widx  = waddr[8:2];
+wire  [2:0] wk    = waddr[7:5];                   // the slot index of a per-slot word
+wire  [2:0] wj    = waddr[4:2];
+wire        w_cause = wreg && widx == 7'h00;
+wire        w_ctrl  = wreg && widx == 7'h02;
+wire        w_bs    = wreg && waddr[8] && wj == 3'd2;                   // BEGIN_S[k]
+wire        w_wk    = wreg && waddr[8] && wj == 3'd3 && wk != 3'd0;     // WACK_S[k], save slots only
+wire        b_p     = w_bs && wk == 3'd0;
+wire        b_x0    = (w_bs | w_wk) && wk == 3'd1;
+wire        b_x1    = (w_bs | w_wk) && wk == 3'd2;
 wire        w_begin = b_p | b_x0 | b_x1;
-wire  [1:0] bsel    = b_x0 ? 2'd1 : b_x1 ? 2'd2 : 2'd0;
-wire  [9:0] blen    = w_wk ? 10'd0 : b_p ? FRAME : XFRAME;
-wire        w_abort = w_ctrl & wdata[1];
-wire        clr     = w_ctrl & wdata[2];
+wire  [1:0] bsel    = wk[1:0];
+wire  [9:0] blen    = w_wk ? 10'd0 : b_p ? FRAME : b_x0 ? XFRAME0 : XFRAME1;
+wire        w_abort = w_ctrl & wdata[8];
+wire        clr     = w_ctrl & wdata[10];
 // a store's entry is taken only with room and no ABORT held; the held ABORT takes the first cycle with room
 wire        a_go  = abort_pend & ~ffull;
 wire        p_ok  = (w_begin | w_abort | wdat) & ~ffull & ~abort_pend;
@@ -239,18 +245,20 @@ wire  [2:0] unans  = (rc_sel & {3{rc_new | ~rc_off}}) | reopen;
 wire  [2:0] raise  = rc_sel & {3{rc_off}} & ({3{rc_new}} | reopen);
 wire        fire   = |raise;
 wire        w_en  = wdata[0] & wired[0];                                     // the EN bits a store sets
-wire  [1:0] w_xen = {wdata[4 + XSLOT1], wdata[4 + XSLOT0]} & wired[2:1];
+wire  [1:0] w_xen = wdata[2:1] & wired[2:1];
 wire  [2:0] clr_c = {3{w_cause}} & wdata[2:0];
 wire [43:0] entry = a_go ? {T_ABORT, 42'd0} : w_begin ? {T_BEGIN, 4'd0, etag, w_wk, bsel, wdata} :
-                    w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
+                    w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};   // an index below flen_w
 
 // REQ: the lowest-index slot whose EN is set, whose record shows its request offered, and that is not answered
 wire  [2:0] cand   = {xen_lwx, en_lwx} & {rq_xoff, rq_off0} & ~ans;
 wire        any    = |cand;
-wire  [1:0] pick   = cand[0] ? 2'd0 : cand[1] ? 2'd1 : 2'd2;
+wire  [1:0] pick   = cand[0] ? 2'd0 : cand[1] ? 2'd1 : cand[2] ? 2'd2 : 2'd0;   // 0 when none
+// each slot's GET_SDSTAT word, from its last record (hps_io's, with a zero block count)
+wire [15:0] pst0   = {1'b1, 6'd0, BLKSZ, SLOT[3:0], 1'b0, rq_rd0};
 wire [15:0] xst0   = {1'b1, 6'd0, BLKSZ, XSLOT0, rq_xwr[0], rq_xrd[0]};
 wire [15:0] xst1   = {1'b1, 6'd0, BLKSZ, XSLOT1, rq_xwr[1], rq_xrd[1]};
-wire [15:0] pst    = !any ? 16'd0 : pick == 2'd0 ? SDSTAT : pick == 2'd1 ? xst0 : xst1;
+wire [15:0] pst    = !any ? 16'd0 : pick == 2'd0 ? pst0 : pick == 2'd1 ? xst0 : xst1;
 
 always @(posedge clk) if (fwe) fram[wptr[AW-1:0]] <= entry;
 
@@ -263,13 +271,13 @@ always @(posedge clk) begin
 	sb2 <= sb1;
 
 	// the request records, the cycle after each lands; an ENABLE finds every link at rest and nothing offered
-	if (rc_sel[0]) begin rq_off0 <= rc_off; rq_lba <= rc_q[31:0]; end
+	if (rc_sel[0]) begin rq_off0 <= rc_off; rq_rd0 <= rc_q[32]; rq_lba <= rc_q[31:0]; end
 	if (rc_sel[1]) begin rq_xoff[0] <= rc_off; {rq_xwr[0], rq_xrd[0]} <= rc_q[33:32]; rq_xlba[6:0] <= rc_q[6:0]; end
 	if (rc_sel[2]) begin rq_xoff[1] <= rc_off; {rq_xwr[1], rq_xrd[1]} <= rc_q[33:32]; rq_xlba[13:7] <= rc_q[6:0]; end
 	if (take) begin rq_off0 <= 0; rq_xoff <= 0; end
 
 	// CAUSE: a raise beats a concurrent clear; an ENABLE clears the word
-	gen   <= gen + fire;
+	rings <= rings + fire;
 	cause <= raise | (cause & ~clr_c & ~{3{take}});
 	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends with a record that shows the request new or
 	// withdrawn, or rejects that latest answer, and at an ENABLE (one discarded without the enable leaves its
@@ -292,7 +300,7 @@ always @(posedge clk) begin
 	else if (w_ctrl) begin
 		en_lwx   <= w_en;
 		xen_lwx  <= w_xen;
-		test_lwx <= DIAG ? wdata[3] : 1'b0;
+		test_lwx <= DIAG ? wdata[9] : 1'b0;
 	end
 
 	// a full FIFO holds an ABORT (until the enable falls) and drops and counts any other store
@@ -302,7 +310,7 @@ always @(posedge clk) begin
 	// store path: never back-pressured
 	if (p_bad) begin
 		if (DIAG && ~&drops) drops <= drops + 16'd1;
-		if (~&fdrops) fdrops <= fdrops + 10'd1;
+		if (~&fdrops) fdrops <= fdrops + 12'd1;
 	end
 	if (fwe) wptr <= wptr + 1'd1;
 	sector_w_lwgray <= wptr ^ (wptr >> 1);
@@ -311,9 +319,9 @@ always @(posedge clk) begin
 		exp_w  <= 0;
 		flen_w <= blen;
 		bfail  <= ~p_ok;
-		fdrops <= p_ok ? 10'd0 : 10'd1;
+		fdrops <= p_ok ? 12'd0 : 12'd1;
 	end
-	else if (wdat && p_ok && waddr[11:2] == exp_w) exp_w <= exp_w + 10'd1;
+	else if (wdat && p_ok && waddr[13:2] == {2'b00, exp_w}) exp_w <= exp_w + 10'd1;
 
 	if (DIAG) begin
 		frames <= (clr ? 16'd0 : frames) + {12'd0, dn_add};   // a done arriving with CLR counts after it
@@ -344,29 +352,27 @@ wire ok = (exp_w == flen_w) & ~bfail;
 
 always @(*) begin
 	rdata = 32'd0;
-	if (rreg) case (raddr[6:2])
-		5'h00: rdata = {29'd0, cause};                     // CAUSE: one event bit per slot
-		5'h01: rdata = {any, 15'd0, pst};
-		5'h02: rdata = rq_lba;
-		5'h04: begin
-			rdata = {28'd0, test_lwx, 2'b00, en_lwx};
-			rdata[4 + XSLOT0] = xen_lwx[0];
-			rdata[4 + XSLOT1] = xen_lwx[1];
-		end
-		5'h05: rdata = DIAG ? {frames, hw, 5'd0, st_s} : {29'd0, st_s};
-		5'h06: rdata = {ok, 5'd0, fdrops, 6'd0, exp_w};
-		5'h07: rdata = DIAG ? {16'd0, drops} : 32'd0;
-		5'h08: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
-		5'h09: rdata = DIAG ? gen : 32'd0;
-		5'h0A: rdata = DIAG ? tsreq : 32'd0;
-		5'h0B: rdata = DIAG ? tsdone : 32'd0;
-		5'h0C: rdata = DIAG ? cycles : 32'd0;
-		5'h0D: rdata = DIAG ? {12'd0, sum} : 32'd0;
-		5'h0E: rdata = 32'h32434553;     // "SEC2"
-		5'h18, 5'h19, 5'h1A, 5'h1B:      // LBA_S[s]
-			rdata = ({2'b00, raddr[3:2]} == PSLOT)  ? rq_lba :
-			        ({2'b00, raddr[3:2]} == XSLOT0) ? {25'd0, rq_xlba[6:0]} :
-			        ({2'b00, raddr[3:2]} == XSLOT1) ? {25'd0, rq_xlba[13:7]} : 32'd0;
+	if (rreg) case (raddr[8:2])
+		7'h00: rdata = {29'd0, cause};                     // CAUSE: one event bit per slot
+		7'h01: rdata = {any, 13'd0, pick, pst};            // REQ
+		7'h02: rdata = {21'd0, 1'b0, test_lwx, 1'b0, 5'd0, xen_lwx, en_lwx};   // CTRL
+		7'h03: rdata = {DIAG ? frames : 16'd0, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
+		                st_s[2:0]};                        // STATUS
+		7'h04: rdata = {ok, 3'd0, fdrops, 3'd0, 3'd0, exp_w};   // ACCEPT
+		7'h05: rdata = 32'h33434553;     // "SEC3"
+		7'h06: rdata = DIAG ? {8'd0, hw, drops} : 32'd0;
+		7'h07: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
+		7'h08: rdata = DIAG ? rings : 32'd0;
+		7'h09: rdata = DIAG ? tsreq : 32'd0;
+		7'h0A: rdata = DIAG ? tsdone : 32'd0;
+		7'h0B: rdata = DIAG ? cycles : 32'd0;
+		7'h0C: rdata = DIAG ? {12'd0, sum} : 32'd0;
+		7'h40: rdata = {rq_off0,    ans[0], 14'd0, pst0};   // RSTAT_S[0]
+		7'h41: rdata = rq_lba;                              // LBA_S[0]
+		7'h48: rdata = {rq_xoff[0], ans[1], 14'd0, xst0};
+		7'h49: rdata = {25'd0, rq_xlba[6:0]};
+		7'h50: rdata = {rq_xoff[1], ans[2], 14'd0, xst1};
+		7'h51: rdata = {25'd0, rq_xlba[13:7]};
 		default: rdata = 32'd0;
 	endcase
 end
@@ -390,7 +396,7 @@ wire [31:0] qd = q[31:0];
 
 reg  [1:0] fsel  = 0;               // the slot the open frame serves: 0 primary, 1 X0, 2 X1
 reg        fwack = 0;               // the open frame is a WACK: ack only, no strobes
-wire [9:0] flen  = (fsel == 2'd0) ? FRAME : XFRAME;
+wire [9:0] flen  = (fsel == 2'd0) ? FRAME : (fsel == 2'd1) ? XFRAME0 : XFRAME1;
 wire [1:0] bs    = qi[1:0];
 wire       bwk   = qi[2];
 wire [2:0] btg   = qi[5:3];
@@ -465,7 +471,7 @@ assign o_ack = fack[0];
 assign x_ack = fack[2:1];
 
 always @(posedge clk_sys) begin
-	sys_lwx <= {DIAG ? evt : 4'd0, fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys};
+	sys_lwx <= {DIAG ? evt : 4'd0, c_commit, !fidle, fack, x_en_sys, en_sys};
 
 	if (DIAG && dn_go && !dn_busy) dsent <= dcnt;
 

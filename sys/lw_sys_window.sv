@@ -57,11 +57,11 @@
 // every block's word is 0 unless it is selected, and the read word is one AND-OR of the block words and the
 // 0xDEADBEEF default. An address in no block that is listed reads 0xDEADBEEF and drops stores; an unassigned
 // offset inside a block reads 0.
-// The SECTOR block is one primary hps_io read slot plus up to two save slots ("cards"); its kind words declare
-// each card slot, its DDR image base and extent. OSDBUF queues image stores for a clk_sys writer that writes
-// them through each osd instance's own osd_buffer port (lw_osd.sv, osd.v). EVT raises hps_io's core->host flags
-// (status, block request, info, upload) as causes on its own line. LANE replays ordered link frames onto sys_top's
-// link nets and can capture their replies.
+// The SECTOR block is one primary hps_io read slot plus up to two save slots; its kind words declare each slot by
+// its slot index, with its hps_io slot, frame, LBA width and (for a save slot) its DDR image base and extent.
+// OSDBUF queues image stores for a clk_sys writer that writes them through each osd instance's own osd_buffer port
+// (lw_osd.sv, osd.v). EVT raises hps_io's core->host flags (status, block request, info, upload) as causes on its
+// own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored) and lw_sector's diagnostics; LW_DIAG=1
 // (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
@@ -71,18 +71,19 @@ module lw_sys_window #(
 	parameter        PAD_EN    = 0,          // L1, MISTER_LW_PAD
 	parameter        EVT_EN    = 0,          // L2, MISTER_LW_EVT
 	parameter        OSD_EN    = 0,          // MISTER_LW_OSD
-	// SECTOR block, as the core declares it (sys_top.v maps the MISTER_LW_SECTOR_* / MISTER_LW_CARD* macros).
+	// SECTOR block, as the core declares it (sys_top.v maps the MISTER_LW_SECTOR_* / MISTER_LW_SAVE* macros).
 	parameter        SEC_EN    = 0,          // 1 = build the SECTOR block
 	parameter  [7:0] SEC_SLOT  = 8'd1,       // the hps_io slot the primary frames feed (sd_rd[SEC_SLOT])
 	parameter  [9:0] SEC_FRAME = 10'd128,    // 32-bit DATA words per primary frame (128 = one 512-byte block)
 	parameter  [2:0] BLKSZ     = 3'd2,       // the core's hps_io BLKSZ, reported in the GET_SDSTAT word
-	parameter  [3:0] MC_SLOT0  = 4'hE,       // card 0: hps_io slot (0-3), its DDR image base and extent;
-	parameter [31:0] MC_WSRC0  = 32'd0,      //   a card with wsrc 0 is not declared (slot 4'hE never decodes)
-	parameter [31:0] MC_EXT0   = 32'd0,
-	parameter  [3:0] MC_SLOT1  = 4'hF,       // card 1, likewise
-	parameter [31:0] MC_WSRC1  = 32'd0,
-	parameter [31:0] MC_EXT1   = 32'd0,
-	parameter  [9:0] MC_FRAME  = 10'd256,    // 32-bit DATA words per card frame (256 = one 1 KB block)
+	parameter  [3:0] SAVE0_SLOT  = 4'hE,     // save slot 0 (slot index 1): hps_io slot (0-3), DDR image base and
+	parameter [31:0] SAVE0_WSRC  = 32'd0,    //   extent; a save slot with wsrc 0 is not declared
+	parameter [31:0] SAVE0_EXT   = 32'd0,
+	parameter  [9:0] SAVE0_FRAME = 10'd256,  //   32-bit DATA words per frame (256 = one 1 KB block)
+	parameter  [3:0] SAVE1_SLOT  = 4'hF,     // save slot 1 (slot index 2), likewise
+	parameter [31:0] SAVE1_WSRC  = 32'd0,
+	parameter [31:0] SAVE1_EXT   = 32'd0,
+	parameter  [9:0] SAVE1_FRAME = 10'd256,
 	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and list its entry.
 	parameter        LANE_EN   = 0
 )
@@ -131,12 +132,12 @@ localparam        DIAG     = 0;
 `endif
 
 // The window (absolute LW offset and size: the `SYS_LW_CAPS token's two numbers) and its blocks, window-relative.
-// Every block is aligned to its size, except SECTOR, which spans two 4 KB pages from 0x01000.
+// Every block is aligned to its size.
 localparam [20:0] WIN_OFF   = 21'h40000;
 localparam [20:0] WIN_SIZE  = 21'h80000;
 localparam [20:0] DIR_OFF   = 21'h00000;   // the directory: header and entries, the rest of its page reads 0
-localparam [20:0] SEC_OFF   = 21'h01000;
-localparam [20:0] SEC_SIZE  = 21'h02000;
+localparam [20:0] SEC_OFF   = 21'h08000;
+localparam [20:0] SEC_SIZE  = 21'h08000;
 localparam [20:0] EVT_OFF   = 21'h03000;
 localparam [20:0] EVT_SIZE  = 21'h01000;
 localparam [20:0] OSD_OFF   = 21'h04000;
@@ -148,7 +149,6 @@ localparam [20:0] PAD_SIZE  = 21'h40000;
 
 localparam [20:0] DIR_A  = WIN_OFF + DIR_OFF;      // absolute block starts, for the selects
 localparam [20:0] SEC_A  = WIN_OFF + SEC_OFF;
-localparam [20:0] SEC_A2 = SEC_A + 21'h01000;
 localparam [20:0] EVT_A  = WIN_OFF + EVT_OFF;
 localparam [20:0] OSD_A  = WIN_OFF + OSD_OFF;
 localparam [20:0] LANE_A = WIN_OFF + LANE_OFF;
@@ -163,7 +163,7 @@ localparam [15:0] PAD_KIND  = 16'd1;
 localparam [31:0] PAD_VER   = 32'h00010001;
 localparam  [7:0] PAD_LINE  = 8'd0;
 localparam [15:0] SEC_KIND  = 16'd2;
-localparam [31:0] SEC_VER   = 32'h00010001;
+localparam [31:0] SEC_VER   = 32'h00020000;
 localparam  [7:0] SEC_LINE  = 8'd1;                        // f2h_irq[8], GIC SPI 48
 localparam [15:0] OSD_KIND  = 16'd3;
 localparam [31:0] OSD_VER   = 32'h00020000;
@@ -177,10 +177,11 @@ localparam [31:0] LANE_VER  = 32'h00010001;
 localparam  [7:0] LANE_LINE = 8'd0;
 
 localparam        SEC_AW    = 9;          // FIFO depth 512
-localparam [15:0] SEC_GAP   = 16'd2;      // clk_sys cycles between write strobes
-localparam  [7:0] MC_FLAGS  = 8'h03;      // RD: BEGIN_S frames; WR: WACK_S, bytes from the DDR image
-localparam        MC_DECL0  = SEC_EN && MC_WSRC0 != 0;
-localparam        MC_DECL1  = SEC_EN && MC_WSRC1 != 0;
+localparam  [7:0] SEC_GAP   = 8'd2;       // clk_sys cycles between write strobes
+localparam  [7:0] SEC_RD    = 8'h01;      // a descriptor's flags: RD, BEGIN_S frames; WR, WACK_S with the bytes
+localparam  [7:0] SEC_RDWR  = 8'h03;      //   from the DDR image
+localparam        SAVE_DECL0 = SEC_EN && SAVE0_WSRC != 0;
+localparam        SAVE_DECL1 = SEC_EN && SAVE1_WSRC != 0;
 `ifdef MENU_CORE
 localparam [15:0] OSD_ROWS  = 16'd20;     // the image's rows of 256 bytes, header rows 16-19 included
 `else
@@ -218,7 +219,7 @@ wire        pres_cmt = hps_lw[381];                     // hps_io's commit mark
 // hps_io's commit mark are present; the block is listed with one wired slot.
 wire        has_pad = PAD_EN != 0 && pres_pad;
 wire        has_evt = EVT_EN != 0 && pres_evt;
-wire  [2:0] wired   = {MC_DECL1 && pres_sec[2], MC_DECL0 && pres_sec[1], SEC_EN != 0 && pres_sec[0]} &
+wire  [2:0] wired   = {SAVE_DECL1 && pres_sec[2], SAVE_DECL0 && pres_sec[1], SEC_EN != 0 && pres_sec[0]} &
                       {3{pres_cmt}};
 wire        has_sec = |wired;
 
@@ -245,7 +246,7 @@ reg [31:0] scratch = 0;
 
 // Selects: high address bits against a constant, read and write side alike, for listed blocks only.
 wire        r_dir  = lw_raddr[20:12] == DIR_A[20:12];
-wire        r_sec  = has_sec && (lw_raddr[20:12] == SEC_A[20:12] || lw_raddr[20:12] == SEC_A2[20:12]);
+wire        r_sec  = has_sec && lw_raddr[20:15] == SEC_A[20:15];
 wire        r_evt  = has_evt && lw_raddr[20:12] == EVT_A[20:12];
 wire        r_osd  = OSD_EN && lw_raddr[20:13] == OSD_A[20:13];
 wire        r_lane = LANE_EN && lw_raddr[20:12] == LANE_A[20:12];
@@ -253,7 +254,7 @@ wire        r_pad  = has_pad && lw_raddr[20:18] == PAD_A[20:18];
 wire        r_none = ~(r_dir | r_sec | r_evt | r_osd | r_lane | r_pad);
 
 wire        w_dir  = lw_waddr[20:12] == DIR_A[20:12];
-wire        w_sec  = has_sec && (lw_waddr[20:12] == SEC_A[20:12] || lw_waddr[20:12] == SEC_A2[20:12]);
+wire        w_sec  = has_sec && lw_waddr[20:15] == SEC_A[20:15];
 wire        w_evt  = has_evt && lw_waddr[20:12] == EVT_A[20:12];
 wire        w_osd  = OSD_EN && lw_waddr[20:13] == OSD_A[20:13];
 wire        w_lane = LANE_EN && lw_waddr[20:12] == LANE_A[20:12];
@@ -270,9 +271,9 @@ wire        wr_lane = wr & lane_open;
 assign      quiet   = sec_idle & osd_idle & lane_idle;
 wire        e_take  = lw_write && w_ena_a && &lw_be && lw_wdata == ENA_W && !en_q && !lw_hrst && !lw_idv && quiet;
 
-// Block-relative addresses: the address bits below each block's size (SECTOR's second page is its upper half).
-wire [12:0] rsec  = {lw_raddr[12] ^ SEC_A[12], lw_raddr[11:0]};
-wire [12:0] wsec  = {lw_waddr[12] ^ SEC_A[12], lw_waddr[11:0]};
+// Block-relative addresses: the address bits below each block's size.
+wire [14:0] rsec  = lw_raddr[14:0];
+wire [14:0] wsec  = lw_waddr[14:0];
 wire [11:0] revt  = lw_raddr[11:0];
 wire [11:0] wevt  = lw_waddr[11:0];
 wire [12:0] rosd  = lw_raddr[12:0];
@@ -363,18 +364,28 @@ function automatic [31:0] pad_kw(input [4:0] k);
 	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : (k == 5'd8) ? {16'd16, 16'd24} : 32'd0;
 endfunction
 
-// A card's descriptor carries its flags only while its mux is wired (wd: {card 1, card 0}).
-function automatic [31:0] sec_kw(input [4:0] k, input [1:0] wd);
+// SECTOR: K0 {FIFO entries, 0, strobe gap}, K1 {BLKSZ[10:8], wide[0]} (16-bit strobes), K2 the descriptors that
+// follow, then four words per slot index k from K4 + 4k: {flags, hps_io slot, frame words}, LBA bits, DDR image
+// base and size. A slot's flags read 0 unless it is wired (wd, by k); an undeclared slot's words read 0.
+function automatic [31:0] sec_desc(input [7:0] flags, input [3:0] slot, input [9:0] frame);
+	sec_desc = {flags, 4'd0, slot, 3'd0, 3'd0, frame};
+endfunction
+function automatic [31:0] sec_kw(input [4:0] k, input [2:0] wd);
 	case (k)
-		5'd0:    sec_kw = {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME};
-		5'd2:    sec_kw = {16'd1 << SEC_AW, SEC_GAP};
-		5'd3:    sec_kw = MC_DECL0 ? {4'd0, MC_SLOT0, wd[0] ? MC_FLAGS : 8'd0, 6'd0, MC_FRAME} : 32'd0;
-		5'd4:    sec_kw = MC_DECL0 ? MC_WSRC0 : 32'd0;
-		5'd5:    sec_kw = MC_DECL1 ? {4'd0, MC_SLOT1, wd[1] ? MC_FLAGS : 8'd0, 6'd0, MC_FRAME} : 32'd0;
-		5'd6:    sec_kw = MC_DECL1 ? MC_WSRC1 : 32'd0;
-		5'd7:    sec_kw = MC_DECL0 ? MC_EXT0 : 32'd0;
-		5'd8:    sec_kw = MC_DECL1 ? MC_EXT1 : 32'd0;
-		default: sec_kw = 32'd0;                             // K1 is reserved: the CAUSE word is common
+		5'd0:    sec_kw = {16'd1 << SEC_AW, 8'd0, SEC_GAP};
+		5'd1:    sec_kw = {21'd0, BLKSZ, 7'd0, 1'b1};
+		5'd2:    sec_kw = SAVE_DECL1 ? 32'd3 : SAVE_DECL0 ? 32'd2 : 32'd1;
+		5'd4:    sec_kw = sec_desc(wd[0] ? SEC_RD : 8'd0, SEC_SLOT[3:0], SEC_FRAME);
+		5'd5:    sec_kw = 32'd32;
+		5'd8:    sec_kw = SAVE_DECL0 ? sec_desc(wd[1] ? SEC_RDWR : 8'd0, SAVE0_SLOT, SAVE0_FRAME) : 32'd0;
+		5'd9:    sec_kw = SAVE_DECL0 ? 32'd7 : 32'd0;
+		5'd10:   sec_kw = SAVE_DECL0 ? SAVE0_WSRC : 32'd0;
+		5'd11:   sec_kw = SAVE_DECL0 ? SAVE0_EXT : 32'd0;
+		5'd12:   sec_kw = SAVE_DECL1 ? sec_desc(wd[2] ? SEC_RDWR : 8'd0, SAVE1_SLOT, SAVE1_FRAME) : 32'd0;
+		5'd13:   sec_kw = SAVE_DECL1 ? 32'd7 : 32'd0;
+		5'd14:   sec_kw = SAVE_DECL1 ? SAVE1_WSRC : 32'd0;
+		5'd15:   sec_kw = SAVE_DECL1 ? SAVE1_EXT : 32'd0;
+		default: sec_kw = 32'd0;                             // K3, and K6-K7: the primary has no image
 	endcase
 endfunction
 
@@ -413,7 +424,7 @@ always @(*) begin
 		dir_ent = ent(dew, PAD_KIND, PAD_VER, PAD_OFF, PAD_SIZE, 21'd0, PAD_LINE, 16'd0, pad_kw(dk));
 	if (has_sec && de == e_sec)             // CAUSE_BITS: one per wired slot
 		dir_ent = ent(dew, SEC_KIND, SEC_VER, SEC_OFF, SEC_SIZE, SEC_OFF, SEC_LINE, {13'd0, wired},
-		              sec_kw(dk, wired[2:1]));
+		              sec_kw(dk, wired));
 	if (OSD_EN && de == e_osd)
 		dir_ent = ent(dew, OSD_KIND, OSD_VER, OSD_OFF, OSD_SIZE, 21'd0, OSD_LINE, 16'd0, osd_kw(dk));
 	if (has_evt && de == e_evt)
@@ -521,7 +532,7 @@ generate
 `ifdef MISTER_LW_SECTOR_SLOT
 if (SEC_EN) begin : sec
 	lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .BLKSZ(BLKSZ), .AW(SEC_AW), .DIAG(DIAG),
-	            .XSLOT0(MC_SLOT0), .XSLOT1(MC_SLOT1), .XFRAME(MC_FRAME)) sector
+	            .XSLOT0(SAVE0_SLOT), .XSLOT1(SAVE1_SLOT), .XFRAME0(SAVE0_FRAME), .XFRAME1(SAVE1_FRAME)) sector
 	(
 		.clk(clk),
 		.raddr(rsec), .rsel(r_sec), .rdata(sec_rdata),

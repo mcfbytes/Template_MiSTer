@@ -70,9 +70,9 @@ beyond it then show no presence bit, and their blocks are not listed in the dire
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
 | `MISTER_LW_BLKSZ` | 2 | the core's `hps_io` `BLKSZ`, reported in the GET_SDSTAT words |
-| `MISTER_LW_CARD0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0: `hps_io` slot (0-3), DDR image base, image bytes |
-| `MISTER_LW_CARD1_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 1, likewise |
-| `MISTER_LW_CARD_FRAME` | 256 | 32-bit words per save-slot frame (256 = one 1 KB block) |
+| `MISTER_LW_SAVE0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0 (slot index 1): `hps_io` slot (0-3), DDR image base, image bytes |
+| `MISTER_LW_SAVE0_FRAME` | 256 | its 32-bit words per frame, 1-256 (256 = one 1 KB block) |
+| `MISTER_LW_SAVE1_SLOT`, `_WSRC`, `_EXTENT`, `_FRAME` | absent, 256 | save slot 1 (slot index 2), likewise |
 | `MISTER_LW_LANE` | absent | with `MISTER_LW`: builds the frame lane (LANE block) and its link front, `lw_link` |
 
 A save slot is declared only when its `_WSRC` macro is set, and needs `MISTER_LW_SECTOR_SLOT` too.
@@ -135,10 +135,10 @@ inside the window or outside it, and an unassigned offset inside a block reads 0
 | window offset | absolute LW | size | block |
 |---|---|---|---|
 | `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
-| `0x01000` | `0x41000` | `0x2000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`) |
 | `0x03000` | `0x43000` | `0x1000` | EVT |
 | `0x04000` | `0x44000` | `0x2000` | OSDBUF |
 | `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`) |
+| `0x08000` | `0x48000` | `0x8000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`): registers at `+0x0000`, DATA at `+0x4000` |
 | `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
 | `0x40000` | `0x80000` | `0x40000` | PAD |
 
@@ -183,7 +183,7 @@ bitstream builds, so an entry's index (and its PENDING bit) depends on the core'
 | kind | block | version | offset / size | CAUSE | LINE | CAUSE_BITS | kind words |
 |---|---|---|---|---|---|---|---|
 | 1 | PAD | `0x00010001` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap; K8 `{spinner FIFO, keyed slots}` = `0x00100018` |
-| 2 | SECTOR | `0x00010001` | `0x01000` / `0x02000` | `0x01000` | 1 | bit *k* per wired slot (`0x1`-`0x7`) | see SECTOR |
+| 2 | SECTOR | `0x00020000` | `0x08000` / `0x08000` | `0x08000` | 1 | bit *k* per wired slot (`0x1`-`0x7`) | see SECTOR |
 | 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000` |
 | 4 | EVT | `0x00020000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0xF` | K0 = 4: the status words |
 | 5 | LANE | `0x00010001` | `0x06000` / `0x01000` | 0 | 0 | 0 | see LANE |
@@ -368,60 +368,62 @@ and serving them is how a host clears the levels.
 - **BLK** is raised again when a slot's SPI ack falls with its request still raised, the request an SPI host serves
   next; a slot the SECTOR block has claimed raises none.
 
-### SECTOR block (kind 2, "SEC2")
+### SECTOR block (kind 2, version 2.0, "SEC3")
 
-The block serves one primary `hps_io` read slot and up to two save slots ("cards") through one feeder. The feeder
-replays `hps_io`'s own handshake into the core: `sd_ack`, then two 16-bit `sd_buff_wr` strobes per 32-bit word,
-low half first.
+The block serves one primary `hps_io` read slot and up to two save slots through one feeder. Every per-slot field
+(the EN bit, the CAUSE bit, the slot's registers and its descriptor) is indexed by the slot index *k*: 0 the
+primary, 1 save slot 0, 2 save slot 1; never by the `hps_io` slot number. The feeder replays `hps_io`'s own
+handshake into the core: `sd_ack`, then two 16-bit `sd_buff_wr` strobes per 32-bit word, low half first.
 
 **Kind words** (the entry's CAUSE word gives the CAUSE register, LINE ordinal 1):
 
 | word | value |
 |---|---|
-| K0 | `{slot[31:24], 0, frame_words[9:0]}` |
-| K1 | 0, reserved |
-| K2 | `{fifo_depth[31:16] = 512, strobe_gap[15:0] = 2}` |
-| K3, K5 | card 0 / card 1: `{0, slot[27:24], flags[23:16], frame_words[9:0]}`, flags bit 0 = RD, bit 1 = WR |
-| K4, K6 | card 0 / card 1: DDR image base (physical) |
-| K7, K8 | card 0 / card 1: image size in bytes |
+| K0 | `{fifo_entries[31:16] = 512, 0, strobe_gap[7:0] = 2}` |
+| K1 | `{0, BLKSZ[10:8], 0, wide[0] = 1}`: 16-bit strobes |
+| K2 | the slot descriptors that follow, 1-3 |
+| K3 | 0 |
+| K4 + 4*k* | `{flags[31:24], 0, hps_io slot[19:16], 0, frame_words[12:0]}`; flags bit 0 = RD, bit 1 = WR; flags 0 = declared but not wired, not servable |
+| K5 + 4*k* | `{0, lba_bits[5:0]}`: 32 for the primary, 7 for a save slot in this revision |
+| K6 + 4*k* | DDR image base, physical (0 for the primary) |
+| K7 + 4*k* | DDR image size in bytes (0 for the primary) |
 
-An undeclared card's words are 0.
+An undeclared save slot's words are 0.
 
 **Registers, from the block's start:**
 
 | offset | register | |
 |---|---|---|
-| `0x00` | CAUSE | bit *k* = slot *k* (0 the primary, 1 card 0, 2 card 1): its request opened or re-opened while its EN is set; a store clears each bit written as 1 |
-| `0x04` | REQ | `{pending[31], 0, GET_SDSTAT word[15:0]}` of the highest-priority open request (primary, card 0, card 1) |
-| `0x08` | LBA | the primary's LBA, from its latest request record |
-| `0x0C` | BEGIN | write the LBA: opens a primary frame |
-| `0x10` | CTRL | `[0]` EN primary, `[1]` ABORT (zero-fills the open frame; one that finds the FIFO full is held and enters first, every store behind it refused until then), `[2]` CLR, `[3]` TEST (CLR/TEST: `LW_DIAG=1`), `[4+s]` EN card slot *s* |
-| `0x14` | STATUS | `[2:0]` `{streaming, ack, en_sys}`, `[3]` reads 0; with `LW_DIAG=1` also `{frames[31:16], high-water[15:8]}` |
-| `0x18` | ACCEPT | `{ok[31], drops[25:16], next_index[9:0]}` for the frame in flight |
-| `0x1C`-`0x34` | DROPS, COUNTS, GEN, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM | `LW_DIAG=1` only; read 0 otherwise |
-| `0x38` | ID | `0x32434553` ("SEC2") |
-| `0x40 + 4s` | BEGIN_S[s] | write the LBA: opens a READ frame for slot *s*; `BEGIN_S[primary]` = BEGIN |
-| `0x50 + 4s` | WACK_S[s] | write the LBA: answers a card WRITE with an ack pulse and no strobes |
-| `0x60 + 4s` | LBA_S[s] | slot *s*'s LBA, from its latest request record |
-| `0x1000 + 4i` | DATA[i] | word *i* of the open frame, *i* < that frame's frame_words (a store past it is ignored) |
+| `0x000` | CAUSE | bit *k*: slot *k*'s request opened or re-opened while its EN is set; a store clears each bit written as 1 |
+| `0x004` | REQ | `{pending[31], 0, k[17:16], GET_SDSTAT word[15:0]}` of the highest-priority open request (*k* = 0, 1, 2); 0 when none |
+| `0x008` | CTRL | `[2:0]` EN by *k* (settable only for a wired slot), `[8]` ABORT (zero-fills the open frame; one that finds the FIFO full is held and enters first, every store behind it refused until then; reads 0), `[9]` TEST, `[10]` CLR (TEST/CLR: `LW_DIAG=1`) |
+| `0x00C` | STATUS | `[2:0]` `en_sys` by *k*, `[6:4]` the feeder's ack by *k*, `[8]` feeder busy, `[9]` ABORT held, `[10]` `hps_io`'s commit mark; with `LW_DIAG=1` also `frames[31:16]`. Independent samples: no decision may rest on a combination of them |
+| `0x010` | ACCEPT | `{ok[31], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `drops` counts stores refused by a full FIFO |
+| `0x014` | ID | `0x33434553` ("SEC3") |
+| `0x018`-`0x030` | DROPS `{0, high-water[23:16], drops[15:0]}`, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM | `LW_DIAG=1` only; read 0 otherwise |
+| `0x100 + 0x20k` | RSTAT_S[k] | `{offered[31], answered[30], 0, GET_SDSTAT word[15:0]}` from slot *k*'s latest request record |
+| `0x104 + 0x20k` | LBA_S[k] | slot *k*'s LBA, from its latest request record |
+| `0x108 + 0x20k` | BEGIN_S[k] | write the LBA: opens a READ frame of slot *k*'s frame_words |
+| `0x10C + 0x20k` | WACK_S[k] | write the LBA: answers a save slot's WRITE (*k* = 1, 2) with an ack pulse and no strobes |
+| `0x4000 + 4i` | DATA[i] | word *i* of the open frame, *i* < that frame's frame_words (a store past it is ignored) |
 
-GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], slot[3:0], wr, rd}`.
+GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero block count.
 
 **One frame:**
 1. The core raises `sd_rd[slot]`. While EN is set, `lw_blk_mux` hides the request from `hps_io`, the slot's
    CAUSE bit sets, the entry's line (ordinal 1, `f2h_irq[8]`) rises and REQ shows the request. Without EN the
    request raises nothing here and stands for SPI.
-2. The host reads CAUSE, stores it back, then reads REQ and the slot's LBA.
-3. The host writes BEGIN with that LBA. A BEGIN whose slot, direction or LBA is not the core's current request is
-   rejected, and the request re-opens with the LBA the core asks for now; so does a BEGIN met while another frame
-   streams, which zero-fills that frame. A request still raised two `clk_sys` cycles after its frame's ack falls
-   is offered again, as `hps_io` shows it to an SPI host.
+2. The host reads CAUSE, stores it back, then reads REQ (or RSTAT_S) and the slot's LBA_S.
+3. The host writes BEGIN_S[k] with that LBA. A BEGIN_S whose slot, direction or LBA is not the core's current
+   request is rejected, and the request re-opens with the LBA the core asks for now; so does a BEGIN_S met while
+   another frame streams, which zero-fills that frame. A request still raised two `clk_sys` cycles after its
+   frame's ack falls is offered again, as `hps_io` shows it to an SPI host.
 4. The host stores DATA[0 .. n-1], then reads ACCEPT.
 5. If ACCEPT's `ok` is clear, the host resends from `next_index`.
 
-**Cards:**
-- A card READ is the same flow on BEGIN_S.
-- A card WRITE is answered by WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`.
+**Save slots:**
+- A save slot's READ is the same flow on its BEGIN_S.
+- A save slot's WRITE is answered by its WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`.
 - ABORT, or a core reset mid-frame, zero-fills the rest of the open frame, so the core is never left waiting.
 
 ### LANE block (kind 5, "LAN1")
@@ -516,9 +518,9 @@ lw_blk_mux blk_lw
   stay on SPI.
 - **The core's write strobe is muxed, never `hps_io`'s shared `sd_buff_wr`.** An SPI transfer on another slot
   therefore cannot land in an LW frame.
-- **Card slots** use `lw_card_mux #(.CARD(0|1))` the same way, on `sd_rd`/`sd_wr`/`sd_buff_addr`. A card's LBA is 7
-  bits (128 blocks) in this revision, and the card's image must sit in DDR at `wsrc`, where the host reads it for
-  writes. A card slot must differ from the primary and lie in 0-3.
+- **Save slots** use `lw_save_mux #(.SAVE(0|1))` the same way, on `sd_rd`/`sd_wr`/`sd_buff_addr`. A save slot's LBA
+  is 7 bits (128 blocks) in this revision, and its image must sit in DDR at `wsrc`, where the host reads it for
+  writes. A save slot's `hps_io` slot must differ from the primary's and lie in 0-3.
 - **Frames are block-sized:** `frame_words` x 4 bytes is what the reader expects per request. 588 words (2,352 bytes)
   serves a raw CD sector.
 - **The host decides.** It serves a slot only when it knows what a frame on that slot means. A core gains nothing
@@ -563,7 +565,7 @@ mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 | `[94:46]` | to core | PAD store `{we, op[7:0], idx[7:0], data[31:0]}` (`hps_io`) |
 | `[95]`, `[96]` | to core | SECTOR primary `en_sys`, `ack` (`lw_blk_mux`) |
 | `[97]`, `[113:98]`, `[127:114]` | to core | the shared strobe, its data `[15:0]` and address (`[122:114]` used) |
-| `[128]`, `[129]` / `[130]`, `[131]` | to core | save slot 0 / 1 `en_sys`, `ack` (`lw_card_mux`) |
+| `[128]`, `[129]` / `[130]`, `[131]` | to core | save slot 0 / 1 `en_sys`, `ack` (`lw_save_mux`) |
 | `[166:132]` | from core | SECTOR primary `{lba[31:0], req, hps_ack, reset}` (bit 132 = reset) |
 | `[201:167]`, `[236:202]` | from core | save slot 0, 1 `{lba[31:0], rd, wr, hps_ack}` (low bit = hps_ack; `lba[6:0]` used) |
 | `[239:237]` | from core | event pulses, one `clk_sys` cycle: `{upload, info, blk}` (`hps_io`, with `MISTER_LW_EVT`) |
@@ -590,8 +592,8 @@ mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 
 It needs Icarus Verilog 12 or newer, or set `LW_TB_IMAGE` to a container image that has it.
 
-The SECTOR arms use a reference CD-style configuration: a 588-word primary on slot 1, and 1 KB cards on slots 2
-and 3. They cover:
+The SECTOR arms use a reference CD-style configuration: a 588-word primary on `hps_io` slot 1, and save slots on
+slots 2 and 3 (1 KB and 768-byte frames). They cover:
 - the host enable: every store dropped without it, every other word refused, no timer, each way it ends (an HPS
   reset, GPO bit 31 low for one cycle and long), the look at GPO and GPI bit 22 before identifying, a takeover, a
   stock start beside a live host, a new host starting from stock after every block was bound, the SECTOR and LANE
@@ -620,7 +622,7 @@ and 3. They cover:
   in and around the answer, across the transfer and after it: the mux never moves inside, the transfer is byte for
   byte and the next request is offered over LW; a mark left by a GET_SDSTAT with no transfer holds every slot on
   SPI until a GET_SDSTAT shows none; and, through the whole suite, no request acknowledged by both paths;
-- card reads and writes, and their priority;
+- save-slot reads and writes, each at its own frame length, and their priority;
 - the EVT block: status brackets of four shapes at 64 phase offsets, a 64-offset read/capture race, and BLK, INFO
   and UPLOAD pulses at every spacing to sixteen `clk_sys` cycles, none lost;
 - the OSD image over LW in both `osd_buffer`s byte for byte as over SPI, drawn the same through both pixel paths
@@ -640,8 +642,9 @@ Re-run it after any `sys/` merge.
   version 1.1, which keeps every level latest-wins where that build queued the sticks and paddles with the
   spinners, EVT is version 2.0, which crosses the status whole and adds the BLK, INFO and UPLOAD causes where that
   build had a status block alone, OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a
-  shadow beside it, and SECTOR raises a CAUSE bit per slot, only with that slot's EN set, where that build raised
-  one bit for any request.
+  shadow beside it, and SECTOR is version 2.0 at window `0x08000`, which indexes every per-slot register by
+  slot index and raises a CAUSE bit per slot, only with that slot's EN set, where that build raised one bit for any
+  request.
   The directory is layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
   directory here and stays on SPI.
 - **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and

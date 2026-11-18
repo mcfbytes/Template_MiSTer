@@ -50,20 +50,20 @@ assign HPS_BUS[377]     = 1'b1;
 
 assign hps_req   = core_req & ~en;
 assign core_ack  = en ? HPS_BUS[96]     : hps_ack;
-assign core_wr   = en ? HPS_BUS[97] & HPS_BUS[96] : hps_wr;   // never a card frame's strobe
+assign core_wr   = en ? HPS_BUS[97] & HPS_BUS[96] : hps_wr;   // never a save-slot frame's strobe
 assign core_data = en ? HPS_BUS[113:98] : hps_data;
 
 endmodule
 
-// emu side of a save slot on the LW SECTOR route: CARD 0 is the slot MISTER_LW_CARD0_SLOT declares, CARD 1 the
-// MISTER_LW_CARD1_SLOT one. While the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's
-// ack/write/addr/data come from the feeder, the write gated by the slot's own ack. The core's buffer read data
-// keeps feeding hps_io's sd_buff_din (the SPI save path). All on hps_io's clk_sys.
-// HPS_BUS bits: to the core [128 + 2 CARD] en_sys, [129 + 2 CARD] ack, [97] the shared strobe, [113:98] its data,
-// [127:114] its address; from the core [201:167] (CARD 0) or [236:202] (CARD 1) {lba[31:0], rd, wr, hps_ack},
-// and [378 + CARD], this mux's presence bit, a constant 1.
+// emu side of a save slot on the LW SECTOR route: SAVE 0 is the slot MISTER_LW_SAVE0_SLOT declares (the block's
+// slot index 1), SAVE 1 the MISTER_LW_SAVE1_SLOT one (index 2). While the slot's en_sys is set its rd/wr are hidden
+// from hps_io and the slot's ack/write/addr/data come from the feeder, the write gated by the slot's own ack. The
+// core's buffer read data keeps feeding hps_io's sd_buff_din (the SPI save path). All on hps_io's clk_sys.
+// HPS_BUS bits: to the core [128 + 2 SAVE] en_sys, [129 + 2 SAVE] ack, [97] the shared strobe, [113:98] its data,
+// [127:114] its address; from the core [201:167] (SAVE 0) or [236:202] (SAVE 1) {lba[31:0], rd, wr, hps_ack},
+// and [378 + SAVE], this mux's presence bit, a constant 1.
 
-module lw_card_mux #(parameter CARD = 0)
+module lw_save_mux #(parameter SAVE = 0)
 (
 	inout wire [383:0] HPS_BUS,
 
@@ -83,13 +83,13 @@ module lw_card_mux #(parameter CARD = 0)
 	input wire  [15:0] hps_data     // <- hps_io sd_buff_dout
 );
 
-localparam U = CARD ? 202 : 167;
+localparam U = SAVE ? 202 : 167;
 
-wire en  = HPS_BUS[128 + 2 * CARD];
-wire ack = HPS_BUS[129 + 2 * CARD];
+wire en  = HPS_BUS[128 + 2 * SAVE];
+wire ack = HPS_BUS[129 + 2 * SAVE];
 
 assign HPS_BUS[U + 34:U]     = {25'd0, core_lba, core_rd, core_wr, hps_ack};
-assign HPS_BUS[378 + CARD]   = 1'b1;
+assign HPS_BUS[378 + SAVE]   = 1'b1;
 
 assign hps_rd     = core_rd & ~en;
 assign hps_wr     = core_wr & ~en;

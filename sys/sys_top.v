@@ -1894,28 +1894,33 @@ localparam  [2:0] LW_BLKSZ     = `MISTER_LW_BLKSZ;
 `else
 localparam  [2:0] LW_BLKSZ     = 3'd2;
 `endif
-`ifdef MISTER_LW_CARD0_WSRC
-localparam  [3:0] LW_MC_SLOT0  = `MISTER_LW_CARD0_SLOT;
-localparam [31:0] LW_MC_WSRC0  = `MISTER_LW_CARD0_WSRC;
-localparam [31:0] LW_MC_EXT0   = `MISTER_LW_CARD0_EXTENT;
+`ifdef MISTER_LW_SAVE0_WSRC
+localparam  [3:0] LW_SAVE0_SLOT  = `MISTER_LW_SAVE0_SLOT;
+localparam [31:0] LW_SAVE0_WSRC  = `MISTER_LW_SAVE0_WSRC;
+localparam [31:0] LW_SAVE0_EXT   = `MISTER_LW_SAVE0_EXTENT;
 `else
-localparam  [3:0] LW_MC_SLOT0  = 4'hE;
-localparam [31:0] LW_MC_WSRC0  = 32'd0;
-localparam [31:0] LW_MC_EXT0   = 32'd0;
+localparam  [3:0] LW_SAVE0_SLOT  = 4'hE;
+localparam [31:0] LW_SAVE0_WSRC  = 32'd0;
+localparam [31:0] LW_SAVE0_EXT   = 32'd0;
 `endif
-`ifdef MISTER_LW_CARD1_WSRC
-localparam  [3:0] LW_MC_SLOT1  = `MISTER_LW_CARD1_SLOT;
-localparam [31:0] LW_MC_WSRC1  = `MISTER_LW_CARD1_WSRC;
-localparam [31:0] LW_MC_EXT1   = `MISTER_LW_CARD1_EXTENT;
+`ifdef MISTER_LW_SAVE0_FRAME
+localparam  [9:0] LW_SAVE0_FRAME = `MISTER_LW_SAVE0_FRAME;
 `else
-localparam  [3:0] LW_MC_SLOT1  = 4'hF;
-localparam [31:0] LW_MC_WSRC1  = 32'd0;
-localparam [31:0] LW_MC_EXT1   = 32'd0;
+localparam  [9:0] LW_SAVE0_FRAME = 10'd256;
 `endif
-`ifdef MISTER_LW_CARD_FRAME
-localparam  [9:0] LW_MC_FRAME  = `MISTER_LW_CARD_FRAME;
+`ifdef MISTER_LW_SAVE1_WSRC
+localparam  [3:0] LW_SAVE1_SLOT  = `MISTER_LW_SAVE1_SLOT;
+localparam [31:0] LW_SAVE1_WSRC  = `MISTER_LW_SAVE1_WSRC;
+localparam [31:0] LW_SAVE1_EXT   = `MISTER_LW_SAVE1_EXTENT;
 `else
-localparam  [9:0] LW_MC_FRAME  = 10'd256;
+localparam  [3:0] LW_SAVE1_SLOT  = 4'hF;
+localparam [31:0] LW_SAVE1_WSRC  = 32'd0;
+localparam [31:0] LW_SAVE1_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_FRAME
+localparam  [9:0] LW_SAVE1_FRAME = `MISTER_LW_SAVE1_FRAME;
+`else
+localparam  [9:0] LW_SAVE1_FRAME = 10'd256;
 `endif
 
 `ifdef LW_LANE_LINK
@@ -1966,8 +1971,8 @@ hps_lw_bridge hps_lw_bridge
 lw_sys_window #(
 	.PAD_EN(LW_PAD_EN), .EVT_EN(LW_EVT_EN), .OSD_EN(LW_OSD_EN),
 	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .BLKSZ(LW_BLKSZ),
-	.MC_SLOT0(LW_MC_SLOT0), .MC_WSRC0(LW_MC_WSRC0), .MC_EXT0(LW_MC_EXT0),
-	.MC_SLOT1(LW_MC_SLOT1), .MC_WSRC1(LW_MC_WSRC1), .MC_EXT1(LW_MC_EXT1), .MC_FRAME(LW_MC_FRAME),
+	.SAVE0_SLOT(LW_SAVE0_SLOT), .SAVE0_WSRC(LW_SAVE0_WSRC), .SAVE0_EXT(LW_SAVE0_EXT), .SAVE0_FRAME(LW_SAVE0_FRAME),
+	.SAVE1_SLOT(LW_SAVE1_SLOT), .SAVE1_WSRC(LW_SAVE1_WSRC), .SAVE1_EXT(LW_SAVE1_EXT), .SAVE1_FRAME(LW_SAVE1_FRAME),
 	.LANE_EN(LW_LANE_EN)
 ) lw_sys_window
 (
