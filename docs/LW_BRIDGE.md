@@ -239,9 +239,9 @@ A read returns `{en[31], quiet[30], stale[29], burst[28], 12'd0, hrst[15], 3'd0,
 | `idv` | GPO bit 31 reads 0 now (the ID view, or the core reset through GPO); no ENABLE is taken while it is 1 |
 
 **When the enable falls**, every line falls, LINE_EN reads 0, OSD image stores still queued are discarded unwritten,
-the SECTOR block's EN bits clear (a frame in flight completes, zero-filled from the first word the host did not
-store, and each slot returns to SPI once its frame is done; in this revision a save-slot frame cut this way is
-zero-filled too), queued SECTOR entries are discarded (a BEGIN not yet taken leaves its request standing for SPI),
+the SECTOR block's EN bits clear (a primary frame in flight completes, zero-filled from the first word the host
+did not store; a save-slot frame not stored in full never reached the core and is withdrawn, its request standing
+for SPI; each slot returns to SPI once its frame is done), queued SECTOR entries are discarded (a BEGIN not yet taken leaves its request standing for SPI),
 the open LANE frame is abandoned, queued LANE frames are discarded unplayed (one already playing finishes), and
 reply words still to come are discarded. A frame stored in full before the fall is delivered whole. PAD levels
 already delivered stay in the core, as a stock program's would, until the next pad store over either path.
@@ -405,16 +405,16 @@ An undeclared save slot's words are 0.
 |---|---|---|
 | `0x000` | CAUSE | bit *k*: slot *k*'s request opened or re-opened while its EN is set; a store clears each bit written as 1 |
 | `0x004` | REQ | `{pending[31], 0, k[17:16], GET_SDSTAT word[15:0]}` of the highest-priority open request (*k* = 0, 1, 2); 0 when none |
-| `0x008` | CTRL | `[2:0]` EN by *k* (settable only for a wired slot), `[8]` ABORT (zero-fills the open frame; one that finds the FIFO full is held and enters first, every store behind it refused until then; reads 0), `[9]` TEST, `[10]` CLR (TEST/CLR: `LW_DIAG=1`) |
+| `0x008` | CTRL | `[2:0]` EN by *k* (settable only for a wired slot), `[8]` ABORT (zero-fills the open primary frame, withdraws a save-slot frame not stored in full; one that finds the FIFO full is held and enters first, every store behind it refused until then; reads 0), `[9]` TEST, `[10]` CLR (TEST/CLR: `LW_DIAG=1`) |
 | `0x00C` | STATUS | `[2:0]` `en_sys` by *k*, `[6:4]` the feeder's ack by *k*, `[8]` feeder busy, `[9]` ABORT held, `[10]` `hps_io`'s commit mark; with `LW_DIAG=1` also `frames[31:16]`. Independent samples: no decision may rest on a combination of them |
-| `0x010` | ACCEPT | `{ok[31], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `drops` counts stores refused by a full FIFO |
+| `0x010` | ACCEPT | `{ok[31], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `ok`: every word taken (the primary), the frame committed (a save slot); `drops` counts stores refused by a full FIFO |
 | `0x014` | ID | `0x33434553` ("SEC3") |
 | `0x018`-`0x030` | DROPS `{0, high-water[23:16], drops[15:0]}`, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM | `LW_DIAG=1` only; read 0 otherwise |
 | `0x100 + 0x20k` | RSTAT_S[k] | `{offered[31], answered[30], 0, GET_SDSTAT word[15:0]}` from slot *k*'s latest request record |
 | `0x104 + 0x20k` | LBA_S[k] | slot *k*'s LBA, from its latest request record |
 | `0x108 + 0x20k` | BEGIN_S[k] | write the LBA: opens a READ frame of slot *k*'s frame_words |
 | `0x10C + 0x20k` | WACK_S[k] | write the LBA: answers a save slot's WRITE (*k* = 1, 2) with an ack pulse and no strobes |
-| `0x4000 + 4i` | DATA[i] | word *i* of the open frame, *i* < that frame's frame_words (a store past it is ignored) |
+| `0x4000 + 4i` | DATA[i] | word *i* of the open frame, taken only at *i* = `next_index` (an earlier word's resend, a later word and a store past the frame's length are ignored) |
 
 GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero block count.
 
@@ -427,13 +427,21 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero 
    request is rejected, and the request re-opens with the LBA the core asks for now; so does a BEGIN_S met while
    another frame streams, which zero-fills that frame. A request still raised two `clk_sys` cycles after its
    frame's ack falls is offered again, as `hps_io` shows it to an SPI host.
-4. The host stores DATA[0 .. n-1], then reads ACCEPT.
-5. If ACCEPT's `ok` is clear, the host resends from `next_index`.
+4. The host stores DATA[0 .. n-1] in order, then reads ACCEPT.
+5. If ACCEPT's `ok` is clear, the host resends from `next_index`: a word is taken only there.
 
 **Save slots:**
 - A save slot's READ is the same flow on its BEGIN_S.
 - A save slot's WRITE is answered by its WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`.
-- ABORT, or a core reset mid-frame, zero-fills the rest of the open frame, so the core is never left waiting.
+- **A save slot's READ frame is all or nothing.** None of it reaches the core until its last word is stored; from
+  then it plays out whole, whatever follows. A frame not stored in full is withdrawn by ABORT, by any BEGIN_S or
+  WACK_S, and when the enable falls: its request stands, its answered mark clears, and while EN is set its CAUSE bit
+  rises again, unless the store that withdrew it answers the same slot. So a host that dies mid-frame leaves the
+  core's save block untouched, for the next host or SPI. A save slot's frame must fit the FIFO: 1-510 words.
+- **The primary streams:** each word reaches the core as it is stored. ABORT, or the consumer reset on the primary's
+  mux, zero-fills the rest of its open frame, so the core is never left waiting. A host that dies mid-frame costs
+  the primary's consumer one zero-filled block, so the primary is for data the core can ask for again or lose once,
+  such as an optical sector; anything the core writes back belongs on a save slot.
 
 ### LANE block (kind 5, "LAN1")
 
@@ -633,6 +641,9 @@ slots 2 and 3 (1 KB and 768-byte frames). They cover:
 - every pad op, including stores while `clk_sys` is stopped;
 - the default responder and fixed latency;
 - frames that are lost, resent, out of order, aborted, rejected or reset mid-frame;
+- a save-slot read cut after every store count by ABORT, by a BEGIN or WACK and by an ID view, and by a host that
+  falls silent: the core's buffer untouched with the request standing (and then served over SPI), or the frame
+  whole; one whose BEGIN is taken after its EN fell is rejected whole;
 - SECTOR requests dropped and raised again one `clk_sys` cycle later, held through their frame, and changed or
   rejected in every phase of a record's launch: each seen, answered and served once, and no slot left hidden;
 - a save slot's read and write request shown by GET_SDSTAT and served over SPI with the EN store landing before,

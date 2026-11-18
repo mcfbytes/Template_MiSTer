@@ -816,10 +816,11 @@ function [511:0] pure_win;
 endfunction
 function [511:0] pure_sec;
 `ifdef MISTER_LW_SECTOR_SLOT
-	pure_sec = {191'd0, win.sec.sector.cause, win.sec.sector.rings, win.sec.sector.ans, win.sec.sector.btag,
+	pure_sec = {169'd0, win.sec.sector.cause, win.sec.sector.rings, win.sec.sector.ans, win.sec.sector.btag,
 	           win.sec.sector.rq_off0, win.sec.sector.rq_rd0, win.sec.sector.rq_lba, win.sec.sector.rq_xoff,
 	           win.sec.sector.rq_xrd,
-	           win.sec.sector.rq_xwr, win.sec.sector.rq_xlba, win.sec.sector.abort_pend, win.sec.sector.wptr,
+	           win.sec.sector.rq_xwr, win.sec.sector.rq_xlba, win.sec.sector.abort_pend, win.sec.sector.wspec,
+	           win.sec.sector.wcom, win.sec.sector.wvis, win.sec.sector.wsl,
 	           win.sec.sector.exp_w,
 	           win.sec.sector.flen_w, win.sec.sector.fdrops, win.sec.sector.bfail, win.sec.sector.en_lwx,
 	           win.sec.sector.xen_lwx, win.sec.sector.test_lwx, win.sec.sector.frames, win.sec.sector.drops,
@@ -3695,6 +3696,74 @@ task sec_view(input integer sc, input stopped);
 		ena_take; cause_drain(SEC); host_end;
 	end
 endtask
+// The same for slot 1 (T-LS3 with a save slot): a frame not stored in full never reaches the core, and its request
+// is served over SPI after the view; one stored in full and playing at the view plays whole.
+task sec_view_save(input integer sc, input stopped);
+	reg [31:0] v;
+	reg  [6:0] l;
+	reg        ok;
+	integer a0, s0x, t;
+	string  w;
+	begin
+		case (sc)
+			0: w = "idle";
+			1: w = "a request unanswered";
+			2: w = "mid-BEGIN";
+			3: w = "mid-DATA";
+			default: w = "stored in full";
+		endcase
+		w = {w, stopped ? ", clk_sys stopped across it" : ", clk_sys running"};
+		$display("-- SECTOR at an ID view, slot 1: %s", w);
+		l = 7'h48 + {sc[2:0], stopped};
+		for (t = 0; t < 512; t = t + 1) sv1.ram[t] = 16'hBEEF;
+		ena_short;
+		sec_wr(S_CTRL, C_EN1); settle;
+		check({w, ": bound"}, save_dn[9], 1);
+		a0 = sv1.acks; s0x = sv1.strobes;
+		if (sc >= 1) begin sv1.go(0, l); settle; cause_drain(SEC); end
+		if (sc >= 2) sec_wr(S_BEGIN1, l);
+		if (sc == 3) sv_store(l, 0, TB_XFRAME0 / 2);
+		if (stopped) begin @(negedge clk_sys); sys_run = 0; repeat (20) @(negedge clk); end
+		if (sc == 4) begin
+			sv_store(l, 0, TB_XFRAME0);
+			if (!stopped) begin
+				t = 0; while (!save_dn[10] && t < slow(5000)) begin @(negedge clk); t = t + 1; end
+				check({w, ": the frame plays at the ID view"}, save_dn[10], 1);
+			end
+			else repeat (300) @(negedge clk);                   // every entry visible
+		end
+		host_end;
+		ena_rd(v);
+		check({w, ": the ID view ended the enable"}, v[31], 0);
+		if (stopped) begin
+			repeat (400) @(negedge clk);
+			check({w, ": EN cleared on clk_100m while clk_sys is stopped"}, win.sec.sector.xen_lwx, 2'b00);
+			sys_run = 1;
+		end
+		if (sc == 4) begin
+			t = 0; while (sv1.acks == a0 && t < slow(8000)) begin @(negedge clk_sys); t = t + 1; end
+			repeat (20) @(negedge clk_sys);
+			if (!stopped || sv1.acks != a0) begin
+				// (stopped: the delay models may let the feeder take the BEGIN before the enable's fall)
+				check({w, ": the frame plays whole, one ack"}, sv1.acks - a0, 1);
+				check({w, ": byte-exact"}, sv1_bad({25'd0, l}), 0);
+				l = l + 7'h10;
+				sv1.go(0, l);                                   // its request ended on the ack: the next one
+			end
+			else check({w, ": its BEGIN not taken before the fall: no ack, no strobe"}, sv1.strobes - s0x, 0);
+		end
+		else begin
+			if (sc == 0) sv1.go(0, l);
+			repeat (slow(1000)) @(negedge clk);
+			check({w, ": no ack, no strobe: nothing of the frame reached the core"},
+			      (sv1.acks - a0) + (sv1.strobes - s0x), 0);
+		end
+		sv1_spi_wait(ok);
+		check({w, ": slot 1 back on SPI, its request seen by hps_io"}, ok, 1);
+		sv1_spi_serve(w, 16'h3100 + 16'h0010 * sc[7:0] + stopped);
+		ena_take; cause_drain(SEC); host_end;
+	end
+endtask
 task sec_view_cases;
 	integer sc;
 	begin
@@ -3702,6 +3771,10 @@ task sec_view_cases;
 		sec_view(1, 1'b1);
 		sec_view(3, 1'b1);
 		sec_view(5, 1'b1);
+		for (sc = 0; sc < 5; sc = sc + 1) sec_view_save(sc, 1'b0);
+		sec_view_save(1, 1'b1);
+		sec_view_save(3, 1'b1);
+		sec_view_save(4, 1'b1);
 	end
 endtask
 `endif
@@ -3936,7 +4009,7 @@ task ls18;
 		host_end;
 		repeat (200) @(negedge clk);
 		check("the ID view with clk_sys stopped: EN cleared, the BEGIN still queued",
-		      {win.sec.sector.en_lwx, win.sec.sector.rptr != win.sec.sector.wptr}, 2'b01);
+		      {win.sec.sector.en_lwx, win.sec.sector.rptr != win.sec.sector.wvis}, 2'b01);
 		sys_run = 1;
 		t = 0; while ((n_dis == d0 || blk_dn[18:17] != 0) && t < slow(5000)) begin @(negedge clk); t = t + 1; end
 		check("the BEGIN discarded unplayed", n_dis - d0, 1);
@@ -4622,7 +4695,8 @@ task sec_rec_cases;
 		sec_wr(S_BEGIN0, 32'h00005500);
 		frame_data(32'h00005500, 0, 100);
 		repeat (slow(3000)) @(negedge clk);                      // the 100 words played; the frame waits for more
-		sec_wr(S_BEGIN1, 32'h00000055); settle;                // slot 1's answer, met mid-stream
+		sec_wr(S_BEGIN1, 32'h00000055);                        // slot 1's answer, stored whole, met mid-stream
+		frame_data(32'h00000055, 0, 256); settle;
 		wait_frame(n0);
 		check_buf("the streaming frame: 100 words, then zeros", 32'h00005500, 100);
 		rd("slot 1's answer rejected: its request re-opens", SEC, 32'h2);
@@ -4638,7 +4712,7 @@ task sec_rec_cases;
 		sv1.go(0, 7'h56); settle; cause_drain(SEC);
 		axi_read(SEC + S_COUNTS, 0, d0, dl, beats);
 		sys_run = 0;
-		for (t = 0; t < 8; t = t + 1) sec_wr(S_BEGIN1, 32'h00000060 + t);
+		for (t = 0; t < 8; t = t + 1) sec_wr(S_WACK1, 32'h00000060 + t);   // WACKs on a read, each whole
 		sys_run = 1; settle;
 		rd("re-opened: slot 1's cause", SEC, 32'h2);
 		rd("REQ shows slot 1", SEC + S_REQ, 32'h800180C9);
@@ -4733,8 +4807,8 @@ task sec_rec_cases;
 		for (t = 0; t < 48; t = t + 1) begin
 			@(negedge clk_sys); sys_run = 0;
 			for (a0 = 0; a0 < 12; a0 = a0 + 1) sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2 | C_ABORT); // twelve idle ABORTs ahead (EN unchanged),
-			for (a0 = 0; a0 < 6; a0 = a0 + 1)                   // then six stale answers for slot 1 ...
-				sec_wr(S_BEGIN1, 32'h00000100 + 8 * t + a0);
+			for (a0 = 0; a0 < 6; a0 = a0 + 1)                   // then six stale answers for slot 1 (WACKs) ...
+				sec_wr(S_WACK1, 32'h00000100 + 8 * t + a0);
 			repeat (20) @(negedge clk);
 			sys_run = 1;
 			repeat (t) @(negedge clk_sys);
@@ -4753,6 +4827,176 @@ task sec_rec_cases;
 		@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
 		cause_drain(SEC);
 		rd("REQ idle after the sweeps", SEC + S_REQ, 32'd0);
+	end
+endtask
+
+// ---- Save-slot frames are all or nothing (T-SEC8): slot 1's read, F words, against every way it can be cut ----
+// Slot 1's buffer against the block spi_poll sends from seed (512 halfwords)
+function integer sv1_spi_bad(input [15:0] seed);
+	integer m;
+	begin
+		sv1_spi_bad = 0;
+		for (m = 0; m < 512; m = m + 1) if (sv1.ram[m] !== seed + m[15:0]) sv1_spi_bad = sv1_spi_bad + 1;
+	end
+endfunction
+// Slot 1's DATA words [from, to) of LBA l, back to back (a save-slot frame is visible only once whole)
+task sv_store(input [31:0] l, input integer from, input integer to);
+	integer m;
+	for (m = from; m < to; m = m + 1) sec_data(m, pat(l, m));
+endtask
+// Slot 1 back on SPI: its en_sys low and its request seen by hps_io
+task sv1_spi_wait(output ok);
+	integer t;
+	begin
+		t = 0; while (save_dn[9] && t < slow(5000)) begin @(negedge clk); t = t + 1; end
+		settle;
+		ok = !save_dn[9] && sd_rd[TB_S1H] === 1'b1;
+	end
+endtask
+// The standing request served over SPI from seed: the GET_SDSTAT shows it, the transfer ends its handshake once and
+// lands byte for byte
+task sv1_spi_serve(input string what, input [15:0] seed);
+	reg [15:0] w;
+	integer d0;
+	begin
+		d0 = sv1.done;
+		spi_poll(1, seed, w);
+		repeat (20) @(negedge clk_sys);
+		check({what, ": the GET_SDSTAT shows slot 1's read"}, w[5:0], (TB_S1H << 2) | 1);
+		check({what, ": the SPI transfer ends the handshake once"}, sv1.done - d0, 1);
+		check({what, ": the SPI transfer delivers the real block"}, sv1_spi_bad(seed), 0);
+	end
+endtask
+
+task sec8_cases;
+	reg [31:0] v, ex, er;
+	reg  [6:0] l;
+	reg        ok;
+	integer c, n, k, a0, s0x, t, nrq, ncs, nreq, nspi, nacc, f0;
+	string  cn;
+	begin
+		$display("-- T-SEC8: a save-slot read cut after every store count by ABORT, by a BEGIN or WACK and by an ID view: the core sees nothing and the request stands; stored in full, it plays whole");
+		sv1.hold = 0;
+		sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2); settle; cause_drain(SEC);
+		for (c = 0; c < 3; c = c + 1) begin
+			cn = c == 0 ? "ABORT" : c == 1 ? "a BEGIN or WACK" : "an ID view";
+			l = 7'h60 + c[6:0];
+			for (k = 0; k < 512; k = k + 1) sv1.ram[k] = 16'hBEEF;
+			sv1.go(0, l); settle; cause_drain(SEC);
+			a0 = sv1.acks; s0x = sv1.strobes;
+			nrq = 0; ncs = 0; nreq = 0; nspi = 0; nacc = 0; f0 = -1;
+			for (n = 0; n <= TB_XFRAME0; n = n + 1) begin
+				sec_wr(S_BEGIN1, l);
+				sv_store(l, 0, n);
+				ex = 32'h2; er = 32'h800180C9;               // after the cut: slot 1's cause, REQ shows it
+				case (c)
+					0: sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2 | C_ABORT);
+					1: case (n % 3)
+						0: sec_wr(S_BEGIN0, 32'h00007777);   // the primary, with no request: rejected
+						1: sec_wr(S_WACK2, 32'h00000077);    // slot 2, with no request: rejected
+						default: begin sec_wr(S_BEGIN1, l); ex = 0; er = 0; end   // slot 1 answered again
+					endcase
+					default: begin
+						host_end;
+						if (n < TB_XFRAME0) begin sv1_spi_wait(ok); if (!ok) nspi = nspi + 1; end
+					end
+				endcase
+				if (n < TB_XFRAME0) begin
+					if (c == 0 && n == TB_XFRAME0 - 1) begin
+						axi_read(SEC + S_ACCEPT, 0, v, dl, beats);
+						if (v[31]) nacc = nacc + 1;
+					end
+					if (c == 2) begin ena_up; sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2); end
+					settle;
+					if (sv1.rd !== 1'b1 || sv1.acks != a0 || sv1.strobes != s0x) begin
+						nrq = nrq + 1; if (f0 < 0) f0 = n; end
+					axi_read(SEC + S_CAUSE, 0, v, dl, beats);
+					if (v !== ex) begin ncs = ncs + 1; if (f0 < 0) f0 = n; end
+					cause_drain(SEC);
+					axi_read(SEC + S_REQ, 0, v, dl, beats);
+					if (v !== er) begin nreq = nreq + 1; if (f0 < 0) f0 = n; end
+				end
+			end
+			if (f0 >= 0) $display("     %s: the first count that failed %0d", cn, f0);
+			check({cn, ": a frame cut at a count below its length reached the core, or its request fell"}, nrq, 0);
+			check({cn, ": the cut left a cause other than slot 1's re-open"}, ncs, 0);
+			check({cn, ": REQ after the cut not slot 1's standing request"}, nreq, 0);
+			if (c == 0) check({cn, ": ACCEPT's ok set after the ABORT withdrew the frame"}, nacc, 0);
+			if (c == 2) check({cn, ": the slot not back on SPI with its request after the view"}, nspi, 0);
+			// stored in full, then the same cut: the frame plays whole
+			t = 0; while (sv1.acks == a0 && t < slow(8000)) begin @(negedge clk_sys); t = t + 1; end
+			repeat (20) @(negedge clk_sys);
+			check({cn, " after the last word: one ack"}, sv1.acks - a0, 1);
+			check({cn, " after the last word: two strobes a word"}, sv1.strobes - s0x, 2 * TB_XFRAME0);
+			check({cn, " after the last word: byte-exact"}, sv1_bad({25'd0, l}), 0);
+			if (c == 2) begin ena_up; sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2); end
+			settle; cause_drain(SEC);
+			rd({cn, ": REQ idle"}, SEC + S_REQ, 32'd0);
+		end
+
+		$display("-- T-SEC8: a host that falls silent mid-frame: the core waits untouched; the next program's ID view returns the slot to SPI, whose transfer delivers the real block");
+		for (k = 0; k < 4; k = k + 1) begin
+			n = (k == 0) ? 0 : (k == 1) ? 1 : (k == 2) ? TB_XFRAME0 / 2 : TB_XFRAME0 - 1;
+			cn = $sformatf("silent after %0d words", n);
+			l = 7'h68 + k[6:0];
+			for (t = 0; t < 512; t = t + 1) sv1.ram[t] = 16'hBEEF;
+			sv1.go(0, l); settle; cause_drain(SEC);
+			a0 = sv1.acks; s0x = sv1.strobes;
+			sec_wr(S_BEGIN1, l); sv_store(l, 0, n);
+			repeat (slow(3000)) @(negedge clk);
+			rdm({cn, ": the feeder idle, slot 1's ack low"}, SEC + S_STATUS, 32'h00000120, 32'h0);
+			rd({cn, ": RSTAT_S[1] offered and answered"}, SEC + S_RSTAT1, 32'hC00080C9);
+			check({cn, ": no ack, no strobe, the request raised"},
+			      (sv1.acks - a0) + (sv1.strobes - s0x) + (sv1.rd !== 1'b1), 0);
+			host_end;
+			sv1_spi_wait(ok);
+			check({cn, ": after the ID view slot 1 is on SPI with its request"}, ok, 1);
+			sv1_spi_serve(cn, 16'h4000 + 16'h0100 * k[7:0]);
+			ena_up; sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2); settle; cause_drain(SEC);
+		end
+
+		$display("-- T-SEC8: a frame whose BEGIN is popped after its EN fell is rejected whole; the request stands for SPI");
+		l = 7'h6C;
+		for (t = 0; t < 512; t = t + 1) sv1.ram[t] = 16'hBEEF;
+		sv1.go(0, l); settle; cause_drain(SEC);
+		a0 = sv1.acks; s0x = sv1.strobes;
+		sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2 | C_CLR);          // the DIAG counts from 0 (the rejects above saturate)
+		sec_wr(S_BEGIN1, l); sv_store(l, 0, TB_XFRAME0 - 1);
+		sec_wr(S_CTRL, C_EN0 | C_EN2);                          // slot 1's EN cleared, its frame one word short
+		sv1_spi_wait(ok);
+		check("EN cleared: slot 1 on SPI before its frame is whole", ok, 1);
+		sec_data(TB_XFRAME0 - 1, pat(l, TB_XFRAME0 - 1));      // the last word commits it
+		rd("ACCEPT ok: every word stored", SEC + S_ACCEPT, 32'h80000000 | TB_XFRAME0);
+		repeat (1500) @(negedge clk_sys);
+		check("the committed frame popped with EN low: no ack, no strobe", (sv1.acks - a0) + (sv1.strobes - s0x), 0);
+		axi_read(SEC + S_COUNTS, 0, v, dl, beats);
+		check("COUNTS: one reject", v[31:24], dg(1));
+		rd("no cause: the request is not offered", SEC + S_CAUSE, 32'd0);
+		sv1_spi_serve("the frame rejected whole", 16'h4800);
+		sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2); settle; cause_drain(SEC);
+
+		$display("-- T-SEC8: in order only: a later word and an earlier word's resend are not taken, and next_index tells");
+		l = 7'h6D;
+		sv1.go(0, l); settle; cause_drain(SEC);
+		a0 = sv1.acks; s0x = sv1.strobes;
+		sec_wr(S_BEGIN1, l); sv_store(l, 0, 10);
+		sec_data(11, pat(l, 11));
+		rd("a later word not taken: next_index 10", SEC + S_ACCEPT, 32'h0000000A);
+		sec_data(TB_XFRAME0 - 1, pat(l, TB_XFRAME0 - 1));
+		rd("the last word out of order commits nothing: next_index 10", SEC + S_ACCEPT, 32'h0000000A);
+		sec_data(4, ~pat(l, 4));
+		rd("an earlier word's resend not taken: next_index 10", SEC + S_ACCEPT, 32'h0000000A);
+		sv_store(l, 10, TB_XFRAME0 - 1);
+		rd("every word but the last: next_index, not ok", SEC + S_ACCEPT, TB_XFRAME0 - 1);
+		repeat (800) @(negedge clk_sys);
+		check("one word short: no ack, no strobe", (sv1.acks - a0) + (sv1.strobes - s0x), 0);
+		sec_data(TB_XFRAME0 - 1, pat(l, TB_XFRAME0 - 1));
+		rd("the last word: ok, no store refused", SEC + S_ACCEPT, 32'h80000000 | TB_XFRAME0);
+		repeat (1500) @(negedge clk_sys);
+		check("in order: one ack", sv1.acks - a0, 1);
+		check("in order: byte-exact", sv1_bad({25'd0, l}), 0);
+		rd("REQ idle after T-SEC8", SEC + S_REQ, 32'd0);
+		check("no ring left after T-SEC8", doorbell, 0);
 	end
 endtask
 
@@ -5270,7 +5514,8 @@ initial begin : arm_w
 	rd("RSTAT_S[1]: offered, a read on hps_io slot 12", SEC + S_RSTAT1, 32'h800080F1);
 	rd("LBA_S[1]: all 32 bits", SEC + S_LBA1, 32'hFEDCBA98);
 	sec_wr(S_BEGIN1, 32'h7EDCBA98);
-	frame_data(32'h7EDCBA98, 0, 16);
+	frame_data(32'h7EDCBA98, 0, 510);
+	repeat (1200) @(negedge clk_sys);                        // its DATA popped behind it
 	settle; settle;
 	rd("a BEGIN_S whose LBA differs in bit 31: rejected, the request re-opened", SEC + S_CAUSE, 32'h00000002);
 	cause_drain(SEC);
@@ -5719,14 +5964,17 @@ initial begin
 	sec_wr(S_BEGIN0, 32'h00001235);
 	frame_data(32'h00001235, 0, 10);
 	sec_data(11, pat(32'h00001235, 11));
+	rd("a later word is not taken: next_index 10", SEC + S_ACCEPT, 32'h0000000A);
 	sec_data(10, pat(32'h00001235, 10));
 	sec_data(10, pat(32'h00001235, 10));
+	sec_data(4, pat(32'h00001235, 4));
+	rd("an earlier word's resend is not taken: next_index 11", SEC + S_ACCEPT, 32'h0000000B);
 	sec_data(11, pat(32'h00001235, 11));
 	frame_data(32'h00001235, 12, 588);
 	rd("ACCEPT ok", SEC + S_ACCEPT, 32'h8000024C);
 	wait_frame(n0);
 	check_buf("frame 0x1235 not shifted", 32'h00001235, 588);
-	rd("COUNTS skipped 2", SEC + S_COUNTS, dg(32'h00020000));
+	rd("COUNTS: the feeder met no word out of order", SEC + S_COUNTS, 32'h00000000);
 
 	$display("-- lost store detected by ACCEPT, resent from first_drop");
 	n0 = cd_frames;
@@ -5774,7 +6022,7 @@ initial begin
 	check_buf("frame 0x1238: 300 words then zeros", 32'h00001238, 300);
 	axi_read(SEC + S_COUNTS, 0, d, dl, beats);
 	check("COUNTS: rejected 0, aborted 1, fills 0", {d[31:24], d[15:0]}, dg(24'h000100));
-	check("COUNTS: skipped saturated (lost-store + resend skips)", d[23:16], dg(8'hFF));
+	check("COUNTS: no word met out of order (the lost store's followers were not taken)", d[23:16], 0);
 	rd("CTRL keeps EN", SEC + S_CTRL, 32'h1);
 
 	$display("-- save-slot SECTOR_RD over SPI overlapping an LW frame");
@@ -5951,9 +6199,12 @@ initial begin
 	rd("REQ hides the answered read", SEC + S_REQ, 32'd0);
 	rd("RSTAT_S[1]: offered and answered", SEC + S_RSTAT1, 32'hC00080C9);
 	frame_data(32'h00000012, 0, 128);
-	rdm("STATUS mid-frame: the feeder busy, slot 1's ack alone", SEC + S_STATUS, 32'h00000170, 32'h00000120);
+	rdm("STATUS, half the frame stored: nothing of it visible, the feeder idle", SEC + S_STATUS, 32'h00000170, 32'h0);
 	frame_data(32'h00000012, 128, 256);
 	rd("ACCEPT ok, 256", SEC + S_ACCEPT, 32'h80000100);
+	repeat (slow(50)) @(negedge clk);
+	rdm("STATUS, the frame stored whole: the feeder busy, slot 1's ack alone", SEC + S_STATUS, 32'h00000170,
+	    32'h00000120);
 	repeat (1500) @(negedge clk_sys);
 	check("slot 1 frame done", sv1.done - n0, 1);
 	check("slot 1 took 512 strobes", sv1.strobes - s0, 512);
@@ -6016,8 +6267,9 @@ initial begin
 	r = sv1.done; s0 = sv1.strobes;
 	sv1.go(0, 7'h21); settle;
 	cause_drain(SEC);
-	sec_wr(S_BEGIN1, 32'h00000099); settle;
-	rd("a stale BEGIN_S re-opens slot 1: its cause", SEC + S_CAUSE, 32'h00000002);
+	sec_wr(S_BEGIN1, 32'h00000099); frame_data(32'h00000099, 0, 256);
+	repeat (1500) @(negedge clk_sys); settle;               // its DATA popped behind it
+	rd("a stale BEGIN_S, stored whole, re-opens slot 1: its cause", SEC + S_CAUSE, 32'h00000002);
 	rd("REQ shows slot 1 again", SEC + S_REQ, 32'h800180C9);
 	cause_drain(SEC);
 	sec_wr(S_WACK1, 32'h00000021); settle;                  // WACK for a READ request
@@ -6034,9 +6286,10 @@ initial begin
 	bad = 0; for (i = 0; i < 256; i = i + 1) if ({sv1.ram[2*i+1], sv1.ram[2*i]} !== pat(32'h21, i)) bad = bad + 1;
 	check("slot 1 buffer after the rejects", bad, 0);
 
-	$display("-- reset mid save-slot frame zero-fills");
-	s0 = sv1.strobes;
+	$display("-- a core reset during a save-slot frame: one not stored in full never reaches the core, one stored in full plays out whole");
+	s0 = sv1.strobes; r = sv1.acks;
 	sv1.go(0, 7'h22); settle;
+	cause_drain(SEC);
 	sec_wr(S_BEGIN1, 32'h00000022);
 	frame_data(32'h00000022, 0, 100);
 	repeat (600) @(negedge clk_sys);
@@ -6044,11 +6297,27 @@ initial begin
 	repeat (4) @(negedge clk_sys);
 	cd_reset = 0;
 	repeat (1500) @(negedge clk_sys);
-	check("the fill completed 512 strobes", sv1.strobes - s0, 512);
-	bad = 0; for (i = 0; i < 256; i = i + 1) if ({sv1.ram[2*i+1], sv1.ram[2*i]} !== ((i < 100) ? pat(32'h22, i) : 32'd0)) bad = bad + 1;
-	check("slot 1: 100 words then zeros", bad, 0);
+	check("100 words stored, the reset: no ack, no strobe", (sv1.acks - r) + (sv1.strobes - s0), 0);
+	frame_data(32'h00000022, 100, 256);                     // the host stores the rest: the request is gone
+	repeat (1500) @(negedge clk_sys);
+	check("the frame committed after the request fell: rejected whole, no ack, no strobe",
+	      (sv1.acks - r) + (sv1.strobes - s0), 0);
+	rd("no request: nothing re-opens", SEC + S_CAUSE, 32'd0);
+	sv1.go(0, 7'h23); settle;
+	cause_drain(SEC);
+	sec_wr(S_BEGIN1, 32'h00000023);
+	frame_data(32'h00000023, 0, 256);
+	repeat (300) @(negedge clk_sys);
+	check("stored in full, the frame plays", sv1.acks - r == 0 && sv1.strobes - s0 > 0, 1);
+	@(negedge clk_sys) cd_reset = 1;
+	repeat (4) @(negedge clk_sys);
+	cd_reset = 0;
+	repeat (1500) @(negedge clk_sys);
+	check("the reset mid-play: the frame's 512 strobes", sv1.strobes - s0, 512);
+	check("the reset mid-play: one ack", sv1.acks - r, 1);
+	check("slot 1: byte-exact, never zero-filled", sv1_bad(32'h23), 0);
 	axi_read(SEC + S_STATUS, 0, d, dl, beats);
-	check("STATUS idle after the save-slot fill", {d[8], d[6:4]}, 4'd0);
+	check("STATUS idle after the save-slot frame", {d[8], d[6:4]}, 4'd0);
 
 	$display("-- core reset during a save slot load: the stale BEGIN_S is rejected, the request re-opens");
 	r = sv1.done; s0 = sv1.strobes;
@@ -6061,7 +6330,7 @@ initial begin
 	cd_reset = 0;
 	sv1.go(0, 7'h00); settle;                              // ... the load restarts at LBA 0
 	cause_drain(SEC);                                    // the restart's ring, drained early
-	sec_wr(S_BEGIN1, 32'h00000030); settle;                // the stale answer
+	sec_wr(S_BEGIN1, 32'h00000030); frame_data(32'h00000030, 0, 256); settle;   // the stale answer
 	check("the reject re-rings the doorbell", doorbell, 1);
 	rd("REQ shows slot 1 again", SEC + S_REQ, 32'h800180C9);
 	rd("LBA_S[1] 0", SEC + S_LBA1, 32'h00000000);
@@ -6082,9 +6351,9 @@ initial begin
 	cause_drain(SEC);
 	sec_wr(S_BEGIN0, 32'h00004000);
 	frame_data(32'h00004000, 0, 588);                       // the feeder is still streaming it ...
-	sec_wr(S_BEGIN1, 32'h00000077);                         // ... when both save-slot answers queue
-	sec_wr(S_BEGIN1, 32'h00000031);
-	wait_frame(n0);                                         // (the save slot data after: FIFO depth 512)
+	sec_wr(S_WACK1, 32'h00000031);                          // ... when both save-slot answers queue: a WACK on a
+	sec_wr(S_BEGIN1, 32'h00000031);                         // read (rejected), then the BEGIN_S
+	wait_frame(n0);                                         // (its data after: FIFO depth 512)
 	frame_data(32'h00000031, 0, 256);
 	repeat (1500) @(negedge clk_sys);
 	check("slot 1 frame at 0x31", sv1.done - r, 1);
@@ -6101,7 +6370,8 @@ initial begin
 	@(negedge clk_sys) sv1.lba = 7'h41;                     // rd never fell
 	settle;
 	rd("LBA_S[1] still the latched 0x40", SEC + S_LBA1, 32'h00000040);
-	sec_wr(S_BEGIN1, 32'h00000040); settle;                 // answers the LBA it was shown
+	sec_wr(S_BEGIN1, 32'h00000040);                         // answers the LBA it was shown, whole
+	frame_data(32'h00000040, 0, 256); settle;
 	check("the moved LBA's answer re-rings", doorbell, 1);
 	rd("REQ shows slot 1 again", SEC + S_REQ, 32'h800180C9);
 	rd("LBA_S[1] re-latched 0x41", SEC + S_LBA1, 32'h00000041);
@@ -6122,7 +6392,8 @@ initial begin
 	cd_request(32'h00006000); settle;
 	cause_drain(SEC);
 	sys_run = 0;                                            // every answer queues before the feeder runs
-	sec_wr(S_BEGIN1, 32'h00000071);                         // slot 1, the wrong LBA: rejected first
+	sec_wr(S_BEGIN1, 32'h00000071);                         // slot 1, the wrong LBA, stored whole: rejected first
+	frame_data(32'h00000071, 0, 256);
 	sec_wr(S_BEGIN2, 32'h00000010);                         // slot 2, right: its frame holds the feeder
 	frame_data(32'h00000010, 0, TB_XFRAME1);
 	sec_wr(S_BEGIN0, 32'h00006000);                         // the CD, right, behind slot 2
@@ -6146,9 +6417,9 @@ initial begin
 	sv1.go(0, 7'h24);
 	sv2.go(0, 7'h34); settle;
 	cause_drain(SEC);
-	sys_run = 0;                                            // both stale answers queue back to back
-	sec_wr(S_BEGIN1, 32'h00000025);
-	sec_wr(S_BEGIN2, 32'h00000035);
+	sys_run = 0;                                            // both stale answers queue back to back: WACKs on
+	sec_wr(S_WACK1, 32'h00000024);                          // read requests
+	sec_wr(S_WACK2, 32'h00000034);
 	sys_run = 1; settle;
 	rd("REQ shows slot 1 re-opened", SEC + S_REQ, 32'h800180C9);
 	cause_drain(SEC);
@@ -6170,6 +6441,7 @@ initial begin
 	rd("REQ idle after both re-opened", SEC + S_REQ, 32'd0);
 
 	sec_rec_cases;
+	sec8_cases;
 	sec10_cases;
 
 	$display("-- save slot EN off: back to hps_io, no doorbell");

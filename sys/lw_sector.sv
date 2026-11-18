@@ -48,6 +48,16 @@
 // read 0, so an answer must echo them as 0 (LBA_S shows the LBA so). An answer
 // it cannot serve (EN, direction or LBA not the live request's), and a BEGIN met while a frame streams (which
 // zero-fills that frame), is rejected through its slot's record and dropped with the DATA behind it.
+// A DATA store is taken only at ACCEPT's next_index: an earlier word's resend and a later word are ignored, so the
+// FIFO holds every frame's words in order. A primary frame streams: each entry is visible to clk_sys as it is
+// stored. A save slot's frame is all or nothing: its BEGIN_S and words are written past the committed pointer
+// (wcom), the store of its last word commits the whole frame, and until then none of it is visible, so the core
+// never sees part of a save block. An uncommitted frame is withdrawn by ABORT (which then enters nothing), by any
+// BEGIN or WACK and at the enable's fall: its request stands, its answered mark clears, and, unless the store that
+// withdrew it answers the same slot, its CAUSE bit rises again while its EN is set and its record shows it offered
+// (not at the fall). The visible pointer (wvis) steps one entry per cycle toward wcom, and its Gray code crosses.
+// A committed frame plays out whole: nothing aborts it, the consumer reset included (that zero-fills the primary's
+// frame alone).
 // The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset)
 // reaches the feeder through the block's enable link alone (lw_fence, lw_cdc.sv): stores reach this block only
 // while the link is open, which is after the feeder has seen the enable.
@@ -59,14 +69,15 @@
 // has been launched toward clk_sys, so each slot's mux returns to SPI once the feeder is off it and its SPI ack is
 // low, and a frame whose every word was stored still completes with its data. A frame in flight that waits for
 // data is zero-filled from its next word once the FIFO has been empty for two cycles with the enable level low
-// (any slot), or with the primary's EN low (the primary), so the core's ack completes. While the level is low and
+// (any slot; a save slot's only after a clock upset, its frame being whole in the FIFO), or with the primary's EN
+// low (the primary), so the core's ack completes. While the level is low and
 // the feeder is idle it pops and discards a queued entry in every cycle; an answer among them goes with its DATA,
 // and its request stands for SPI. At a taken ENABLE the cause, every answered mark and every offered record are
 // cleared: the links are at rest, so nothing is queued or in flight.
 // An ABORT store that finds the FIFO full is held and enters in the first cycle with room; until then every other
 // store is refused as by a full FIFO. The enable's fall drops it.
-// Crossings: the FIFO's Gray pointers, the control bits (en, test, xen), the feeder's status levels and DIAG toggles
-// (sys_lwx), each through lw_sync; the records through lw_xfer (lw_cdc.sv).
+// Crossings: the FIFO's Gray pointers (wvis's and the read pointer's), the control bits (en, test, xen), the
+// feeder's status levels and DIAG toggles (sys_lwx), each through lw_sync; the records through lw_xfer (lw_cdc.sv).
 // DIAG: each done event and the SUM of the last data frame cross together in one lw_xfer word, {done count, SUM},
 // so FRAMES, TSTAMP_DONE and SUM move on the same clk_100m edge. Events that come while a word is in flight
 // coalesce into the next word: FRAMES adds them all, SUM shows the latest data frame's.
@@ -137,7 +148,10 @@ localparam DEPTH = 1 << AW;
 
 (* ramstyle = "M10K" *) reg [45:0] fram [0:DEPTH-1];   // {type[1:0], index[11:0], data[31:0]}
 
-reg  [AW:0] wptr = 0;
+reg  [AW:0] wspec = 0;              // the next entry
+reg  [AW:0] wcom  = 0;              // past the last committed entry
+reg  [AW:0] wvis  = 0;              // steps one entry per cycle toward wcom: its Gray code moves one bit
+reg   [1:0] wsl   = 0;              // the slot of the frame being stored
 reg  [AW:0] rptr = 0;
 (* preserve *) reg [AW:0] sector_w_lwgray = 0;   // clk_100m
 (* preserve *) reg [AW:0] sector_r_lwgray = 0;   // clk_sys
@@ -151,8 +165,6 @@ function automatic [AW:0] g2b(input [AW:0] g);
 	end
 endfunction
 
-wire [AW:0] used  = wptr - g2b(rg_s);
-wire        ffull = used[AW];
 
 /////////////////////////////// clk_100m //////////////////////////////////
 
@@ -166,7 +178,7 @@ reg   [3:0] gc = 4'd15;         // clk_sys cycles since the last strobe or ack r
 reg  [31:0] wv = 0;             // the word being strobed
 reg  [45:0] q;
 reg  [19:0] fsum = 0;
-reg   [3:0] evt = 0;                // {reset_fill, abort, skip, reject} toggles (DIAG)
+reg   [3:0] evt = 0;                // {reset_fill, abort, 0, reject} toggles (DIAG); bit 1 is never toggled
 reg   [3:0] dcnt = 0, dsent = 0;    // DIAG: done events counted, and the count last launched to clk_100m
 reg  [19:0] dsum = 0;               // DIAG: the last data frame's SUM
 
@@ -204,7 +216,7 @@ wire  [3:0] dn_add = dn_v ? dn_q[23:20] - dseen : 4'd0;
 lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(sector_r_lwgray), .q(rg_s));
 lw_sync #(.W(12)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
 wire  [7:0] st_s = sb1[7:0];            // {sd_commit, busy, ack[2:0], en_sys[2:0]}, each by slot index k
-wire  [3:0] ev   = sb1[11:8] ^ sb2[11:8]; // {reset_fill, abort, skip, reject}
+wire  [3:0] ev   = sb1[11:8] ^ sb2[11:8]; // {reset_fill, abort, 0, reject}
 
 // clk_sys -> clk_100m: the request records, {slot[41:40], offered, new, rej, tag[36:34], wr, rd, lba[31:0]}
 wire [41:0] rc_q;
@@ -218,6 +230,7 @@ wire  [2:0] rc_tag = rc_q[36:34];
 wire        rreg  = rsel & ~raddr[14] & ~|raddr[13:9];
 wire        wreg  = wsel & write & ~waddr[14] & ~|waddr[13:9] & &be;
 wire        wdat  = wsel & write &  waddr[14] & &be & ({1'b0, waddr[13:2]} < flen_w);   // the OPEN frame's length
+wire        wnext = wdat & ({1'b0, waddr[13:2]} == exp_w);   // its next word: the only one taken
 wire  [6:0] widx  = waddr[8:2];
 wire  [2:0] wk    = waddr[7:5];                   // the slot index of a per-slot word
 wire  [2:0] wj    = waddr[4:2];
@@ -231,13 +244,25 @@ wire        b_x1    = (w_bs | w_wk) && wk == 3'd2;
 wire        w_begin = b_p | b_x0 | b_x1;
 wire  [1:0] bsel    = wk[1:0];
 wire [12:0] blen    = w_wk ? 13'd0 : b_p ? FRAME : b_x0 ? XFRAME0 : XFRAME1;
+wire        bx      = w_bs & (b_x0 | b_x1);             // a save slot's BEGIN_S: its frame is uncommitted
 wire        w_abort = w_ctrl & wdata[8];
 wire        clr     = w_ctrl & wdata[10];
-// a store's entry is taken only with room and no ABORT held; the held ABORT takes the first cycle with room
+// An uncommitted save-slot frame, and its withdrawal by an ABORT, BEGIN or WACK store: the store's entry, if any, is
+// written at wcom
+wire        unc   = wspec != wcom;
+wire        wdr   = unc & (w_begin | w_abort);
+wire [AW:0] wb    = wdr ? wcom : wspec;
+wire [AW:0] used  = wb - g2b(rg_s);
+wire        ffull = used[AW];
+// a store's entry is taken only with room and no ABORT held; the held ABORT takes the first cycle with room; an
+// ABORT that withdraws a frame enters nothing
 wire        a_go  = abort_pend & ~ffull;
-wire        p_ok  = (w_begin | w_abort | wdat) & ~ffull & ~abort_pend;
-wire        p_bad = (w_begin | wdat) & ~p_ok;           // a store refused: dropped and counted
+wire        p_ok  = (w_begin | (w_abort & ~unc) | wnext) & ~ffull & ~abort_pend;
+wire        p_bad = (w_begin | wdat) & (ffull | abort_pend);   // a store refused by a full FIFO: dropped and counted
 wire        fwe   = a_go | p_ok;
+// the entry is committed at once, except a save slot's BEGIN_S and its words before the last
+wire        cmt   = a_go | (p_ok & ~bx & (~wnext | wsl == 2'd0 | exp_w == flen_w - 13'd1));
+wire  [2:0] wks   = onehot(wsl) & {3{wdr | (unc & ~hen)}};   // the slot whose frame is withdrawn
 
 wire  [2:0] bent  = {b_x1, b_x0, b_p} & {3{p_ok}};
 wire  [8:0] btag1 = {btag[8:6] + 3'd1, btag[5:3] + 3'd1, btag[2:0] + 3'd1};
@@ -246,7 +271,9 @@ wire  [2:0] etag  = (bsel == 2'd1) ? btag1[5:3] : (bsel == 2'd2) ? btag1[8:6] : 
 wire  [2:0] latest = {rc_tag == btag[8:6], rc_tag == btag[5:3], rc_tag == btag[2:0]};
 wire  [2:0] reopen = rc_sel & {3{rc_rej}} & latest & ~bent;
 wire  [2:0] unans  = (rc_sel & {3{rc_new | ~rc_off}}) | reopen;
-wire  [2:0] raise  = rc_sel & {3{rc_off}} & ({3{rc_new}} | reopen);
+// a withdrawn frame's request is open again, unless the store that withdrew it answers that slot
+wire  [2:0] wraise = wks & {3{wdr}} & {xen_lwx, en_lwx} & {rq_xoff, rq_off0} & ~bent;
+wire  [2:0] raise  = (rc_sel & {3{rc_off}} & ({3{rc_new}} | reopen)) | wraise;
 wire        fire   = |raise;
 wire        w_en  = wdata[0] & wired[0];                                     // the EN bits a store sets
 wire  [1:0] w_xen = wdata[2:1] & wired[2:1];
@@ -264,7 +291,7 @@ wire [15:0] xst0   = {1'b1, 6'd0, BLKSZ, XSLOT0, rq_xwr[0], rq_xrd[0]};
 wire [15:0] xst1   = {1'b1, 6'd0, BLKSZ, XSLOT1, rq_xwr[1], rq_xrd[1]};
 wire [15:0] pst    = !any ? 16'd0 : pick == 2'd0 ? pst0 : pick == 2'd1 ? xst0 : xst1;
 
-always @(posedge clk) if (fwe) fram[wptr[AW-1:0]] <= entry;
+always @(posedge clk) if (fwe) fram[wb[AW-1:0]] <= entry;
 
 function automatic [7:0] sat8(input [7:0] v, input inc);
 	sat8 = (inc && ~&v) ? v + 8'd1 : v;
@@ -284,9 +311,9 @@ always @(posedge clk) begin
 	rings <= rings + fire;
 	cause <= raise | (cause & ~clr_c & ~{3{take}});
 	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends with a record that shows the request new or
-	// withdrawn, or rejects that latest answer, and at an ENABLE (one discarded without the enable leaves its
-	// request standing)
-	ans  <= bent | (ans & ~unans & ~{3{take}});
+	// withdrawn, or rejects that latest answer, with the slot's uncommitted frame, and at an ENABLE (one discarded
+	// without the enable leaves its request standing)
+	ans  <= bent | (ans & ~unans & ~wks & ~{3{take}});
 	btag <= {bent[2] ? btag1[8:6] : btag[8:6], bent[1] ? btag1[5:3] : btag[5:3], bent[0] ? btag1[2:0] : btag[2:0]};
 	if (DIAG && fire) tsreq <= cycles;
 
@@ -309,23 +336,34 @@ always @(posedge clk) begin
 
 	// a full FIFO holds an ABORT (until the enable falls) and drops and counts any other store
 	if (!hen) abort_pend <= 0;
-	else abort_pend <= (abort_pend & ~a_go) | (w_abort & ffull & ~abort_pend);
+	else abort_pend <= (abort_pend & ~a_go) | (w_abort & ~unc & ffull & ~abort_pend);
 
 	// store path: never back-pressured
 	if (p_bad) begin
 		if (DIAG && ~&drops) drops <= drops + 16'd1;
 		if (~&fdrops) fdrops <= fdrops + 12'd1;
 	end
-	if (fwe) wptr <= wptr + 1'd1;
-	sector_w_lwgray <= wptr ^ (wptr >> 1);
+	if (fwe) begin
+		wspec <= wb + 1'd1;
+		if (cmt) wcom <= wb + 1'd1;
+	end
+	else if (wdr || (unc && !hen)) wspec <= wcom;   // withdrawn: nothing of it was ever visible
+	if (wvis != wcom) wvis <= wvis + 1'd1;
+	sector_w_lwgray <= wvis ^ (wvis >> 1);
 
+	// the frame being stored; a BEGIN refused opens none, and a withdrawn frame takes no more words
 	if (w_begin) begin
 		exp_w  <= 0;
-		flen_w <= blen;
+		flen_w <= p_ok ? blen : 13'd0;
+		wsl    <= bsel;
 		bfail  <= ~p_ok;
 		fdrops <= p_ok ? 12'd0 : 12'd1;
 	end
-	else if (wdat && p_ok && {1'b0, waddr[13:2]} == exp_w) exp_w <= exp_w + 13'd1;
+	else if (wdr || (unc && !hen)) begin
+		flen_w <= 0;
+		bfail  <= 1;
+	end
+	else if (wnext && p_ok) exp_w <= exp_w + 13'd1;
 
 	if (DIAG) begin
 		frames <= (clr ? 16'd0 : frames) + {12'd0, dn_add};   // a done arriving with CLR counts after it
@@ -346,9 +384,9 @@ end
 
 assign doorbell = |cause;
 
-// The enable link. Drain: no ABORT held, every stored word visible to clk_sys.
+// The enable link. Drain: no ABORT held, no uncommitted frame, every committed entry visible to clk_sys.
 lw_fence fence (.clk(clk), .hen(hen), .take(take),
-                .drain(!abort_pend && sector_w_lwgray == (wptr ^ (wptr >> 1))), .fin(1'b1),
+                .drain(!abort_pend && !unc && wvis == wcom && sector_w_lwgray == (wvis ^ (wvis >> 1))), .fin(1'b1),
                 .open(f_open), .owned(f_owned), .idle(f_idle), .lvl(f_lvl), .fall(f_fall),
                 .clk_sys(clk_sys), .rest(rest), .hen_s(hen_s));
 
@@ -424,8 +462,8 @@ function automatic [13:0] strobe_adr(input [1:0] j);
 endfunction
 reg  [1:0] mt   = 0;                // cycles the FIFO has read empty with EN low, saturating at 2
 reg  [1:0] ml   = 0;                // cycles the FIFO has read empty with the enable level low, saturating at 2
-// the frame in flight will get no more data: the primary's EN fell, or the enable level did (any slot); fill it
-// from its next word
+// the frame in flight will get no more data: the primary's EN fell, or the enable level did (any slot: a save
+// slot's frame is whole in the FIFO, so this meets one only after a clock upset); fill it from its next word
 wire       cut  = fs == F_STREAM && rempty && !qv && !em &&
                   ((fsel == 2'd0 && !en_s && mt == 2'd2) || (!hen_s && ml == 2'd2));
 
@@ -570,7 +608,7 @@ always @(posedge clk_sys) begin
 				fs     <= F_FILL;
 				evt[2] <= ~evt[2];
 			end
-			else if ({1'b0, qi} == fexp) begin   // the pop waited for the gap
+			else begin                           // in order: the pop waited for the gap
 				o_wr  <= ~tmode;
 				o_dat <= c_wide ? qd[15:0] : {8'd0, qd[7:0]};
 				o_adr <= strobe_adr(2'd0);
@@ -580,7 +618,6 @@ always @(posedge clk_sys) begin
 				gc    <= 4'd1;
 				if (DIAG) fsum <= fsum + qd[31:24] + qd[23:16] + qd[15:8] + qd[7:0];
 			end
-			else evt[1] <= ~evt[1];
 
 		default: ;
 	endcase
@@ -614,15 +651,10 @@ always @(posedge clk_sys) begin
 
 	if (cut) fs <= F_FILL;
 
-	if (c_reset) begin
-		if (fs == F_ACK && fwack) begin
-			fack[fsel] <= 1'b0;
-			fs <= F_IDLE;
-		end
-		else if (fs == F_STREAM || fs == F_ACK) begin
-			fs     <= F_FILL;
-			evt[3] <= ~evt[3];
-		end
+	// the primary consumer's reset zero-fills the primary's frame; a save slot's frame plays out whole
+	if (c_reset && fs == F_STREAM && fsel == 2'd0) begin
+		fs     <= F_FILL;
+		evt[3] <= ~evt[3];
 	end
 end
 
