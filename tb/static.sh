@@ -901,7 +901,8 @@ def lw_lines(path):
         if any(b for b, _ in stack): out.append((n, l))
     return out
 wfiles = [(p, None) for p in lwfiles + [SDC] * os.path.exists(SDC)] + [(p, 'lw') for p in stock + ['sys/emu_ports.vh']]
-wfiles += [('tb/' + x, None) for x in sorted(os.listdir('tb')) if re.search(r'\.(s?v|sh|c|h)$', x)]
+wfiles += [(d + '/' + x, None) for d in ('tb', 'tb/hps') if os.path.isdir(d)
+           for x in sorted(os.listdir(d)) if re.search(r'\.(s?v|sh|c|h)$', x)]
 for p, how in wfiles:
     txt = lw_lines(p) if how else list(enumerate(open(p, errors='replace').read().split('\n'), 1))
     bad = [(n, l) for n, l in txt if RCW.search(l)]
