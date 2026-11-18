@@ -562,11 +562,11 @@ An undeclared save slot's words are 0.
 
 | offset | register | |
 |---|---|---|
-| `0x000` | CAUSE | bit *k*: slot *k*'s request opened or re-opened while its EN is set; a store clears each bit written as 1 |
+| `0x000` | CAUSE | bit *k*: slot *k*'s request opened or re-opened while its EN is set (a refused or withdrawn answer re-opens it); a store clears each bit written as 1 |
 | `0x004` | REQ | `{pending[31], 0, k[17:16], GET_SDSTAT word[15:0]}` of the highest-priority open request (*k* = 0, 1, 2); 0 when none |
 | `0x008` | CTRL | `[2:0]` EN by *k* (settable only for a wired slot), `[8]` ABORT (zero-fills the open primary frame, withdraws a save-slot frame not stored in full; one that finds the FIFO full is held and enters first, every store behind it refused until then; reads 0), `[9]` TEST, `[10]` CLR (TEST/CLR: `LW_DIAG=1`) |
 | `0x00C` | STATUS | `[2:0]` `en_sys` by *k*, `[6:4]` the feeder's ack by *k*, `[8]` feeder busy, `[9]` ABORT held, `[10]` `hps_io`'s commit mark; with `LW_DIAG=1` also `frames[31:16]`. Independent samples: no decision may rest on a combination of them |
-| `0x010` | ACCEPT | `{ok[31], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `ok`: every word taken (the primary), the frame committed (a save slot); `drops` counts stores refused by a full FIFO |
+| `0x010` | ACCEPT | `{ok[31], closed[30], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `ok`: every word taken (the primary), the frame committed (a save slot); `closed`: no frame is open, because the last BEGIN_S or WACK_S was refused (a full FIFO or a held ABORT) or its frame was withdrawn, and DATA is ignored until the next one; `drops` counts stores refused by a full FIFO |
 | `0x014` | ID | `0x33434553` ("SEC3") |
 | `0x018`-`0x030` | DROPS `{0, high-water[23:16], drops[15:0]}`, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM | `LW_DIAG=1` only; read 0 otherwise |
 | `0x100 + 0x20k` | RSTAT_S[k] | `{offered[31], answered[30], 0, GET_SDSTAT word[15:0]}` from slot *k*'s latest request record |
@@ -587,7 +587,11 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero 
    another frame streams, which zero-fills that frame. A request still raised two `clk_sys` cycles after its
    frame's ack falls is offered again, as `hps_io` shows it to an SPI host.
 4. The host stores DATA[0 .. n-1] in order, then reads ACCEPT.
-5. If ACCEPT's `ok` is clear, the host resends from `next_index`: a word is taken only there.
+5. If ACCEPT's `ok` is clear and `closed` is clear, the host resends from `next_index`: a word is taken only there.
+   If `closed` is set, no frame is open and DATA is ignored: the BEGIN_S (or WACK_S) was refused, by a FIFO still
+   full of earlier frames or by a held ABORT, or its save-slot frame was withdrawn. Its request stands, REQ shows
+   it, and while EN is set its CAUSE bit rises again; the host stores the BEGIN_S again, then every word from 0. A
+   second BEGIN_S over a frame that is open is no retry: met while the primary streams, it zero-fills that frame.
 
 **Save slots:**
 - A save slot's READ is the same flow on its BEGIN_S.

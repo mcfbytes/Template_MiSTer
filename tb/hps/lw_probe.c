@@ -759,7 +759,8 @@ static int evt_after(uint32_t w[4], uint32_t *f)
 	return 0;
 }
 
-/* a primary frame: BEGIN_S[0] with the LBA asked, the words in order, ACCEPT; resent from next_index */
+/* a primary frame: BEGIN_S[0] with the LBA asked, the words in order, ACCEPT; resent from next_index, or, with
+ * ACCEPT's closed bit set (the BEGIN_S refused: no frame open), the BEGIN_S stored again and every word from 0 */
 static int sector_frame(uint32_t lba, uint32_t words)
 {
 	uint32_t i = 0, a = 0, tries;
@@ -768,6 +769,13 @@ static int sector_frame(uint32_t lba, uint32_t words)
 		for (; i < words; i++) bwr(K_SECTOR, SEC_DATA + 4 * i, pattern(lba, i));
 		a = brd(K_SECTOR, SEC_ACCEPT);
 		if (a >> 31) break;
+		if ((a >> 30) & 1u) {
+			say("ACCEPT 0x%08x: closed, the BEGIN_S refused; storing it again", (unsigned)a);
+			sleep_ms(1);
+			bwr(K_SECTOR, SEC_BEGIN(0), lba);
+			i = 0;
+			continue;
+		}
 		i = a & 0x1FFFu;
 		say("ACCEPT 0x%08x: resending from word %u", (unsigned)a, (unsigned)i);
 	}
