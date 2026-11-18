@@ -58,8 +58,8 @@
 #      enable-fall contract promises no queued frame, committed or not: only a frame already playing completes.
 # Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
 #  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
-#      get_keepers name pattern (the Gray loop's expanded per bus) matches a register of an LW module, as a
-#      keeper name <hierarchy>|<register>; the collection lw_x is exactly the registers that feed an lw_sync, and
+#      get_keepers or get_registers name pattern (the Gray loop's expanded per bus, its sources get_registers:
+#      17.0.2 ignores the keeper form there) matches a register of an LW module, as a keeper name <hierarchy>|<register>; the collection lw_x is exactly the registers that feed an lw_sync, and
 #      lw_s0, lw_a, lw_q and lw_src exactly the cells' first stages, asynchronous chain, bundle captures and
 #      hold registers. It prints the source bits into first stages and the bundle bits, per block at its
 #      default parameters (one instance each, every generate branch), for the post-fit pair count to compare.
@@ -950,11 +950,11 @@ check(sdcl, '%s: no such file, or no command in it' % SDC)
 # the collections: name -> patterns; the Gray loop's query is expanded per bus
 COLL, pats = {}, []
 for l in sdcl:
-    for v, q, a in re.findall(r'\bset (\w+) +\[get_keepers -nowarn (\{([^{}]*)\}|"[^"]*")\]', l):
+    for v, q, a in re.findall(r'\bset (\w+) +\[get_(?:keepers|registers) -nowarn (\{([^{}]*)\}|"[^"]*")\]', l):
         ps = a.split() if a else [q[1:-1].replace('${g}', b) for b in GRAYBUS]
         COLL.setdefault(v, []).extend(ps); pats += ps
     n = len(re.findall(r'\bget_(?:keepers|registers|pins|nets|cells)\b', l))
-    check(n == len(re.findall(r'\bset \w+ +\[get_keepers -nowarn (?:\{[^{}]*\}|"[^"]*")\]', l)),
+    check(n == len(re.findall(r'\bset \w+ +\[get_(?:keepers|registers) -nowarn (?:\{[^{}]*\}|"[^"]*")\]', l)),
           '%s: a query this check cannot read: %s' % (SDC, l))
 nbound = 0
 for l in sdcl:
@@ -966,6 +966,10 @@ for l in sdcl:
             for m in (fr, to):
                 if m:
                     check(m.group(1) in COLL, '%s: %s names $%s, which no get_keepers builds' % (SDC, cmd, m.group(1)))
+            if cmd == 'set_max_skew' and fr:
+                check(re.search(r'\bset %s +\[get_registers -nowarn ' % fr.group(1), SDCTXT) is not None,
+                      '%s: set_max_skew source $%s is not a get_registers query (the fallback form)' %
+                      (SDC, fr.group(1)))
 # every register of every LW module as a keeper name; a pattern's * matches across the hierarchy bars too
 KEEP = {('%s|%s:inst|%s' % ('sys_top', n, r)): (n, r) for n, M in mods.items() for r in M['regs']}
 def matched(ps):

@@ -15,9 +15,10 @@ if {[get_collection_size $lw_s0] > 0} {
 		set_false_path -from $lw_src -to $lw_q
 		set_net_delay -max 8.0 -from $lw_src -to $lw_q
 	}
-	# Gray buses: every bit of one step inside 5 ns (0.8 of a 150 MHz period), bus by bus
+	# Gray buses: every bit of one step inside 5 ns (0.8 of a 150 MHz period), bus by bus. The sources are
+	# registers (get_registers, the net-delay fallback's query): 17.0.2 gave warning 332182 (no path) on the keeper form
 	foreach g [list sector_w sector_r lane_w lane_r lane_rw lane_rr osd_w osd_r] {
-		set src [get_keepers -nowarn "*|${g}_lwgray*"]
+		set src [get_registers -nowarn "*|${g}_lwgray*"]
 		if {[get_collection_size $src] > 0} { set_max_skew -from $src -to $lw_s0 5.0 }
 	}
 }
