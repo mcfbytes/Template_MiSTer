@@ -72,18 +72,24 @@ module lw_sys_window #(
 	parameter        EVT_EN    = 0,          // L2, MISTER_LW_EVT
 	parameter        OSD_EN    = 0,          // MISTER_LW_OSD
 	// SECTOR block, as the core declares it (sys_top.v maps the MISTER_LW_SECTOR_* / MISTER_LW_SAVE* macros).
+	// The geometry is checked here (an unservable one stops the build, naming lw_sector_unservable_geometry).
 	parameter        SEC_EN    = 0,          // 1 = build the SECTOR block
-	parameter  [7:0] SEC_SLOT  = 8'd1,       // the hps_io slot the primary frames feed (sd_rd[SEC_SLOT])
-	parameter  [9:0] SEC_FRAME = 10'd128,    // 32-bit DATA words per primary frame (128 = one 512-byte block)
+	parameter [31:0] SEC_SLOT  = 32'd1,      // the hps_io slot the primary frames feed (sd_rd[SEC_SLOT]), 0-15
+	parameter [31:0] SEC_FRAME = 32'd128,    // 32-bit DATA words per primary frame, 1-4096 (128 = one 512-byte block)
+	parameter [31:0] SEC_GAP   = 32'd2,      // clk_sys cycles between write strobes, and from the ack to the first, 2-15
 	parameter  [2:0] BLKSZ     = 3'd2,       // the core's hps_io BLKSZ, reported in the GET_SDSTAT word
-	parameter  [3:0] SAVE0_SLOT  = 4'hE,     // save slot 0 (slot index 1): hps_io slot (0-3), DDR image base and
-	parameter [31:0] SAVE0_WSRC  = 32'd0,    //   extent; a save slot with wsrc 0 is not declared
-	parameter [31:0] SAVE0_EXT   = 32'd0,
-	parameter  [9:0] SAVE0_FRAME = 10'd256,  //   32-bit DATA words per frame (256 = one 1 KB block)
-	parameter  [3:0] SAVE1_SLOT  = 4'hF,     // save slot 1 (slot index 2), likewise
+	parameter        SAVE0_EN    = 0,        // 1 = save slot 0 (slot index 1) is declared: its hps_io slot (0-15),
+	parameter [31:0] SAVE0_SLOT  = 32'hE,    //   DDR image base (required) and extent, frame (32-bit words, 1 to
+	parameter [31:0] SAVE0_WSRC  = 32'd0,    //   the FIFO's entries - 2) and LBA bits kept, crossed and compared
+	parameter [31:0] SAVE0_EXT   = 32'd0,    //   (1-32)
+	parameter [31:0] SAVE0_FRAME = 32'd256,
+	parameter [31:0] SAVE0_LBA_BITS = 32'd32,
+	parameter        SAVE1_EN    = 0,        // save slot 1 (slot index 2), likewise
+	parameter [31:0] SAVE1_SLOT  = 32'hF,
 	parameter [31:0] SAVE1_WSRC  = 32'd0,
 	parameter [31:0] SAVE1_EXT   = 32'd0,
-	parameter  [9:0] SAVE1_FRAME = 10'd256,
+	parameter [31:0] SAVE1_FRAME = 32'd256,
+	parameter [31:0] SAVE1_LBA_BITS = 32'd32,
 	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and list its entry.
 	parameter        LANE_EN   = 0
 )
@@ -108,6 +114,7 @@ module lw_sys_window #(
 
 	input wire         clk_sys,
 	inout wire [383:46] hps_lw,      // HPS_BUS[383:46] on clk_sys, the bit map of docs/LW_BRIDGE.md
+	input wire         io_wide,      // HPS_BUS[32], hps_io's io_wide: a constant, 1 = 16-bit strobes
 
 	input wire         lane_busy,    // clk_sys: any of the link's own selects, or its ID view (GPO[31] low)
 	input wire         lane_wait,    // clk_sys: io_wait | vs_wait
@@ -177,11 +184,20 @@ localparam [31:0] LANE_VER  = 32'h00010001;
 localparam  [7:0] LANE_LINE = 8'd0;
 
 localparam        SEC_AW    = 9;          // FIFO depth 512
-localparam  [7:0] SEC_GAP   = 8'd2;       // clk_sys cycles between write strobes
 localparam  [7:0] SEC_RD    = 8'h01;      // a descriptor's flags: RD, BEGIN_S frames; WR, WACK_S with the bytes
 localparam  [7:0] SEC_RDWR  = 8'h03;      //   from the DDR image
-localparam        SAVE_DECL0 = SEC_EN && SAVE0_WSRC != 0;
-localparam        SAVE_DECL1 = SEC_EN && SAVE1_WSRC != 0;
+localparam        SAVE_DECL0 = SEC_EN && SAVE0_EN;
+localparam        SAVE_DECL1 = SEC_EN && SAVE1_EN;
+// An unservable SECTOR geometry: a primary frame outside 1-4096 words, a save slot's outside 1 to the FIFO's entries
+// - 2, an LBA width outside 1-32, a gap outside 2-15, an hps_io slot above 15, two slots on one hps_io slot, or a
+// save slot without an image base.
+localparam        SAVE_BAD0 = SAVE0_FRAME == 0 || SAVE0_FRAME > (1 << SEC_AW) - 2 || SAVE0_LBA_BITS == 0 ||
+                              SAVE0_LBA_BITS > 32 || SAVE0_SLOT > 15 || SAVE0_SLOT == SEC_SLOT || SAVE0_WSRC == 0;
+localparam        SAVE_BAD1 = SAVE1_FRAME == 0 || SAVE1_FRAME > (1 << SEC_AW) - 2 || SAVE1_LBA_BITS == 0 ||
+                              SAVE1_LBA_BITS > 32 || SAVE1_SLOT > 15 || SAVE1_SLOT == SEC_SLOT || SAVE1_WSRC == 0;
+localparam        SEC_BAD   = SEC_EN && (SEC_FRAME == 0 || SEC_FRAME > 4096 || SEC_GAP < 2 || SEC_GAP > 15 ||
+                              SEC_SLOT > 15 || (SAVE_DECL0 && SAVE_BAD0) || (SAVE_DECL1 && SAVE_BAD1) ||
+                              (SAVE_DECL0 && SAVE_DECL1 && SAVE0_SLOT == SAVE1_SLOT));
 `ifdef MENU_CORE
 localparam [15:0] OSD_ROWS  = 16'd20;     // the image's rows of 256 bytes, header rows 16-19 included
 `else
@@ -214,6 +230,7 @@ wire        pres_pad = hps_lw[375];                     // hps_io's LW write arm
 wire        pres_evt = hps_lw[376];                     // hps_io's event exports
 wire  [2:0] pres_sec = hps_lw[379:377];                 // {save slot 1's mux, save slot 0's, the primary's}
 wire        pres_cmt = hps_lw[381];                     // hps_io's commit mark
+wire        wide_c   = io_wide;                         // hps_io's io_wide, a constant (K1, and the feeder's strobes)
 
 // What is listed: a tier built with its piece present. A SECTOR slot is wired when it is declared and its mux and
 // hps_io's commit mark are present; the block is listed with one wired slot.
@@ -364,25 +381,25 @@ function automatic [31:0] pad_kw(input [4:0] k);
 	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : (k == 5'd8) ? {16'd16, 16'd24} : 32'd0;
 endfunction
 
-// SECTOR: K0 {FIFO entries, 0, strobe gap}, K1 {BLKSZ[10:8], wide[0]} (16-bit strobes), K2 the descriptors that
+// SECTOR: K0 {FIFO entries, 0, strobe gap}, K1 {BLKSZ[10:8], wide[0]} (hps_io's io_wide), K2 the descriptors that
 // follow, then four words per slot index k from K4 + 4k: {flags, hps_io slot, frame words}, LBA bits, DDR image
 // base and size. A slot's flags read 0 unless it is wired (wd, by k); an undeclared slot's words read 0.
-function automatic [31:0] sec_desc(input [7:0] flags, input [3:0] slot, input [9:0] frame);
-	sec_desc = {flags, 4'd0, slot, 3'd0, 3'd0, frame};
+function automatic [31:0] sec_desc(input [7:0] flags, input [3:0] slot, input [12:0] frame);
+	sec_desc = {flags, 4'd0, slot, 3'd0, frame};
 endfunction
 function automatic [31:0] sec_kw(input [4:0] k, input [2:0] wd);
 	case (k)
-		5'd0:    sec_kw = {16'd1 << SEC_AW, 8'd0, SEC_GAP};
-		5'd1:    sec_kw = {21'd0, BLKSZ, 7'd0, 1'b1};
+		5'd0:    sec_kw = {16'd1 << SEC_AW, 8'd0, SEC_GAP[7:0]};
+		5'd1:    sec_kw = {21'd0, BLKSZ, 7'd0, wide_c};
 		5'd2:    sec_kw = SAVE_DECL1 ? 32'd3 : SAVE_DECL0 ? 32'd2 : 32'd1;
-		5'd4:    sec_kw = sec_desc(wd[0] ? SEC_RD : 8'd0, SEC_SLOT[3:0], SEC_FRAME);
+		5'd4:    sec_kw = sec_desc(wd[0] ? SEC_RD : 8'd0, SEC_SLOT[3:0], SEC_FRAME[12:0]);
 		5'd5:    sec_kw = 32'd32;
-		5'd8:    sec_kw = SAVE_DECL0 ? sec_desc(wd[1] ? SEC_RDWR : 8'd0, SAVE0_SLOT, SAVE0_FRAME) : 32'd0;
-		5'd9:    sec_kw = SAVE_DECL0 ? 32'd7 : 32'd0;
+		5'd8:    sec_kw = SAVE_DECL0 ? sec_desc(wd[1] ? SEC_RDWR : 8'd0, SAVE0_SLOT[3:0], SAVE0_FRAME[12:0]) : 32'd0;
+		5'd9:    sec_kw = SAVE_DECL0 ? SAVE0_LBA_BITS : 32'd0;
 		5'd10:   sec_kw = SAVE_DECL0 ? SAVE0_WSRC : 32'd0;
 		5'd11:   sec_kw = SAVE_DECL0 ? SAVE0_EXT : 32'd0;
-		5'd12:   sec_kw = SAVE_DECL1 ? sec_desc(wd[2] ? SEC_RDWR : 8'd0, SAVE1_SLOT, SAVE1_FRAME) : 32'd0;
-		5'd13:   sec_kw = SAVE_DECL1 ? 32'd7 : 32'd0;
+		5'd12:   sec_kw = SAVE_DECL1 ? sec_desc(wd[2] ? SEC_RDWR : 8'd0, SAVE1_SLOT[3:0], SAVE1_FRAME[12:0]) : 32'd0;
+		5'd13:   sec_kw = SAVE_DECL1 ? SAVE1_LBA_BITS : 32'd0;
 		5'd14:   sec_kw = SAVE_DECL1 ? SAVE1_WSRC : 32'd0;
 		5'd15:   sec_kw = SAVE_DECL1 ? SAVE1_EXT : 32'd0;
 		default: sec_kw = 32'd0;                             // K3, and K6-K7: the primary has no image
@@ -469,7 +486,7 @@ end
 wire [48:0] pad_q;
 wire        sec_en_sys, sec_ack, sec_wr;
 wire [15:0] sec_dat;
-wire  [8:0] sec_adr;
+wire [13:0] sec_adr;
 wire  [1:0] sec_xen, sec_xack;
 
 assign hps_lw[94:46]   = pad_q;                          // {we, op, idx, data}
@@ -477,7 +494,7 @@ assign hps_lw[95]      = sec_en_sys;                     // the primary's en_sys
 assign hps_lw[96]      = sec_ack;
 assign hps_lw[97]      = sec_wr;                         // the shared strobe, its data and address
 assign hps_lw[113:98]  = sec_dat;
-assign hps_lw[127:114] = {5'd0, sec_adr};
+assign hps_lw[127:114] = sec_adr;
 assign hps_lw[131:128] = {sec_xack[1], sec_xen[1], sec_xack[0], sec_xen[0]};   // the save slots' en_sys, ack
 
 generate
@@ -531,8 +548,22 @@ endgenerate
 generate
 `ifdef MISTER_LW_SECTOR_SLOT
 if (SEC_EN) begin : sec
-	lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .BLKSZ(BLKSZ), .AW(SEC_AW), .DIAG(DIAG),
-	            .XSLOT0(SAVE0_SLOT), .XSLOT1(SAVE1_SLOT), .XFRAME0(SAVE0_FRAME), .XFRAME1(SAVE1_FRAME)) sector
+	if (SEC_BAD) begin : geometry
+		lw_sector_unservable_geometry guard();
+	end
+	// synthesis translate_off
+	initial if (SEC_BAD) begin
+		$display({"lw_sys_window: unservable SECTOR geometry: slot %0d, frame %0d, gap %0d; save slot 0 (%0d) on ",
+		          "slot %0d, frame %0d, %0d LBA bits, image 0x%08h; save slot 1 (%0d) on slot %0d, frame %0d, %0d LBA ",
+		          "bits, image 0x%08h"}, SEC_SLOT, SEC_FRAME, SEC_GAP, SAVE_DECL0, SAVE0_SLOT, SAVE0_FRAME,
+		         SAVE0_LBA_BITS, SAVE0_WSRC, SAVE_DECL1, SAVE1_SLOT, SAVE1_FRAME, SAVE1_LBA_BITS, SAVE1_WSRC);
+		$finish;
+	end
+	// synthesis translate_on
+	lw_sector #(.SLOT(SEC_SLOT[7:0]), .FRAME(SEC_FRAME[12:0]), .BLKSZ(BLKSZ), .AW(SEC_AW), .DIAG(DIAG),
+	            .XSLOT0(SAVE0_SLOT[3:0]), .XSLOT1(SAVE1_SLOT[3:0]), .XFRAME0(SAVE0_FRAME[12:0]),
+	            .XFRAME1(SAVE1_FRAME[12:0]), .XLB0(SAVE0_LBA_BITS[5:0]), .XLB1(SAVE1_LBA_BITS[5:0]),
+	            .GAP(SEC_GAP[3:0])) sector
 	(
 		.clk(clk),
 		.raddr(rsec), .rsel(r_sec), .rdata(sec_rdata),
@@ -544,12 +575,13 @@ if (SEC_EN) begin : sec
 		// HPS_BUS[166:132], the primary's mux: {lba[31:0], req, hps_ack, reset}
 		.c_reset(hps_lw[132]), .hps_ack(hps_lw[133]), .c_req(hps_lw[134] & wired[0]), .c_lba(hps_lw[166:135]),
 		.c_commit(hps_lw[380]),                     // HPS_BUS[380], hps_io's commit mark
+		.c_wide(wide_c),
 		.en_sys(sec_en_sys), .o_ack(sec_ack), .o_wr(sec_wr), .o_dat(sec_dat), .o_adr(sec_adr),
 		// HPS_BUS[201:167] and [236:202], the save slots' muxes: {lba[31:0], rd, wr, hps_ack}; an undeclared or
 		// absent slot's request lines are held low, so the feeder never serves it
 		.x_hps_ack({hps_lw[202], hps_lw[167]}),
 		.x_wr({hps_lw[203], hps_lw[168]} & wired[2:1]), .x_rd({hps_lw[204], hps_lw[169]} & wired[2:1]),
-		.x_lba({hps_lw[211:205], hps_lw[176:170]}),
+		.x_lba({hps_lw[236:205], hps_lw[201:170]}),
 		.x_en_sys(sec_xen), .x_ack(sec_xack)
 	);
 end
@@ -569,7 +601,7 @@ else begin : nosec
 	assign sec_ack    = 1'b0;
 	assign sec_wr     = 1'b0;
 	assign sec_dat    = 16'd0;
-	assign sec_adr    = 9'd0;
+	assign sec_adr    = 14'd0;
 	assign sec_xen    = 2'd0;
 	assign sec_xack   = 2'd0;
 end

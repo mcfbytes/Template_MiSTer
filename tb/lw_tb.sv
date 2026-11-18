@@ -106,20 +106,30 @@ end
 endmodule
 
 // A save-slot consumer (the usual HPS save handshake): rd or wr with the LBA, both dropped on ack; the
-// transfer ends when ack falls. The buffer (dpram port B) is written on write & ack at addr. hold (the cases set
-// it): 1 keeps the request raised through the ack, 2 drops it in the cycle after the ack falls. acks counts falls.
-module sv_model(input clk, input reset, output reg rd = 0, output reg wr = 0, output reg [6:0] lba = 0,
-                input ack, input write, input [8:0] addr, input [15:0] din, input [8:0] haddr, output reg [15:0] dout);
-reg  [15:0] ram [0:511];
+// transfer ends when ack falls. The buffer (dpram port B) is written on write & ack at addr, one halfword or byte
+// (din[7:0]) per address as hps_io's WIDE says. hold (the cases set it): 1 keeps the request raised through the
+// ack, 2 drops it in the cycle after the ack falls. acks counts falls; amin is the fewest clk_sys cycles seen
+// between two strobes, or from an ack's rise to its first strobe (alead).
+module sv_model(input clk, input reset, output reg rd = 0, output reg wr = 0, output reg [31:0] lba = 0,
+                input ack, input write, input [13:0] addr, input [15:0] din, input [13:0] haddr, output reg [15:0] dout);
+reg  [15:0] ram [0:16383];
+integer     since = 1000, amin = 1000, alead = 1000, n_ack = 0;
+reg         first = 0;
 integer     strobes = 0, done = 0, acks = 0, hold = 0;
 reg         busy = 0, seen = 0, ack_d = 0;
 always @(posedge clk) begin
 	dout <= ram[haddr];
 	ack_d <= ack;
 	if (ack_d && !ack) acks <= acks + 1;
+	since <= since + 1;
+	if (ack && !ack_d) begin since <= 1; first <= 1; n_ack <= n_ack + 1; end
 	if (write && ack) begin
 		ram[addr] <= din;
 		strobes   <= strobes + 1;
+		since     <= 1;
+		first     <= 0;
+		if (first) begin if (since < alead) alead <= since; end
+		else if (since < amin) amin <= since;
 	end
 	if (hold == 0 ? ack : hold == 2 && ack_d && !ack) begin rd <= 0; wr <= 0; end
 	if (reset) begin rd <= 0; wr <= 0; busy <= 0; seen <= 0; end
@@ -128,7 +138,7 @@ always @(posedge clk) begin
 		else if (seen) begin busy <= 0; seen <= 0; done <= done + 1; end
 	end
 end
-task go(input is_wr, input [6:0] l);
+task go(input is_wr, input [31:0] l);
 	begin @(negedge clk); lba = l; if (is_wr) wr = 1; else rd = 1; busy = 1; seen = 0; end
 endtask
 endmodule
@@ -273,15 +283,31 @@ localparam TB_EVT = TB_EVTB && !TB_BUS46;
 localparam TB_CMT = TB_SECB && !TB_BUS46 && !TB_NOMARK;    // hps_io's commit mark reaches the window
 localparam TB_SEC = TB_CMT && !TB_NOMUX;
 localparam TB_W1  = TB_SEC && !TB_NOSAVE1;    // save slot 1 wired
-// the primary's frame, and save slot 1's (slot index 2): its own length, shorter than save slot 0's 256 words, so
-// each save slot is served at its own length (both 256 at the default geometry)
+// The geometry. The primary's frame, and save slot 1's (slot index 2): its own length, shorter than save slot 0's
+// 256 words, so each save slot is served at its own length (both 256 at the default geometry). TB_WIDE is hps_io's
+// WIDE; the primary and the save slots sit on hps_io slots TB_PS, TB_S1H and TB_S2H of TB_VD; TB_LBAB is the save
+// slots' LBA width. LW_TB_GEOMW (arm W): byte strobes, a 4096-word primary on hps_io slot 9, save slots of 510 and
+// 256 words with 32-bit LBAs on slots 12 and 15, strobes 5 cycles apart.
 `ifdef LW_TB_DEFGEOM
 localparam TB_FRAME = 128;
-localparam [9:0] TB_XFRAME1 = 10'd256;
+localparam [12:0] TB_XFRAME0 = 13'd256, TB_XFRAME1 = 13'd256;
+localparam TB_WIDE = 1, TB_VD = 4, TB_PS = 1, TB_S1H = 2, TB_S2H = 3, TB_GAP = 2, TB_LBAB = 32;
+`elsif LW_TB_GEOMW
+localparam TB_FRAME = 4096;
+localparam [12:0] TB_XFRAME0 = 13'd510, TB_XFRAME1 = 13'd256;
+localparam TB_WIDE = 0, TB_VD = 16, TB_PS = 9, TB_S1H = 12, TB_S2H = 15, TB_GAP = 5, TB_LBAB = 32;
 `else
 localparam TB_FRAME = 588;
-localparam [9:0] TB_XFRAME1 = 10'd192;
+localparam [12:0] TB_XFRAME0 = 13'd256, TB_XFRAME1 = 13'd192;
+localparam TB_WIDE = 1, TB_VD = 4, TB_PS = 1, TB_S1H = 2, TB_S2H = 3, TB_GAP = 2, TB_LBAB = 7;
 `endif
+`ifdef LW_TB_GEOMW
+localparam TB_GEOMW = 1;
+`else
+localparam TB_GEOMW = 0;
+`endif
+localparam TB_DW = TB_WIDE ? 15 : 7, TB_AW = TB_WIDE ? 12 : 13;   // hps_io's sd_buff_dout and sd_buff_addr
+localparam [31:0] TB_LBAM = (TB_LBAB >= 32) ? 32'hFFFFFFFF : (32'd1 << TB_LBAB) - 32'd1;   // a save slot's LBA bits
 `ifdef MISTER_LW_LANE
 localparam TB_LANE = 1;
 `else
@@ -321,9 +347,11 @@ wire [12:0] save_dn = {hps_bus[131], hps_bus[130], hps_bus[129], hps_bus[128], h
 
 lw_sys_window #(
 	.PAD_EN(TB_PADB), .EVT_EN(TB_EVTB), .OSD_EN(TB_OSD),
-	.SEC_EN(TB_SECB), .SEC_SLOT(8'd1), .SEC_FRAME(TB_FRAME), .BLKSZ(3'd3),
-	.SAVE0_SLOT(4'd2), .SAVE0_WSRC(32'h30100000), .SAVE0_EXT(32'h00020000), .SAVE0_FRAME(10'd256),
-	.SAVE1_SLOT(4'd3), .SAVE1_WSRC(32'h30200000), .SAVE1_EXT(32'h00020000), .SAVE1_FRAME(TB_XFRAME1),
+	.SEC_EN(TB_SECB), .SEC_SLOT(TB_PS), .SEC_FRAME(TB_FRAME), .SEC_GAP(TB_GAP), .BLKSZ(3'd3),
+	.SAVE0_EN(1), .SAVE0_SLOT(TB_S1H), .SAVE0_WSRC(32'h30100000), .SAVE0_EXT(32'h00020000), .SAVE0_FRAME(TB_XFRAME0),
+	.SAVE0_LBA_BITS(TB_LBAB),
+	.SAVE1_EN(1), .SAVE1_SLOT(TB_S2H), .SAVE1_WSRC(32'h30200000), .SAVE1_EXT(32'h00020000), .SAVE1_FRAME(TB_XFRAME1),
+	.SAVE1_LBA_BITS(TB_LBAB),
 	.LANE_EN(TB_LANE)
 ) win
 (
@@ -332,7 +360,7 @@ lw_sys_window #(
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be), .lw_wburst(lw_wburst),
 	.lw_hrst(lw_hrst), .lw_freed(lw_freed), .lw_idv(lw_idv), .held(lw_held),
 	.lines(lines),
-	.clk_sys(clk_sys), .hps_lw(hps_bus[383:46]),
+	.clk_sys(clk_sys), .hps_lw(hps_bus[383:46]), .io_wide(hps_bus[32]),
 	.osd_sel(m_sel[3:2]), .osd_view(gpo31_s), .osd_we(osd_we), .osd_addr(osd_addr), .osd_byte(osd_byte),
 `ifdef MISTER_LW_LANE
 	.lane_busy(io_enable | io_fpga | io_osd | ~gpo31_s), .lane_wait(hps_bus[37] | vs_wait), .lane_dout(hps_bus[15:0]),
@@ -510,23 +538,34 @@ reg         cd_req = 0;
 reg  [31:0] cd_lba = 32'hFFFFFFFF;
 wire        cd_ack, cd_wr;
 wire [15:0] cd_data;
-wire  [3:0] sd_rd, sd_wr, sd_ack;
+wire [TB_VD-1:0] sd_rd, sd_wr, sd_ack;
 reg         blk0_rd = 0;                // a consumer on hps_io slot 0 that holds its request (the EVT cases)
-wire [15:0] sd_buff_dout;
+wire [TB_DW:0] sd_buff_dout;
 wire        sd_buff_wr;
-wire  [8:0] sd_buff_addr;
-wire [31:0] sd_lba [4];
-wire [15:0] sd_buff_din [4];
+wire [TB_AW:0] sd_buff_addr;
+wire [31:0] sd_lba [TB_VD];
+wire [TB_DW:0] sd_buff_din [TB_VD];
+wire [13:0] sd_addr14 = sd_buff_addr;   // hps_io's buffer address and data as the muxes take them
+wire [15:0] sd_dout16 = sd_buff_dout;
 assign sd_rd[0] = blk0_rd;
-assign sd_wr[1:0] = 0;
+assign sd_wr[0] = 0;
 assign sd_lba[0] = 0;
-assign sd_lba[1] = cd_lba;
-assign sd_lba[2] = {25'd0, sv1.lba};
-assign sd_lba[3] = {25'd0, sv2.lba};
 assign sd_buff_din[0] = 0;
-assign sd_buff_din[1] = 0;
-assign sd_buff_din[2] = sv1.dout;
-assign sd_buff_din[3] = sv2.dout;
+// the primary on hps_io slot TB_PS (read only), the save slots on TB_S1H and TB_S2H; every other slot idle
+assign sd_wr[TB_PS] = 0;
+assign sd_lba[TB_PS] = TB_GEOMW ? pm.lba : cd_lba;
+assign sd_lba[TB_S1H] = sv1.lba;
+assign sd_lba[TB_S2H] = sv2.lba;
+assign sd_buff_din[TB_PS] = 0;
+assign sd_buff_din[TB_S1H] = sv1.dout[TB_DW:0];
+assign sd_buff_din[TB_S2H] = sv2.dout[TB_DW:0];
+genvar gs;
+generate for (gs = 1; gs < TB_VD; gs = gs + 1) begin : idle_slot
+	if (gs != TB_PS && gs != TB_S1H && gs != TB_S2H) begin : idle
+		assign sd_rd[gs] = 0, sd_wr[gs] = 0, sd_lba[gs] = 0, sd_buff_din[gs] = 0;
+	end
+end
+endgenerate
 
 // The core's status request: a rising edge of status_set latches status_in.
 reg [127:0] st_in = 0;
@@ -576,7 +615,7 @@ wire   [1:0] mark_cut;
 `define TB_IO_BUS `TB_CORE_BUS
 `endif
 
-hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .WIDE(TB_WIDE), .VDNUM(TB_VD), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(`TB_IO_BUS),
@@ -599,15 +638,25 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 	.sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .sd_buff_addr(sd_buff_addr)
 );
 
-// Two save slots on hps_io slots 2 and 3, each behind an lw_save_mux when the SECTOR block is built (no mux with
-// LW_TB_NOMUX; slot 2's missing with LW_TB_NOSAVE1).
-wire        sv1_ack, sv1_write, sv2_ack, sv2_write;
-wire  [8:0] sv1_addr, sv2_addr;
-wire [15:0] sv1_din, sv2_din;
+// Two save slots on hps_io slots TB_S1H and TB_S2H, each behind an lw_save_mux when the SECTOR block is built (no
+// mux with LW_TB_NOMUX; save slot 1's missing with LW_TB_NOSAVE1). With LW_TB_GEOMW the primary is pm, a consumer of
+// the same kind that keeps every strobe at its address, read only; otherwise the CD below.
+wire        sv1_ack, sv1_write, sv2_ack, sv2_write, pm_ack, pm_write;
+wire [13:0] sv1_addr, sv2_addr, pm_addr, cd_addr;
+wire [15:0] sv1_din, sv2_din, pm_din;
 sv_model sv1(.clk(clk_sys), .reset(cd_reset), .ack(sv1_ack), .write(sv1_write), .addr(sv1_addr), .din(sv1_din),
-             .haddr(sd_buff_addr));
+             .haddr(sd_addr14));
 sv_model sv2(.clk(clk_sys), .reset(cd_reset), .ack(sv2_ack), .write(sv2_write), .addr(sv2_addr), .din(sv2_din),
-             .haddr(sd_buff_addr));
+             .haddr(sd_addr14));
+sv_model pm(.clk(clk_sys), .reset(cd_reset), .ack(pm_ack), .write(pm_write), .addr(pm_addr), .din(pm_din),
+            .haddr(sd_addr14));
+wire        p_req   = TB_GEOMW ? pm.rd : cd_req;      // the primary consumer's request, ack, strobe and LBA
+wire [31:0] p_lba   = TB_GEOMW ? pm.lba : cd_lba;
+wire        p_ack, p_wr;
+wire [13:0] p_addr;
+wire [15:0] p_data;
+assign pm_ack = TB_GEOMW ? p_ack : 1'b0, pm_write = TB_GEOMW ? p_wr : 1'b0, pm_addr = p_addr, pm_din = p_data;
+assign cd_ack = TB_GEOMW ? 1'b0 : p_ack, cd_wr = TB_GEOMW ? 1'b0 : p_wr, cd_addr = p_addr, cd_data = p_data;
 `ifdef MISTER_LW_SECTOR_SLOT
 `ifndef LW_TB_NOMUX
 `define TB_MUX
@@ -619,38 +668,38 @@ lw_save_mux #(.SAVE(0)) sv1_lw
 	.HPS_BUS(`TB_CORE_BUS),
 	.core_rd(sv1.rd), .core_wr(sv1.wr), .core_lba(sv1.lba), .core_ack(sv1_ack), .core_write(sv1_write),
 	.core_addr(sv1_addr), .core_data(sv1_din),
-	.hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
-	.hps_data(sd_buff_dout)
+	.hps_rd(sd_rd[TB_S1H]), .hps_wr(sd_wr[TB_S1H]), .hps_ack(sd_ack[TB_S1H]), .hps_write(sd_buff_wr),
+	.hps_addr(sd_addr14), .hps_data(sd_dout16)
 );
 `ifdef LW_TB_NOSAVE1
-assign sd_rd[3] = sv2.rd, sd_wr[3] = sv2.wr, sv2_ack = sd_ack[3], sv2_write = sd_buff_wr, sv2_addr = sd_buff_addr;
-assign sv2_din  = sd_buff_dout;
+assign sd_rd[TB_S2H] = sv2.rd, sd_wr[TB_S2H] = sv2.wr, sv2_ack = sd_ack[TB_S2H], sv2_write = sd_buff_wr;
+assign sv2_addr = sd_addr14, sv2_din = sd_dout16;
 `else
 lw_save_mux #(.SAVE(1)) sv2_lw
 (
 	.HPS_BUS(`TB_CORE_BUS),
 	.core_rd(sv2.rd), .core_wr(sv2.wr), .core_lba(sv2.lba), .core_ack(sv2_ack), .core_write(sv2_write),
 	.core_addr(sv2_addr), .core_data(sv2_din),
-	.hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
-	.hps_data(sd_buff_dout)
+	.hps_rd(sd_rd[TB_S2H]), .hps_wr(sd_wr[TB_S2H]), .hps_ack(sd_ack[TB_S2H]), .hps_write(sd_buff_wr),
+	.hps_addr(sd_addr14), .hps_data(sd_dout16)
 );
 `endif
 
-// The CD on hps_io slot 1, behind an lw_blk_mux when the SECTOR block is built.
+// The primary (the CD, or pm) on hps_io slot TB_PS, behind an lw_blk_mux when the SECTOR block is built.
 lw_blk_mux cd_lw
 (
 	.HPS_BUS(`TB_CORE_BUS), .reset(cd_reset),
-	.core_req(cd_req), .core_lba(cd_lba), .core_ack(cd_ack), .core_wr(cd_wr), .core_data(cd_data),
-	.hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
+	.core_req(p_req), .core_lba(p_lba), .core_ack(p_ack), .core_wr(p_wr), .core_addr(p_addr), .core_data(p_data),
+	.hps_req(sd_rd[TB_PS]), .hps_ack(sd_ack[TB_PS]), .hps_wr(sd_buff_wr), .hps_addr(sd_addr14), .hps_data(sd_dout16)
 );
 `undef TB_MUX
 `else
 // No SECTOR block, or no mux: each consumer meets hps_io directly, as in a core that declares none.
-assign sd_rd[2] = sv1.rd, sd_wr[2] = sv1.wr, sv1_ack = sd_ack[2], sv1_write = sd_buff_wr, sv1_addr = sd_buff_addr;
-assign sv1_din  = sd_buff_dout;
-assign sd_rd[3] = sv2.rd, sd_wr[3] = sv2.wr, sv2_ack = sd_ack[3], sv2_write = sd_buff_wr, sv2_addr = sd_buff_addr;
-assign sv2_din  = sd_buff_dout;
-assign sd_rd[1] = cd_req, cd_ack = sd_ack[1], cd_wr = sd_buff_wr, cd_data = sd_buff_dout;
+assign sd_rd[TB_S1H] = sv1.rd, sd_wr[TB_S1H] = sv1.wr, sv1_ack = sd_ack[TB_S1H], sv1_write = sd_buff_wr;
+assign sv1_addr = sd_addr14, sv1_din = sd_dout16;
+assign sd_rd[TB_S2H] = sv2.rd, sd_wr[TB_S2H] = sv2.wr, sv2_ack = sd_ack[TB_S2H], sv2_write = sd_buff_wr;
+assign sv2_addr = sd_addr14, sv2_din = sd_dout16;
+assign sd_rd[TB_PS] = p_req, p_ack = sd_ack[TB_PS], p_wr = sd_buff_wr, p_addr = sd_addr14, p_data = sd_dout16;
 `endif
 
 // A CD fetch FSM: req with the LBA, drop req on ack, then exactly 2 x TB_FRAME strobes, low half then high
@@ -698,9 +747,9 @@ always @(posedge clk_sys) begin
 	endcase
 end
 
-// The save slot on hps_io slot 2, which gates the shared strobe with its own ack.
+// Save slot 0 (slot index 1) on hps_io slot TB_S1H, which gates the shared strobe with its own ack.
 integer sv_words = 0, sv_sum = 0;
-always @(posedge clk_sys) if (sd_buff_wr && sd_ack[2]) begin
+always @(posedge clk_sys) if (sd_buff_wr && sd_ack[TB_S1H]) begin
 	sv_words <= sv_words + 1;
 	sv_sum   <= sv_sum + sd_buff_dout;
 end
@@ -713,9 +762,9 @@ reg       fc_off = 0;                   // a case scrambles or forces a link
 integer   ap_both = 0, ap_spi = 0, ap_lw = 0;
 reg       ap_scr = 0;
 reg [2:0] ap_up_d = 0, ap_ack_d = 0, ap_sa_d = 0, ap_la_d = 0, ap_s = 0, ap_l = 0;
-wire [2:0] ap_up  = {sv2.rd | sv2.wr, sv1.rd | sv1.wr, cd_req};
-wire [2:0] ap_ack = {sv2_ack, sv1_ack, cd_ack};
-wire [2:0] ap_sa  = sd_ack[3:1];
+wire [2:0] ap_up  = {sv2.rd | sv2.wr, sv1.rd | sv1.wr, p_req};
+wire [2:0] ap_ack = {sv2_ack, sv1_ack, p_ack};
+wire [2:0] ap_sa  = {sd_ack[TB_S2H], sd_ack[TB_S1H], sd_ack[TB_PS]};
 wire [2:0] ap_la  = {hps_bus[131], hps_bus[129], hps_bus[96]};
 always @(posedge clk_sys) begin : ap_mon
 	integer k;
@@ -1501,7 +1550,7 @@ realtime   t0_en;
 integer n0, s0, overlap = 0;
 
 // a save-slot strobe while the LW feeder holds the CD ack: the overlap the mux exists for
-always @(posedge clk_sys) if (sd_buff_wr && sd_ack[2] && blk_dn[17] && !blk_dn[16]) overlap = 1;
+always @(posedge clk_sys) if (sd_buff_wr && sd_ack[TB_S1H] && blk_dn[17] && !blk_dn[16]) overlap = 1;
 
 function [31:0] pat(input [31:0] lba, input integer i);
 	pat = (lba * 32'h9E3779B1) ^ (i * 32'h01000193) ^ {i[15:0], 16'h5A00};
@@ -2707,15 +2756,15 @@ task dm_build;
 		if (TB_SEC) begin
 			dm_entry(e, 2, 32'h00020000, 32'h08000, 32'h08000, 32'h08000, 1, TB_W1 ? 7 : 3);   // 2.0: line 1, a cause per slot
 			b = 16 + 32 * e + 8;
-			dm[b]     = 32'h02000002;                                                  // K0 {FIFO entries, 0, gap}
-			dm[b + 1] = 32'h00000301;                                                  // K1 {BLKSZ, wide}
+			dm[b]     = 32'h02000000 | TB_GAP;                                         // K0 {FIFO entries, 0, gap}
+			dm[b + 1] = 32'h00000300 | TB_WIDE;                                        // K1 {BLKSZ, wide}
 			dm[b + 2] = 32'd3;                                                         // K2: three descriptors
-			dm[b + 4] = 32'h01010000 | TB_FRAME;                                       // K4-K7: the primary, RD
+			dm[b + 4] = 32'h01000000 | (TB_PS << 16) | TB_FRAME;                       // K4-K7: the primary, RD
 			dm[b + 5] = 32'd32;
-			dm[b + 8] = 32'h03020100; dm[b + 9] = 32'd7;                               // K8-K11: slot 1, RD and WR
-			dm[b + 10] = 32'h30100000; dm[b + 11] = 32'h00020000;
-			dm[b + 12] = (TB_W1 ? 32'h03030000 : 32'h00030000) | TB_XFRAME1;          // K12-K15: slot 2, flags 0
-			dm[b + 13] = 32'd7; dm[b + 14] = 32'h30200000; dm[b + 15] = 32'h00020000;  //   unwired
+			dm[b + 8] = 32'h03000000 | (TB_S1H << 16) | TB_XFRAME0;                    // K8-K11: slot 1, RD and WR
+			dm[b + 9] = TB_LBAB; dm[b + 10] = 32'h30100000; dm[b + 11] = 32'h00020000;
+			dm[b + 12] = (TB_W1 ? 32'h03000000 : 32'h0) | (TB_S2H << 16) | TB_XFRAME1; // K12-K15: slot 2, flags 0
+			dm[b + 13] = TB_LBAB; dm[b + 14] = 32'h30200000; dm[b + 15] = 32'h00020000; //   unwired
 			e = e + 1;
 		end
 		if (TB_OSD) begin
@@ -4312,8 +4361,9 @@ task scramble;
 `ifdef MISTER_LW_SECTOR_SLOT
 		win.sec.sector.q = {$random, $random}; win.sec.sector.rptr = $random; win.sec.sector.sector_r_lwgray = $random;
 		win.sec.sector.fs = $random; win.sec.sector.fexp = $random; win.sec.sector.em = $random;
-		win.sec.sector.qv = $random; win.sec.sector.tmode = $random; win.sec.sector.ph = $random;
-		win.sec.sector.ackc = $random; win.sec.sector.hi = $random; win.sec.sector.fsum = $random;
+		win.sec.sector.qv = $random; win.sec.sector.tmode = $random; win.sec.sector.sn = $random;
+		win.sec.sector.ackc = $random; win.sec.sector.wv = $random; win.sec.sector.fsum = $random;
+		win.sec.sector.gc = win.sec.sector.wv[31:28];   // one draw for both: the later blocks' draws stay as they were
 		win.sec.sector.evt = $random; win.sec.sector.dcnt = $random; win.sec.sector.dsent = $random;
 		win.sec.sector.dsum = $random; win.sec.sector.fsel = $random; win.sec.sector.fwack = $random;
 		win.sec.sector.offd = $random; win.sec.sector.opn = $random; win.sec.sector.rej = $random;
@@ -5119,6 +5169,151 @@ initial begin
 	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
 	$finish;
 end
+`elsif LW_TB_GEOMW
+// Arm W (T-SEC6): hps_io at WIDE = 0, so the feeder makes byte strobes; a 4096-word primary on hps_io slot 9, save
+// slots on 12 and 15 with 32-bit LBAs, strobes 5 clk_sys cycles apart. Each frame lands byte for byte at its byte
+// addresses, against hps_io's own SPI transfer of the same block for the primary; the directory reports it all.
+reg [7:0] w_img [0:16383];
+
+// The block's bytes over SPI: UIO_SECTOR_RD on hps_io slot `slot`, one byte per strobe, byte 0 of word 0 first, a
+// strobe every 3 clk_sys cycles (hps_io steps its buffer address 3 cycles after a strobe).
+task spi_bytes(input [3:0] slot, input [31:0] lba, input integer n);
+	integer m;
+	reg [31:0] w;
+	begin
+		@(negedge clk_sys); io_enable = 1;
+		io_din = {4'd0, slot, 8'h17}; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys);
+		for (m = 0; m < n; m = m + 1) begin
+			w = pat(lba, m >> 2);
+			io_din = {8'd0, w[8 * (m % 4) +: 8]}; io_strobe = 1; @(negedge clk_sys); io_strobe = 0;
+			repeat (2) @(negedge clk_sys);
+		end
+		io_enable = 0; @(negedge clk_sys);
+	end
+endtask
+
+// A frame's DATA in chunks the FIFO holds, each given the time its strobes take, so nothing is refused.
+task w_frame(input [31:0] lba, input integer n);
+	integer c;
+	for (c = 0; c < n; c = c + 256) begin
+		frame_data(lba, c, (c + 256 < n) ? c + 256 : n);
+		repeat (256 * 4 * TB_GAP) @(negedge clk_sys);
+	end
+endtask
+
+initial begin : arm_w
+	integer t, nb, bb;
+	reg [31:0] v;
+	repeat (4) @(negedge clk);
+	sys_rate;
+	cdc_cells;
+	dir_cases;
+	ena_up;
+	$display({"-- geometry W: hps_io WIDE = 0, a %0d-word primary on hps_io slot %0d, save slots of %0d and %0d words ",
+	          "on %0d and %0d, %0d-bit LBAs, gap %0d"}, TB_FRAME, TB_PS, TB_XFRAME0, TB_XFRAME1, TB_S1H, TB_S2H,
+	         TB_LBAB, TB_GAP);
+	check("hps_io's io_wide on HPS_BUS[32]: 0", hps_bus[32], 0);
+	rd("SECTOR K0: 512 FIFO entries, gap 5", 21'h40060 + 21'h80 * TB_E_SEC, 32'h02000005);
+	rd("SECTOR K1: BLKSZ 3, wide 0 (byte strobes)", 21'h40064 + 21'h80 * TB_E_SEC, 32'h00000300);
+	rd("SECTOR K4: the primary, RD, hps_io slot 9, 4096 words", 21'h40070 + 21'h80 * TB_E_SEC, 32'h01091000);
+	rd("SECTOR K5: the primary's LBA, 32 bits", 21'h40074 + 21'h80 * TB_E_SEC, 32'd32);
+	rd("SECTOR K8: slot 1, RD and WR, hps_io slot 12, 510 words", 21'h40080 + 21'h80 * TB_E_SEC, 32'h030C01FE);
+	rd("SECTOR K9: slot 1's LBA, 32 bits", 21'h40084 + 21'h80 * TB_E_SEC, 32'd32);
+	rd("SECTOR K12: slot 2, RD and WR, hps_io slot 15, 256 words", 21'h40090 + 21'h80 * TB_E_SEC, 32'h030F0100);
+	rd("SECTOR K13: slot 2's LBA, 32 bits", 21'h40094 + 21'h80 * TB_E_SEC, 32'd32);
+
+	$display("-- W: a 4096-word block over SPI, byte strobes from hps_io (EN clear: the slot is SPI's)");
+	n0 = pm.done; s0 = pm.strobes;
+	for (i = 0; i < 16384; i = i + 1) pm.ram[i] = 16'hEEEE;
+	pm.go(0, 32'h89ABCDEF); settle;
+	check("the primary's request reaches hps_io", sd_rd[TB_PS], 1);
+	spi_bytes(4'd9, 32'h89ABCDEF, 16384);
+	repeat (50) @(negedge clk_sys);
+	check("SPI: the block done", pm.done - n0, 1);
+	check("SPI: 16384 byte strobes", pm.strobes - s0, 16384);
+	bad = 0;
+	for (i = 0; i < 16384; i = i + 1) begin
+		v = pat(32'h89ABCDEF, i >> 2);
+		w_img[i] = pm.ram[i][7:0];
+		if (pm.ram[i][7:0] !== v[8 * (i % 4) +: 8]) bad = bad + 1;
+	end
+	check("SPI: the block at its byte addresses", bad, 0);
+
+	$display("-- W: the same block over LW: 16384 byte strobes, byte 0 first, at the byte index, 5 cycles apart");
+	sec_wr(S_CTRL, C_EN0 | C_EN1 | C_EN2); settle;
+	for (i = 0; i < 16384; i = i + 1) pm.ram[i] = 16'hEEEE;
+	pm.amin = 1000; pm.alead = 1000;
+	n0 = pm.done; s0 = pm.strobes;
+	pm.go(0, 32'h89ABCDEF); settle;
+	check("the primary hidden from hps_io", sd_rd[TB_PS], 0);
+	cause_drain(SEC);
+	rd("REQ: the primary, hps_io slot 9", SEC + S_REQ, 32'h800080E5);
+	rd("LBA_S[0]: the 32-bit LBA", SEC + S_LBA0, 32'h89ABCDEF);
+	sec_wr(S_BEGIN0, 32'h89ABCDEF);
+	w_frame(32'h89ABCDEF, 4096);
+	rd("ACCEPT ok, 4096, no store refused", SEC + S_ACCEPT, 32'h80001000);
+	t = 0; while (pm.done == n0 && t < 200000) begin @(negedge clk_sys); t = t + 1; end
+	check("LW: the block done", pm.done - n0, 1);
+	check("LW: 16384 byte strobes", pm.strobes - s0, 16384);
+	bad = 0; for (i = 0; i < 16384; i = i + 1) if (pm.ram[i] !== {8'd0, w_img[i]}) bad = bad + 1;
+	check("LW: byte for byte the SPI transfer's block, at the same addresses", bad, 0);
+	check("LW: strobes 5 cycles apart", pm.amin, 5);
+	check("LW: the ack leads the first strobe by 5", pm.alead, 5);
+	rd("REQ idle", SEC + S_REQ, 32'd0);
+
+	$display("-- W: slot 1, 510 words with a 32-bit LBA: the LBA round-trips, and all 32 bits are compared");
+	sv1.amin = 1000; sv1.alead = 1000;
+	n0 = sv1.done; s0 = sv1.strobes;
+	sv1.go(0, 32'hFEDCBA98); settle;
+	rd("CAUSE: slot 1's bit", SEC + S_CAUSE, 32'h00000002);
+	cause_drain(SEC);
+	rd("RSTAT_S[1]: offered, a read on hps_io slot 12", SEC + S_RSTAT1, 32'h800080F1);
+	rd("LBA_S[1]: all 32 bits", SEC + S_LBA1, 32'hFEDCBA98);
+	sec_wr(S_BEGIN1, 32'h7EDCBA98);
+	frame_data(32'h7EDCBA98, 0, 16);
+	settle; settle;
+	rd("a BEGIN_S whose LBA differs in bit 31: rejected, the request re-opened", SEC + S_CAUSE, 32'h00000002);
+	cause_drain(SEC);
+	rd("RSTAT_S[1]: offered, not answered", SEC + S_RSTAT1, 32'h800080F1);
+	check("no strobe for the rejected answer", sv1.strobes - s0, 0);
+	sec_wr(S_BEGIN1, 32'hFEDCBA98);
+	frame_data(32'hFEDCBA98, 0, 510);
+	rd("ACCEPT ok, 510", SEC + S_ACCEPT, 32'h800001FE);
+	t = 0; while (sv1.done == n0 && t < 50000) begin @(negedge clk_sys); t = t + 1; end
+	check("slot 1: the frame done", sv1.done - n0, 1);
+	check("slot 1: 2040 byte strobes", sv1.strobes - s0, 2040);
+	bad = 0;
+	for (i = 0; i < 2040; i = i + 1) begin
+		v = pat(32'hFEDCBA98, i >> 2);
+		if (sv1.ram[i] !== {8'd0, v[8 * (i % 4) +: 8]}) bad = bad + 1;
+	end
+	check("slot 1: byte-exact at its byte addresses", bad, 0);
+	check("slot 1: strobes 5 cycles apart", sv1.amin, 5);
+	check("slot 1: the ack leads the first strobe by 5", sv1.alead, 5);
+
+	$display("-- W: slot 2's write answered by a WACK on all 32 bits of the LBA");
+	n0 = sv2.acks; s0 = sv2.strobes;
+	sv2.go(1, 32'h80000001); settle;
+	cause_drain(SEC);
+	rd("LBA_S[2]: all 32 bits", SEC + S_LBA2, 32'h80000001);
+	rd("RSTAT_S[2]: offered, a write on hps_io slot 15", SEC + S_RSTAT2, 32'h800080FE);
+	sec_wr(S_WACK2, 32'h00000001);
+	settle; settle;
+	rd("a WACK_S that differs in bit 31: rejected, the request re-opened", SEC + S_CAUSE, 32'h00000004);
+	cause_drain(SEC);
+	check("no ack for it", sv2.acks - n0, 0);
+	sec_wr(S_WACK2, 32'h80000001);
+	t = 0; while (sv2.acks == n0 && t < 2000) begin @(negedge clk_sys); t = t + 1; end
+	check("slot 2: one ack, no strobe", {sv2.acks - n0, sv2.strobes - s0}, {32'd1, 32'd0});
+	rd("REQ idle", SEC + S_REQ, 32'd0);
+	check("no ring left", doorbell, 0);
+	check("requests acknowledged by both paths", ap_both, 0);
+	ena_summary(0);
+
+	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
+	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
+	$finish;
+end
 `elsif LW_TB_TIER
 // Arm T (each of the 32 tier sets) and arm B (a core side that leaves pieces out): what is listed is what is built
 // and wired; the directory, the decode and the lines follow it, and the linked blocks' OWNED and OPEN bits are
@@ -5741,9 +5936,9 @@ initial begin
 	rd("CTRL readback EN mask", SEC + S_CTRL, 32'h00000007);
 	rdm("STATUS: every slot's en_sys, by slot index", SEC + S_STATUS, 32'h00000777, 32'h00000007);
 
-	$display("-- slot 1 READ over LW");
+	$display("-- slot 1 READ over LW; its LBA's bits above the declared 7 are not kept, crossed or compared");
 	n0 = sv1.done; s0 = sv1.strobes; r = cd_strobes;
-	sv1.go(0, 7'h12); settle;
+	sv1.go(0, 32'h00000F92); settle;
 	check("slot 1 hidden from hps_io", sd_rd[2], 0);
 	check("save-slot rd rings", doorbell, 1);
 	rd("CAUSE: slot 1's bit", SEC + S_CAUSE, 32'h00000002);

@@ -67,15 +67,22 @@ beyond it then show no presence bit, and their blocks are not listed in the dire
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the EVT block (`lw_evt.sv`): `hps_io`'s status, block-request, info and upload flags as causes, `hps_io`'s exports and its line |
 | `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH and the SECTOR counters/timestamps read back |
-| `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
-| `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
+| `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds, 0-15; its presence builds the block |
+| `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-4096 (128 = one 512-byte block) |
+| `MISTER_LW_SECTOR_GAP` | 2 | `clk_sys` cycles between write strobes, and from the ack to the first, 2-15 |
 | `MISTER_LW_BLKSZ` | 2 | the core's `hps_io` `BLKSZ`, reported in the GET_SDSTAT words |
-| `MISTER_LW_SAVE0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0 (slot index 1): `hps_io` slot (0-3), DDR image base, image bytes |
-| `MISTER_LW_SAVE0_FRAME` | 256 | its 32-bit words per frame, 1-256 (256 = one 1 KB block) |
-| `MISTER_LW_SAVE1_SLOT`, `_WSRC`, `_EXTENT`, `_FRAME` | absent, 256 | save slot 1 (slot index 2), likewise |
+| `MISTER_LW_SAVE0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0 (slot index 1): `hps_io` slot (0-15), DDR image base, image bytes |
+| `MISTER_LW_SAVE0_FRAME` | 256 | its 32-bit words per frame, 1-510 (the FIFO's entries - 2; 256 = one 1 KB block) |
+| `MISTER_LW_SAVE0_LBA_BITS` | 32 | its LBA bits kept, crossed and compared, 1-32 |
+| `MISTER_LW_SAVE1_SLOT`, `_WSRC`, `_EXTENT`, `_FRAME`, `_LBA_BITS` | absent, 256, 32 | save slot 1 (slot index 2), likewise |
 | `MISTER_LW_LANE` | absent | with `MISTER_LW`: builds the frame lane (LANE block) and its link front, `lw_link` |
 
-A save slot is declared only when its `_WSRC` macro is set, and needs `MISTER_LW_SECTOR_SLOT` too.
+A save slot is declared by its `_SLOT` macro, needs its `_WSRC` and needs `MISTER_LW_SECTOR_SLOT` too. **An
+unservable geometry stops the build** (in synthesis too), naming the undefined module
+`lw_sector_unservable_geometry`: a primary frame outside 1-4096 words, a save slot's outside 1-510, an LBA width
+outside 1-32, a gap outside 2-15, an `hps_io` slot above 15, two slots on one `hps_io` slot, or a save slot without
+an image base. Frames are one fixed length per slot; a slot whose requests vary in length or use `sd_blk_cnt`
+stays on SPI by not being declared.
 
 ## Discovery and safety
 
@@ -373,18 +380,20 @@ and serving them is how a host clears the levels.
 The block serves one primary `hps_io` read slot and up to two save slots through one feeder. Every per-slot field
 (the EN bit, the CAUSE bit, the slot's registers and its descriptor) is indexed by the slot index *k*: 0 the
 primary, 1 save slot 0, 2 save slot 1; never by the `hps_io` slot number. The feeder replays `hps_io`'s own
-handshake into the core: `sd_ack`, then two 16-bit `sd_buff_wr` strobes per 32-bit word, low half first.
+handshake into the core: `sd_ack`, then, as `hps_io`'s `io_wide` (`WIDE`) says, two 16-bit `sd_buff_wr` strobes per
+32-bit word, low half first, at the halfword index, or four 8-bit strobes, byte 0 first, at the byte index.
+Strobes are `strobe_gap` `clk_sys` cycles apart, and the ack leads the first by `strobe_gap`.
 
 **Kind words** (the entry's CAUSE word gives the CAUSE register, LINE ordinal 1):
 
 | word | value |
 |---|---|
-| K0 | `{fifo_entries[31:16] = 512, 0, strobe_gap[7:0] = 2}` |
-| K1 | `{0, BLKSZ[10:8], 0, wide[0] = 1}`: 16-bit strobes |
+| K0 | `{fifo_entries[31:16] = 512, 0, strobe_gap[7:0]}`: `MISTER_LW_SECTOR_GAP` |
+| K1 | `{0, BLKSZ[10:8], 0, wide[0]}`: 1 = 16-bit strobes, 0 = 8-bit (`hps_io`'s `io_wide`) |
 | K2 | the slot descriptors that follow, 1-3 |
 | K3 | 0 |
 | K4 + 4*k* | `{flags[31:24], 0, hps_io slot[19:16], 0, frame_words[12:0]}`; flags bit 0 = RD, bit 1 = WR; flags 0 = declared but not wired, not servable |
-| K5 + 4*k* | `{0, lba_bits[5:0]}`: 32 for the primary, 7 for a save slot in this revision |
+| K5 + 4*k* | `{0, lba_bits[5:0]}`: 32 for the primary; a save slot's `_LBA_BITS` |
 | K6 + 4*k* | DDR image base, physical (0 for the primary) |
 | K7 + 4*k* | DDR image size in bytes (0 for the primary) |
 
@@ -496,14 +505,17 @@ between `hps_io` and that reader:
 ```verilog
 // .qsf: VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1", "MISTER_LW_SECTOR_FRAME=128", "MISTER_LW_BLKSZ=2"
 wire        blk_req, blk_ack, blk_wr;
+wire [13:0] blk_addr;
 wire [15:0] blk_data;
 lw_blk_mux blk_lw
 (
     .HPS_BUS(HPS_BUS), .reset(reset),
-    .core_req(blk_req), .core_lba(sd_lba[1]), .core_ack(blk_ack), .core_wr(blk_wr), .core_data(blk_data),
-    .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
+    .core_req(blk_req), .core_lba(sd_lba[1]), .core_ack(blk_ack), .core_wr(blk_wr), .core_addr(blk_addr),
+    .core_data(blk_data),
+    .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_addr(sd_buff_addr), .hps_data(sd_buff_dout)
 );
-// the reader takes blk_req/blk_ack/blk_wr/blk_data where it took sd_rd[1]/sd_ack[1]/sd_buff_wr/sd_buff_dout
+// the reader takes blk_req/blk_ack/blk_wr/blk_addr/blk_data where it took sd_rd[1]/sd_ack[1]/sd_buff_wr/
+// sd_buff_addr/sd_buff_dout (with WIDE = 0 the data is blk_data[7:0], the address a byte index)
 ```
 
 - **The mux only switches between requests.** While the host's EN is off, everything passes through to `hps_io` and
@@ -519,8 +531,9 @@ lw_blk_mux blk_lw
 - **The core's write strobe is muxed, never `hps_io`'s shared `sd_buff_wr`.** An SPI transfer on another slot
   therefore cannot land in an LW frame.
 - **Save slots** use `lw_save_mux #(.SAVE(0|1))` the same way, on `sd_rd`/`sd_wr`/`sd_buff_addr`. A save slot's LBA
-  is 7 bits (128 blocks) in this revision, and its image must sit in DDR at `wsrc`, where the host reads it for
-  writes. A save slot's `hps_io` slot must differ from the primary's and lie in 0-3.
+  keeps `_LBA_BITS` bits (the rest are not crossed or compared), and its image must sit in DDR at `wsrc`, where the
+  host reads it for writes. Its frame must fit the FIFO (at most 510 words). Every declared slot sits on an
+  `hps_io` slot of its own, 0-15.
 - **Frames are block-sized:** `frame_words` x 4 bytes is what the reader expects per request. 588 words (2,352 bytes)
   serves a raw CD sector.
 - **The host decides.** It serves a slot only when it knows what a frame on that slot means. A core gains nothing
@@ -564,10 +577,10 @@ mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 | `[45:0]` | both | stock |
 | `[94:46]` | to core | PAD store `{we, op[7:0], idx[7:0], data[31:0]}` (`hps_io`) |
 | `[95]`, `[96]` | to core | SECTOR primary `en_sys`, `ack` (`lw_blk_mux`) |
-| `[97]`, `[113:98]`, `[127:114]` | to core | the shared strobe, its data `[15:0]` and address (`[122:114]` used) |
+| `[97]`, `[113:98]`, `[127:114]` | to core | the shared strobe, its data `[15:0]` (`[7:0]` with byte strobes) and address `[13:0]` |
 | `[128]`, `[129]` / `[130]`, `[131]` | to core | save slot 0 / 1 `en_sys`, `ack` (`lw_save_mux`) |
 | `[166:132]` | from core | SECTOR primary `{lba[31:0], req, hps_ack, reset}` (bit 132 = reset) |
-| `[201:167]`, `[236:202]` | from core | save slot 0, 1 `{lba[31:0], rd, wr, hps_ack}` (low bit = hps_ack; `lba[6:0]` used) |
+| `[201:167]`, `[236:202]` | from core | save slot 0, 1 `{lba[31:0], rd, wr, hps_ack}` (low bit = hps_ack; the slot's `_LBA_BITS` used) |
 | `[239:237]` | from core | event pulses, one `clk_sys` cycle: `{upload, info, blk}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[243:240]`, `[371:244]` | from core | `stflg[3:0]`, `status_req[127:0]` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[374:372]` | from core | event levels `{upload pending, info pending, a block request stands}` (`hps_io`, with `MISTER_LW_EVT`) |
@@ -578,13 +591,17 @@ mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 
 ## Verification
 
-`tb/run.sh` runs the testbench in six arms:
+`tb/run.sh` runs the testbench in these arms, among others:
 - `LW_DIAG=1`;
 - `LW_DIAG=0`;
 - `MENU_CORE`, which checks the header rows;
 - no SECTOR block, the Template's own configuration;
 - the SECTOR block at the default geometry (128-word primary, 256-word save slots): a save-slot frame longer
   than the primary's completes, and the primary is served after it;
+- the SECTOR block on an `hps_io` with `WIDE = 0`: a 4,096-word primary on slot 9 lands byte for byte as `hps_io`'s
+  own SPI transfer of the block does, a 510-word save slot on slot 12 at its byte addresses, every strobe 5 cycles
+  apart and 5 after the ack, and 32-bit save-slot LBAs round-trip and are compared whole;
+- each unservable geometry, which stops the compile naming its guard module;
 - the frame lane: the whole reference run with every decoder behind `lw_link`, then lane frames against the same
   frames sent as link words (status, RTC, timestamp, mount, gamma, FIO, both OSDs), the `vs_wait` and
   `ioctl_wait` holds, a link word raised mid-frame, full-FIFO drops, unended frames, the longest frame, and reply

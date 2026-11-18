@@ -1876,51 +1876,83 @@ localparam        LW_OSD_EN    = 1;
 localparam        LW_OSD_EN    = 0;
 `endif
 
-// The core's SECTOR declaration (its .qsf macros); every one is optional.
+// The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
+// macro and needs its _WSRC; lw_sys_window stops the build on an unservable geometry.
 `ifdef MISTER_LW_SECTOR_SLOT
 localparam        LW_SEC_EN    = 1;
-localparam  [7:0] LW_SEC_SLOT  = `MISTER_LW_SECTOR_SLOT;
+localparam [31:0] LW_SEC_SLOT  = `MISTER_LW_SECTOR_SLOT;
 `else
 localparam        LW_SEC_EN    = 0;
-localparam  [7:0] LW_SEC_SLOT  = 8'd1;
+localparam [31:0] LW_SEC_SLOT  = 32'd1;
 `endif
 `ifdef MISTER_LW_SECTOR_FRAME
-localparam  [9:0] LW_SEC_FRAME = `MISTER_LW_SECTOR_FRAME;
+localparam [31:0] LW_SEC_FRAME = `MISTER_LW_SECTOR_FRAME;
 `else
-localparam  [9:0] LW_SEC_FRAME = 10'd128;
+localparam [31:0] LW_SEC_FRAME = 32'd128;
+`endif
+`ifdef MISTER_LW_SECTOR_GAP
+localparam [31:0] LW_SEC_GAP   = `MISTER_LW_SECTOR_GAP;
+`else
+localparam [31:0] LW_SEC_GAP   = 32'd2;
 `endif
 `ifdef MISTER_LW_BLKSZ
 localparam  [2:0] LW_BLKSZ     = `MISTER_LW_BLKSZ;
 `else
 localparam  [2:0] LW_BLKSZ     = 3'd2;
 `endif
+`ifdef MISTER_LW_SAVE0_SLOT
+localparam        LW_SAVE0_EN    = 1;
+localparam [31:0] LW_SAVE0_SLOT  = `MISTER_LW_SAVE0_SLOT;
+`else
+localparam        LW_SAVE0_EN    = 0;
+localparam [31:0] LW_SAVE0_SLOT  = 32'hE;
+`endif
 `ifdef MISTER_LW_SAVE0_WSRC
-localparam  [3:0] LW_SAVE0_SLOT  = `MISTER_LW_SAVE0_SLOT;
 localparam [31:0] LW_SAVE0_WSRC  = `MISTER_LW_SAVE0_WSRC;
+`else
+localparam [31:0] LW_SAVE0_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_EXTENT
 localparam [31:0] LW_SAVE0_EXT   = `MISTER_LW_SAVE0_EXTENT;
 `else
-localparam  [3:0] LW_SAVE0_SLOT  = 4'hE;
-localparam [31:0] LW_SAVE0_WSRC  = 32'd0;
 localparam [31:0] LW_SAVE0_EXT   = 32'd0;
 `endif
 `ifdef MISTER_LW_SAVE0_FRAME
-localparam  [9:0] LW_SAVE0_FRAME = `MISTER_LW_SAVE0_FRAME;
+localparam [31:0] LW_SAVE0_FRAME = `MISTER_LW_SAVE0_FRAME;
 `else
-localparam  [9:0] LW_SAVE0_FRAME = 10'd256;
+localparam [31:0] LW_SAVE0_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE0_LBA_BITS
+localparam [31:0] LW_SAVE0_LBAB  = `MISTER_LW_SAVE0_LBA_BITS;
+`else
+localparam [31:0] LW_SAVE0_LBAB  = 32'd32;
+`endif
+`ifdef MISTER_LW_SAVE1_SLOT
+localparam        LW_SAVE1_EN    = 1;
+localparam [31:0] LW_SAVE1_SLOT  = `MISTER_LW_SAVE1_SLOT;
+`else
+localparam        LW_SAVE1_EN    = 0;
+localparam [31:0] LW_SAVE1_SLOT  = 32'hF;
 `endif
 `ifdef MISTER_LW_SAVE1_WSRC
-localparam  [3:0] LW_SAVE1_SLOT  = `MISTER_LW_SAVE1_SLOT;
 localparam [31:0] LW_SAVE1_WSRC  = `MISTER_LW_SAVE1_WSRC;
+`else
+localparam [31:0] LW_SAVE1_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_EXTENT
 localparam [31:0] LW_SAVE1_EXT   = `MISTER_LW_SAVE1_EXTENT;
 `else
-localparam  [3:0] LW_SAVE1_SLOT  = 4'hF;
-localparam [31:0] LW_SAVE1_WSRC  = 32'd0;
 localparam [31:0] LW_SAVE1_EXT   = 32'd0;
 `endif
 `ifdef MISTER_LW_SAVE1_FRAME
-localparam  [9:0] LW_SAVE1_FRAME = `MISTER_LW_SAVE1_FRAME;
+localparam [31:0] LW_SAVE1_FRAME = `MISTER_LW_SAVE1_FRAME;
 `else
-localparam  [9:0] LW_SAVE1_FRAME = 10'd256;
+localparam [31:0] LW_SAVE1_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE1_LBA_BITS
+localparam [31:0] LW_SAVE1_LBAB  = `MISTER_LW_SAVE1_LBA_BITS;
+`else
+localparam [31:0] LW_SAVE1_LBAB  = 32'd32;
 `endif
 
 `ifdef LW_LANE_LINK
@@ -1970,9 +2002,11 @@ hps_lw_bridge hps_lw_bridge
 
 lw_sys_window #(
 	.PAD_EN(LW_PAD_EN), .EVT_EN(LW_EVT_EN), .OSD_EN(LW_OSD_EN),
-	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .BLKSZ(LW_BLKSZ),
-	.SAVE0_SLOT(LW_SAVE0_SLOT), .SAVE0_WSRC(LW_SAVE0_WSRC), .SAVE0_EXT(LW_SAVE0_EXT), .SAVE0_FRAME(LW_SAVE0_FRAME),
-	.SAVE1_SLOT(LW_SAVE1_SLOT), .SAVE1_WSRC(LW_SAVE1_WSRC), .SAVE1_EXT(LW_SAVE1_EXT), .SAVE1_FRAME(LW_SAVE1_FRAME),
+	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .SEC_GAP(LW_SEC_GAP), .BLKSZ(LW_BLKSZ),
+	.SAVE0_EN(LW_SAVE0_EN), .SAVE0_SLOT(LW_SAVE0_SLOT), .SAVE0_WSRC(LW_SAVE0_WSRC), .SAVE0_EXT(LW_SAVE0_EXT),
+	.SAVE0_FRAME(LW_SAVE0_FRAME), .SAVE0_LBA_BITS(LW_SAVE0_LBAB),
+	.SAVE1_EN(LW_SAVE1_EN), .SAVE1_SLOT(LW_SAVE1_SLOT), .SAVE1_WSRC(LW_SAVE1_WSRC), .SAVE1_EXT(LW_SAVE1_EXT),
+	.SAVE1_FRAME(LW_SAVE1_FRAME), .SAVE1_LBA_BITS(LW_SAVE1_LBAB),
 	.LANE_EN(LW_LANE_EN)
 ) lw_sys_window
 (
@@ -1991,6 +2025,7 @@ lw_sys_window #(
 	.lines(lw_lines),
 	.clk_sys(clk_sys),
 	.hps_lw(lw_bus),
+	.io_wide(io_wide),
 `ifdef LW_OSD_PORTS
 `ifdef MISTER_DEBUG_NOHDMI
 	.osd_sel({io_osd_vga, 1'b0}),            // no HDMI osd

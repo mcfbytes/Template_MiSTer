@@ -16,10 +16,13 @@
 #   0  LW_DIAG=0 (shipping build), every tier but the lane
 #   M  LW_DIAG=0 with MENU_CORE (the OSD's header rows only: stored over LW, drawn as over SPI)
 #   F  LW_DIAG=0 with the floor, PAD and EVT (the Template's own configuration): no SECTOR files, no muxes, no OSD
-#   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots)
+#   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots, 32-bit LBAs)
+#   W  LW_DIAG=0 with hps_io at WIDE=0 (byte strobes), a 4096-word primary on hps_io slot 9, save slots of 510 and
+#      256 words with 32-bit LBAs on slots 12 and 15, strobes 5 cycles apart (LW_TB_GEOMW): T-SEC6
 #   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
 #   X  each tier macro without MISTER_LW: the compile of hps_io fails, naming lw_tier_needs_MISTER_LW (and
-#      compiles without the macro, and with MISTER_LW)
+#      compiles without the macro, and with MISTER_LW); and each unservable SECTOR geometry: the compile of the
+#      window fails, naming lw_sector_unservable_geometry (and the servable edges compile)
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -155,6 +158,52 @@ xarm() {
   if [ $r -eq 0 ]; then echo "pass no macro: compiles" >> "$1"
   else f=$((f + 1)); echo "FAIL no macro: does not compile" >> "$1"; head -5 "$O/lw_x.err" | sed 's/^/   /' >> "$1"
   fi
+  # the SECTOR geometry, through the window's parameters (sys_top.v maps the macros onto them one to one): each
+  # unservable one stops the compile naming the guard; the servable edges, and an undeclared save slot whatever
+  # its geometry, compile
+  cat > "$O/lw_xg_top.sv" <<'EOS'
+module lw_xg_top #(parameter [31:0] SLOT = 1, FRAME = 128, GAP = 2, S0EN = 1, S0SLOT = 2, S0WSRC = 32'h30000000,
+                   S0FRAME = 256, S0LBA = 32, S1EN = 0, S1SLOT = 3, S1WSRC = 32'h30100000, S1FRAME = 256, S1LBA = 32);
+lw_sys_window #(.SEC_EN(1), .SEC_SLOT(SLOT), .SEC_FRAME(FRAME), .SEC_GAP(GAP), .SAVE0_EN(S0EN), .SAVE0_SLOT(S0SLOT),
+                .SAVE0_WSRC(S0WSRC), .SAVE0_FRAME(S0FRAME), .SAVE0_LBA_BITS(S0LBA), .SAVE1_EN(S1EN),
+                .SAVE1_SLOT(S1SLOT), .SAVE1_WSRC(S1WSRC), .SAVE1_FRAME(S1FRAME), .SAVE1_LBA_BITS(S1LBA)) win();
+endmodule
+EOS
+  XG="sys/lw_cdc.sv sys/lw_sys_window.sv sys/lw_sector.sv"
+  while IFS='|' read -r want what p; do
+    echo "-- geometry: $what" >> "$1"
+    P=""; for a in $p; do P="$P -Plw_xg_top.$a"; done
+    iverilog -g2012 -DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 $P -I sys -s lw_xg_top -o "$O/lw_xg.vvp" "$O/lw_xg_top.sv" \
+      $XG > "$O/lw_xg.err" 2>&1
+    r=$?; n=$((n + 1)); g=$(grep -c lw_sector_unservable_geometry "$O/lw_xg.err")
+    if [ "$want" = bad ]; then
+      if [ $r -ne 0 ] && [ "$g" -gt 0 ]; then echo "pass $what: stops, naming the guard" >> "$1"
+      else f=$((f + 1)); echo "FAIL $what: status $r, the guard $g times in the errors" >> "$1"
+      fi
+    elif [ $r -eq 0 ]; then echo "pass $what: compiles" >> "$1"
+    else f=$((f + 1)); echo "FAIL $what: does not compile" >> "$1"; head -5 "$O/lw_xg.err" | sed 's/^/   /' >> "$1"
+    fi
+  done <<'EOG'
+bad|a primary frame of 0 words|FRAME=0
+bad|a primary frame of 4097 words|FRAME=4097
+bad|a gap of 1|GAP=1
+bad|a gap of 16|GAP=16
+bad|the primary on hps_io slot 16|SLOT=16
+bad|a save-slot frame of 0 words|S0FRAME=0
+bad|a save-slot frame of 511 words (the FIFO's entries - 1)|S0FRAME=511
+bad|a save slot keeping 0 LBA bits|S0LBA=0
+bad|a save slot keeping 33 LBA bits|S0LBA=33
+bad|a save slot on hps_io slot 16|S0SLOT=16
+bad|a save slot on the primary's hps_io slot|S0SLOT=1
+bad|a save slot without an image base|S0WSRC=0
+bad|two save slots on one hps_io slot|S1EN=1 S1SLOT=2
+bad|save slot 1's frame of 511 words|S1EN=1 S1FRAME=511
+bad|save slot 1 without an image base|S1EN=1 S1WSRC=0
+ok|the default geometry|
+ok|the edges: a 4096-word primary on slot 15, gap 15, save slots of 510 words keeping 1 and 32 LBA bits|FRAME=4096 GAP=15 SLOT=15 S0SLOT=0 S0FRAME=510 S0LBA=1 S1EN=1 S1SLOT=14 S1FRAME=510 S1LBA=32
+ok|a one-word primary, gap 2, a one-word save slot|FRAME=1 S0FRAME=1
+ok|an undeclared save slot, whatever its geometry|S1EN=0 S1SLOT=1 S1FRAME=0 S1LBA=0 S1WSRC=0
+EOG
   if [ $f -eq 0 ]; then echo "PASSED: $n checks, 0 failures" >> "$1"; else echo "FAILED: $n checks, $f failures" >> "$1"; fi
 }
 
@@ -217,7 +266,7 @@ verdict() {
 
 O=${LW_TB_OUT:-tb/out}; mkdir -p "$O"; rc=0; R=""
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
-for g in ${LW_TB_ARMS:-S N E Z 1 0 M F G L X T B R12 R20 R21 R33 R53 R62 R100 R150 V}; do
+for g in ${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 V}; do
   if [ "$g" = N ]; then
     echo "== arm N: tb/static.sh"
     sh tb/static.sh > "$O/lw_staticN.log" 2>&1
@@ -256,7 +305,7 @@ for g in ${LW_TB_ARMS:-S N E Z 1 0 M F G L X T B R12 R20 R21 R33 R53 R62 R100 R1
     continue
   fi
   if [ "$g" = X ]; then
-    echo "== arm X: a tier macro without MISTER_LW stops the build in hps_io"
+    echo "== arm X: a tier macro without MISTER_LW stops the build in hps_io; an unservable SECTOR geometry in the window"
     xarm "$O/lw_tierX.log"
     grep -v "^pass " "$O/lw_tierX.log"
     V=$(verdict X "$O/lw_tierX.log") || rc=1
@@ -282,6 +331,7 @@ for g in ${LW_TB_ARMS:-S N E Z 1 0 M F G L X T B R12 R20 R21 R33 R53 R62 R100 R1
     M) D="$B $A -DLW_DIAG=0 -DMENU_CORE";;
     F) D="$B $P -DLW_DIAG=0";;
     G) D="$B $A -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
+    W) D="$B $A -DLW_DIAG=0 -DLW_TB_GEOMW";;
     L) D="$B $L";;
     R12) D="$B $C -DLW_TB_SYS_HP_PS=41667";;
     R20) D="$B $C -DLW_TB_SYS_HP_PS=25000";;

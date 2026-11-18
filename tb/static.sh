@@ -376,11 +376,11 @@ GRAYBUS = ['sector_w', 'sector_r', 'lane_w', 'lane_r', 'lane_rw', 'lane_rr', 'os
 XREAD_ALLOW = set()
 # The input and inout ports on a block's second clock. Every other one is on the block's port clk, or on the one clock
 # of a block that has no clk port.
-PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit x_rd x_wr x_lba x_hps_ack'),
+PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit c_wide x_rd x_wr x_lba x_hps_ack'),
            'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
-           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw')}
+           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
 # piece leaves it to the pull-down. Only these nets, each assigned exactly this select, are exempt; every other bit
 # of hps_lw is on clk_sys and crosses through a cell.
