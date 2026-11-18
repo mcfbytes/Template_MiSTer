@@ -104,19 +104,22 @@ end
 endmodule
 
 // A save-slot consumer (a memory card's usual HPS handshake): rd or wr with the LBA, both dropped on ack; the
-// transfer ends when ack falls. The buffer (dpram port B) is written on write & ack at addr.
+// transfer ends when ack falls. The buffer (dpram port B) is written on write & ack at addr. hold (the cases set
+// it): 1 keeps the request raised through the ack, 2 drops it in the cycle after the ack falls. acks counts falls.
 module mc_model(input clk, input reset, output reg rd = 0, output reg wr = 0, output reg [6:0] lba = 0,
                 input ack, input write, input [8:0] addr, input [15:0] din, input [8:0] haddr, output reg [15:0] dout);
 reg  [15:0] ram [0:511];
-integer     strobes = 0, done = 0;
-reg         busy = 0, seen = 0;
+integer     strobes = 0, done = 0, acks = 0, hold = 0;
+reg         busy = 0, seen = 0, ack_d = 0;
 always @(posedge clk) begin
 	dout <= ram[haddr];
+	ack_d <= ack;
+	if (ack_d && !ack) acks <= acks + 1;
 	if (write && ack) begin
 		ram[addr] <= din;
 		strobes   <= strobes + 1;
 	end
-	if (ack) begin rd <= 0; wr <= 0; end
+	if (hold == 0 ? ack : hold == 2 && ack_d && !ack) begin rd <= 0; wr <= 0; end
 	if (reset) begin rd <= 0; wr <= 0; busy <= 0; seen <= 0; end
 	else if (busy) begin
 		if (ack) seen <= 1;
@@ -696,8 +699,10 @@ function [511:0] pure_win;
 endfunction
 function [511:0] pure_sec;
 `ifdef MISTER_LW_SECTOR_SLOT
-	pure_sec = {206'd0, win.sec.sector.pending, win.sec.sector.gen, win.sec.sector.ans, win.sec.sector.btag,
-	           win.sec.sector.lba, win.sec.sector.xlba, win.sec.sector.wptr, win.sec.sector.exp_w,
+	pure_sec = {199'd0, win.sec.sector.cause, win.sec.sector.gen, win.sec.sector.ans, win.sec.sector.btag,
+	           win.sec.sector.rq_off0, win.sec.sector.rq_lba, win.sec.sector.rq_xoff, win.sec.sector.rq_xrd,
+	           win.sec.sector.rq_xwr, win.sec.sector.rq_xlba, win.sec.sector.abort_pend, win.sec.sector.wptr,
+	           win.sec.sector.exp_w,
 	           win.sec.sector.flen_w, win.sec.sector.fdrops, win.sec.sector.bfail, win.sec.sector.en_lwx,
 	           win.sec.sector.xen_lwx, win.sec.sector.test_lwx, win.sec.sector.frames, win.sec.sector.drops,
 	           win.sec.sector.hw, win.sec.sector.n_rej, win.sec.sector.n_skip, win.sec.sector.n_abort,
@@ -1274,7 +1279,8 @@ endfunction
 wire tr_sec, tr_osd, tr_lane;
 `ifdef MISTER_LW_SECTOR_SLOT
 assign tr_sec = !win.sec.sector.hen_s && win.sec.sector.cs1 == 0 && !win.sec.sector.en_sys &&
-                win.sec.sector.x_en_sys == 0 && (win.sec.sector.fs == 0 || win.sec.sector.fs == 4) &&
+                win.sec.sector.x_en_sys == 0 && win.sec.sector.fidle && win.sec.sector.offd == 0 &&
+                win.sec.sector.dirty == 0 && !win.sec.sector.rc_busy &&
                 !win.sec.sector.qv && !win.sec.sector.em && win.sec.sector.fack == 0 && !win.sec.sector.o_wr &&
                 {1'b0, win.sec.sector.rptr} == tb_g2b({1'b0, win.sec.sector.wg_s}) &&
                 win.sec.sector.sector_r_lwgray == (win.sec.sector.rptr ^ (win.sec.sector.rptr >> 1));
@@ -1417,6 +1423,7 @@ localparam [20:0] DIRB = 21'h40000;           // the directory
 localparam [20:0] SCR  = DIRB + 21'h28;      // its SCRATCH word
 localparam [20:0] SEC = 21'h41000;
 reg [31:0] gen0, d0;
+realtime   t0_en;
 integer n0, s0, overlap = 0;
 
 // a memcard strobe while the LW feeder holds the CD ack: the overlap the mux exists for
@@ -2624,7 +2631,7 @@ task dm_build;
 			e = e + 1;
 		end
 		if (TB_SEC) begin
-			dm_entry(e, 2, 32'h00010001, 32'h01000, 32'h02000, 32'h01000, 1, 1);       // SECTOR: line 1, cause bit 0
+			dm_entry(e, 2, 32'h00010001, 32'h01000, 32'h02000, 32'h01000, 1, TB_W1 ? 7 : 3);   // line 1, a cause per slot
 			b = 16 + 32 * e + 8;
 			dm[b]     = {8'd1, 8'd0, 6'd0, TB_FRAME[9:0]};                             // K0 {slot, frame words}
 			dm[b + 2] = 32'h02000002;                                                  // K2 {FIFO depth, gap}
@@ -3191,8 +3198,8 @@ task ena_cases;
 		st_req(st_pat(902)); settle;
 		if (TB_SEC) begin cd_request(32'h00007E00); settle; end
 		axi_read(DIRB + 21'h20, 0, v, dl, beats);
-		check("no enable: PENDING shows SYS (and SECTOR)", v,
-		      (TB_SEC ? 32'd1 << TB_E_SEC : 0) | (TB_EVT ? 32'd1 << TB_E_SYS : 0));
+		check("no enable: PENDING shows SYS (SECTOR's request has no EN, so no cause)", v,
+		      TB_EVT ? 32'd1 << TB_E_SYS : 0);
 		check("no enable: every line low", lines, 0);
 		rd("OWNED reads 0", OWNEDA, 32'd0);
 		ena_take;
@@ -3202,7 +3209,8 @@ task ena_cases;
 		   TB_EVT ? 32'd1 << TB_E_SYS : 32'd0);
 		if (TB_SEC) begin
 			sec_wr(21'h10, 32'h1); settle;
-			rd("an EN rise raises SECTOR's cause for its standing request", DIRB + 21'h20, v);
+			rd("an EN rise raises SECTOR's cause for its standing request", DIRB + 21'h20,
+			   (32'd1 << TB_E_SEC) | (TB_EVT ? 32'd1 << TB_E_SYS : 0));
 		end
 		axi_write(LINEN, 32'd1 << TB_E_SYS, 4'hF); settle;
 		check("LINE_EN with SYS's bit: SYS's line alone", lines, TB_EVT ? 3'b010 : 3'b000);
@@ -3227,7 +3235,7 @@ task ena_cases;
 			check("after the ENABLE: SECTOR's cause clear, its request standing", {win.sec_lvl, sd_rd[1]}, 2'b01);
 			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0;
 			cd_request(32'h00007E00); settle;
-			check("a new request: SECTOR's cause pending", win.sec_lvl, 1);
+			check("a new request without EN: no SECTOR cause", win.sec_lvl, 0);
 			n = 0;
 			fork
 				begin repeat (slow(400)) @(negedge clk); end
@@ -3434,7 +3442,7 @@ task fresh_cases;
 			sec_wr(21'h0C, lba);
 			frame_data(lba, 0, 20);                         // the frame begun, its words not all stored
 `ifdef MISTER_LW_SECTOR_SLOT
-			k = 0; while ((win.sec.sector.fs == 3'd0 || win.sec.sector.fs == 3'd4) && k < slow(2000)) begin
+			k = 0; while (win.sec.sector.fidle && k < slow(2000)) begin
 				@(negedge clk); k = k + 1; end
 `endif
 			check("bound: SECTOR's slot on LW, its frame open", {blk_dn[18], k < slow(2000)}, 2'b11);
@@ -3708,7 +3716,7 @@ task ls6;
 			sec_wr(21'h0C, cd_lba);
 			// the ID view once the half has popped the BEGIN and opened its frame (it would discard one still queued)
 `ifdef MISTER_LW_SECTOR_SLOT
-			k = 0; while ((win.sec.sector.fs == 3'd0 || win.sec.sector.fs == 3'd4) && k < slow(2000)) begin
+			k = 0; while (win.sec.sector.fidle && k < slow(2000)) begin
 				@(negedge clk); k = k + 1; end
 			check("the BEGIN popped and its frame open before the ID view", k < slow(2000), 1);
 `endif
@@ -4229,7 +4237,11 @@ task scramble;
 		win.sec.sector.ackc = $random; win.sec.sector.hi = $random; win.sec.sector.fsum = $random;
 		win.sec.sector.evt = $random; win.sec.sector.dcnt = $random; win.sec.sector.dsent = $random;
 		win.sec.sector.dsum = $random; win.sec.sector.fsel = $random; win.sec.sector.fwack = $random;
-		win.sec.sector.rjs = $random; win.sec.sector.rjt = $random; win.sec.sector.rjp = $random;
+		win.sec.sector.offd = $random; win.sec.sector.opn = $random; win.sec.sector.rej = $random;
+		win.sec.sector.rtag = $random; win.sec.sector.dirty = $random; win.sec.sector.rearm = $random;
+		win.sec.sector.rlast = $random; win.sec.sector.rec_x.lwsrc_d = {$random, $random};
+		win.sec.sector.rec_x.lwtg_r = $random;
+		win.sec.sector.rec_x.sync_a.lws0_q = $random; win.sec.sector.rec_x.sync_a.lws1_q = $random;
 		win.sec.sector.fack = $random; win.sec.sector.mt = $random; win.sec.sector.ml = $random;
 		win.sec.sector.en_sys = $random; win.sec.sector.x_en_sys = $random; win.sec.sector.o_wr = $random;
 		win.sec.sector.o_dat = $random; win.sec.sector.o_adr = $random; win.sec.sector.sys_lwx = $random;
@@ -4367,6 +4379,254 @@ task ls8;
 		ena_off;
 	end
 endtask
+
+`ifdef MISTER_LW_SECTOR_SLOT
+// ---- SECTOR's request records (T-SEC1, T-SEC3, T-SEC5, T-SEC7, T-SEC9) ----
+// The CD's request dropped for one clk_sys cycle and raised again with LBA l; the CD reader keeps waiting for its ack.
+task cd_blip(input [31:0] l);
+	begin @(negedge clk_sys); cd_req = 0; @(negedge clk_sys); cd_req = 1; cd_lba = l; end
+endtask
+// Card 1's buffer against the pattern of LBA l
+function integer mc1_bad(input [31:0] l);
+	integer m;
+	begin
+		mc1_bad = 0;
+		for (m = 0; m < 256; m = m + 1) if ({mc1.ram[2*m+1], mc1.ram[2*m]} !== pat(l, m)) mc1_bad = mc1_bad + 1;
+	end
+endfunction
+// Card 1's request served over LW at LBA l: the answer, its frame, the buffer.
+task mc1_serve(input string what, input [31:0] l);
+	integer a0;
+	begin
+		a0 = mc1.acks;
+		sec_wr(21'h48, l);
+		frame_data(l, 0, 256);
+		repeat (1500) @(negedge clk_sys);
+		check({what, ": card 1's frame done"}, mc1.acks - a0, 1);
+		check({what, ": card 1's buffer byte-exact"}, mc1_bad(l), 0);
+	end
+endtask
+
+// T-SEC5: clk_sys edges from card 1's ack fall to its request's next offer.
+integer rof_n = 0, rof_gap = -1;
+reg     rof_off = 0;
+// T-SEC9: changes of the primary's offered in its record's launch cycle and in a handshake, and card 1's reject
+// set in its record's launch cycle. Sampled at the clk_sys edge they meet.
+integer s9_ol = 0, s9_ob = 0, s9_rl = 0;
+always @(posedge clk_sys) begin
+	if (win.sec.sector.offd[1] && !rof_off) rof_gap = rof_n;
+	rof_off = win.sec.sector.offd[1];
+	rof_n = card_dn[10] ? 0 : rof_n + 1;
+	if ((win.sec.sector.off_d[0] ^ win.sec.sector.offd[0]) && win.sec.sector.lsel[0]) s9_ol = s9_ol + 1;
+	if ((win.sec.sector.off_d[0] ^ win.sec.sector.offd[0]) && win.sec.sector.rc_busy) s9_ob = s9_ob + 1;
+	if (win.sec.sector.rj_set[1] && win.sec.sector.lsel[1]) s9_rl = s9_rl + 1;
+end
+
+task sec_rec_cases;
+	reg [31:0] l, v;
+	integer t, a0, o0, b0, r0;
+	string  w;
+	begin
+		$display("-- T-SEC1: a request dropped for one clk_sys cycle and raised again before its BEGIN: seen again, served once");
+		for (t = 0; t < 2; t = t + 1) begin
+			w = t ? "a new LBA" : "the same LBA";
+			l = 32'h00005100 + 16 * t;
+			n0 = cd_frames;
+			cd_request(l); settle; cause_drain(SEC);
+			cd_blip(l + t); l = l + t; settle;
+			rd({w, ": the re-open raises the cause"}, SEC, 32'h1);
+			rd({w, ": REQ shows it"}, SEC + 21'h04, 32'h800080C5);
+			rd({w, ": LBA is the live one"}, SEC + 21'h08, l);
+			cause_drain(SEC);
+			sec_wr(21'h0C, l);
+			frame_data(l, 0, TB_FRAME);
+			wait_frame(n0);
+			check_buf({w, ": the frame byte-exact"}, l, TB_FRAME);
+			repeat (slow(400)) @(negedge clk);
+			check({w, ": served once"}, cd_frames - n0, 1);
+			rd({w, ": REQ idle after it"}, SEC + 21'h04, 32'd0);
+			check({w, ": no ring left"}, doorbell, 0);
+		end
+
+		$display("-- T-SEC1: the same after its BEGIN, queued behind a card frame: that BEGIN serves the same LBA; a new one rejects it and re-opens");
+		for (t = 0; t < 2; t = t + 1) begin
+			w = t ? "a new LBA after the BEGIN" : "the same LBA after the BEGIN";
+			l = 32'h00005300 + 16 * t;
+			n0 = cd_frames; a0 = mc1.acks;
+			mc1.go(0, 7'h51 + t); cd_request(l); settle; cause_drain(SEC);
+			sys_run = 0;                                        // stored with clk_sys stopped, at any rate:
+			sec_wr(21'h48, 32'h51 + t);
+			frame_data(32'h51 + t, 0, 256);                     // card 1's frame holds the feeder ...
+			sec_wr(21'h0C, l);                                  // ... with the CD's answer queued behind it
+			sys_run = 1;
+			cd_blip(l + t); settle;
+			rd({w, ": the re-raise is seen"}, SEC, 32'h1);
+			cause_drain(SEC);
+			repeat (1500) @(negedge clk_sys);
+			check({w, ": card 1's frame done"}, mc1.acks - a0, 1);
+			check({w, ": card 1's buffer byte-exact"}, mc1_bad(32'h51 + t), 0);
+			if (!t) begin
+				rd({w, ": the queued BEGIN serves it: no cause"}, SEC, 32'd0);
+				rd({w, ": REQ idle while it is served"}, SEC + 21'h04, 32'd0);
+			end
+			else begin
+				rd({w, ": the queued BEGIN is rejected and the request re-opens"}, SEC, 32'h1);
+				rd({w, ": REQ shows it"}, SEC + 21'h04, 32'h800080C5);
+				rd({w, ": LBA is the live one"}, SEC + 21'h08, l + 1);
+				l = l + 1;
+				cause_drain(SEC);
+				sec_wr(21'h0C, l);
+			end
+			frame_data(l, 0, TB_FRAME);
+			wait_frame(n0);
+			check_buf({w, ": the frame byte-exact"}, l, TB_FRAME);
+			repeat (slow(400)) @(negedge clk);
+			check({w, ": served once"}, cd_frames - n0, 1);
+			rd({w, ": REQ idle after it"}, SEC + 21'h04, 32'd0);
+			check({w, ": no ring left"}, doorbell, 0);
+		end
+
+		$display("-- T-SEC3: a BEGIN met while a frame streams zero-fills that frame and re-opens its own request");
+		n0 = cd_frames;
+		cd_request(32'h00005500); mc1.go(0, 7'h55); settle; cause_drain(SEC);
+		axi_read(SEC + 21'h20, 0, d0, dl, beats);
+		sec_wr(21'h0C, 32'h00005500);
+		frame_data(32'h00005500, 0, 100);
+		repeat (slow(3000)) @(negedge clk);                      // the 100 words played; the frame waits for more
+		sec_wr(21'h48, 32'h00000055); settle;                  // card 1's answer, met mid-stream
+		wait_frame(n0);
+		check_buf("the streaming frame: 100 words, then zeros", 32'h00005500, 100);
+		rd("card 1's answer rejected: its request re-opens", SEC, 32'h2);
+		rd("REQ shows card 1", SEC + 21'h04, 32'h800080C9);
+		axi_read(SEC + 21'h20, 0, d, dl, beats);
+		check("COUNTS: one reject and one abort more", {d[31:24] - d0[31:24], d[15:8] - d0[15:8]}, dg(16'h0101));
+		cause_drain(SEC);
+		mc1_serve("after the re-open", 32'h00000055);
+		rd("REQ idle", SEC + 21'h04, 32'd0);
+		check("no ring left", doorbell, 0);
+
+		$display("-- T-SEC3: eight stale answers back to back: the request re-opens, at the live LBA");
+		mc1.go(0, 7'h56); settle; cause_drain(SEC);
+		axi_read(SEC + 21'h20, 0, d0, dl, beats);
+		sys_run = 0;
+		for (t = 0; t < 8; t = t + 1) sec_wr(21'h48, 32'h00000060 + t);
+		sys_run = 1; settle;
+		rd("re-opened: card 1's cause", SEC, 32'h2);
+		rd("REQ shows card 1", SEC + 21'h04, 32'h800080C9);
+		rd("LBA_S[2] the live LBA", SEC + 21'h68, 32'h00000056);
+		axi_read(SEC + 21'h20, 0, d, dl, beats);
+		check("COUNTS: eight rejects more", d[31:24] - d0[31:24], dg(8));
+		cause_drain(SEC);
+		mc1_serve("after eight rejects", 32'h00000056);
+		rd("REQ idle", SEC + 21'h04, 32'd0);
+		check("no ring left", doorbell, 0);
+
+		$display("-- T-SEC5: a request held through its frame is offered again two cycles after its ack falls");
+		mc1.hold = 1;
+		mc1.go(0, 7'h57); settle; cause_drain(SEC);
+		rof_gap = -1;
+		mc1_serve("held", 32'h00000057);
+		check("the request still raised after its frame", mc1.rd, 1);
+		check("offered again at the third clk_sys edge after the ack's fall", rof_gap, 3);
+		rd("offered again: card 1's cause", SEC, 32'h2);
+		rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
+		cause_drain(SEC);
+		mc1.hold = 0;
+		mc1_serve("served again, the request dropped on its ack", 32'h00000057);
+		rd("REQ idle", SEC + 21'h04, 32'd0);
+		check("no ring left", doorbell, 0);
+		mc1.hold = 2;                                          // dropped in the cycle after the ack falls
+		mc1.go(0, 7'h58); settle; cause_drain(SEC);
+		rof_gap = -1;
+		mc1_serve("dropped a cycle after its ack's fall", 32'h00000058);
+		check("dropped a cycle after its ack's fall: not offered again", rof_gap, -1);
+		rd("REQ idle", SEC + 21'h04, 32'd0);
+		check("no ring left", doorbell, 0);
+		mc1.hold = 0;
+
+		$display("-- T-SEC7: CTRL.ABORT into a full FIFO is held, stores behind it are refused, and it aborts");
+		n0 = cd_frames;
+		cd_request(32'h00005900); settle; cause_drain(SEC);
+		sec_wr(21'h0C, 32'h00005900); settle;
+		sys_run = 0;
+		frame_data(32'h00005900, 0, 520);                       // 512 taken, the FIFO full
+		sec_wr(21'h10, 32'hC3);                                  // EN as before, and ABORT: held
+		sec_data(512, pat(32'h00005900, 512));                   // refused behind it
+		rd("ACCEPT: 512 taken, 9 refused (the ABORT is held, not dropped)", SEC + 21'h18, 32'h00090200);
+		sys_run = 1;
+		wait_frame(n0);
+		check_buf("the 512 words, then zeros: the held ABORT aborted the frame", 32'h00005900, 512);
+		rd("REQ idle", SEC + 21'h04, 32'd0);
+
+		$display("-- T-SEC7: EN cleared mid-frame with DATA outstanding zero-fills the primary's frame");
+		n0 = cd_frames;
+		cd_request(32'h00005A00); settle; cause_drain(SEC);
+		sec_wr(21'h0C, 32'h00005A00);
+		frame_data(32'h00005A00, 0, 50);
+		repeat (slow(1500)) @(negedge clk);
+		sec_wr(21'h10, 32'hC0);
+		wait_frame(n0);
+		check_buf("50 words, then zeros", 32'h00005A00, 50);
+		t = 0; while (blk_dn[18:17] != 0 && t < slow(5000)) begin @(negedge clk); t = t + 1; end
+		check("the primary back on SPI, its ack done", blk_dn[18:17], 2'b00);
+		sec_wr(21'h10, 32'hC1); settle;
+
+		$display("-- T-SEC9: offered changes in every phase of its record's launch: REQ ends on the final state, every open rings");
+		o0 = s9_ol; b0 = s9_ob;
+		for (t = 0; t < 32; t = t + 1) begin
+			l = 32'h00005C00 + 16 * t;
+			cause_drain(SEC);
+			cd_request(l);
+			repeat (t % 16) @(negedge clk_sys);
+			@(negedge clk_sys); cd_req = 0;
+			if (t < 16) begin @(negedge clk_sys); cd_req = 1; cd_lba = l + 1; end   // raised again, a new LBA
+			settle;
+			if (t < 16) begin
+				rd($sformatf("dropped at %0d and raised again: the cause", t), SEC, 32'h1);
+				rd($sformatf("dropped at %0d and raised again: REQ shows it", t), SEC + 21'h04, 32'h800080C5);
+				rd($sformatf("dropped at %0d and raised again: LBA the final one", t), SEC + 21'h08, l + 1);
+			end
+			else begin
+				rd($sformatf("dropped at %0d: REQ idle", t - 16), SEC + 21'h04, 32'd0);
+				rd($sformatf("dropped at %0d: LBA the final one", t - 16), SEC + 21'h08, l);
+			end
+			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
+			rd($sformatf("pass %0d: REQ idle after the reset", t), SEC + 21'h04, 32'd0);
+		end
+		$display("     changes in the record's launch cycle %0d, during its handshake %0d", s9_ol - o0, s9_ob - b0);
+		check("some changes met the launch cycle", s9_ol > o0, 1);
+		check("some changes met a handshake", s9_ob > b0, 1);
+		cause_drain(SEC);
+
+		$display("-- T-SEC9: a reject set in every phase of its slot's record launch re-opens the request");
+		r0 = s9_rl;
+		mc1.go(0, 7'h5D); cd_request(32'h00005E00); settle; cause_drain(SEC);
+		for (t = 0; t < 48; t = t + 1) begin
+			@(negedge clk_sys); sys_run = 0;
+			for (a0 = 0; a0 < 12; a0 = a0 + 1) sec_wr(21'h10, 32'hC3);   // twelve idle ABORTs ahead (EN unchanged),
+			for (a0 = 0; a0 < 6; a0 = a0 + 1)                   // then six stale answers for card 1 ...
+				sec_wr(21'h48, 32'h00000100 + 8 * t + a0);
+			repeat (20) @(negedge clk);
+			sys_run = 1;
+			repeat (t) @(negedge clk_sys);
+			cd_blip(32'h00005E00);                              // ... and the CD's records in flight around them
+			repeat (64) @(negedge clk_sys); settle;             // the 18 entries popped, every record landed
+			rd($sformatf("offset %0d: card 1 re-opened by its latest reject, the CD's re-raise seen", t), SEC, 32'h3);
+			cause_drain(SEC);
+		end
+		$display("     rejects set in their slot's launch cycle %0d", s9_rl - r0);
+		check("some rejects met their slot's launch cycle", s9_rl > r0, 1);
+		sec_wr(21'h10, 32'h40); settle;                         // card 1's EN alone: REQ shows it
+		rd("card 1's request not hidden", SEC + 21'h04, 32'h800080C9);
+		sec_wr(21'h10, 32'hC1); settle;
+		cause_drain(SEC);
+		mc1_serve("after the sweep", 32'h0000005D);
+		@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
+		cause_drain(SEC);
+		rd("REQ idle after the sweeps", SEC + 21'h04, 32'd0);
+	end
+endtask
+`endif
 
 // SECTOR's sweep: a primary frame stored in full, the enable ended by an ID view at each offset from the last store's
 // response to after the frame's last strobe (every cycle for the first 24, then a stride): byte-exact every time.
@@ -4872,14 +5132,20 @@ initial begin
 	rd("block end", SEC + 21'h1FFC, 32'd0);
 	check("doorbell low", doorbell, 0);
 
-	$display("-- doorbell on cd_hps_req");
+	$display("-- T-SEC4: a request standing before EN raises no cause; EN's rise raises it, once");
 	axi_read(SEC + 21'h24, 0, gen0, dl, beats);
 	cd_request(32'h00001234);
 	settle;
-	check("doorbell raised", doorbell, 1);
+	check("no cause without EN", doorbell, 0);
+	rd("CAUSE clear without EN", SEC + 21'h00, 32'd0);
 	check("SPI slot 1 offered while EN=0", sd_rd[1], 1);
 	rd("REQ hides a request whose EN is 0", SEC + 21'h04, 32'd0);
-	rd("LBA captured", SEC + 21'h08, 32'h00001234);
+	rd("no record without EN: LBA 0", SEC + 21'h08, 32'd0);
+	rd("GEN unmoved without EN", SEC + 21'h24, dg(gen0));
+	sec_wr(21'h10, 32'h1); t0_en = $realtime; settle;
+	check("EN's rise raises the cause", doorbell, 1);
+	check("the raise came after the EN store", t_fire > t0_en, 1);
+	rd("LBA from the record", SEC + 21'h08, 32'h00001234);
 	rd("GEN +1", SEC + 21'h24, dg(gen0 + 1));
 	rsize = 0; rd("CAUSE byte read: data", SEC + 21'h00, 32'h00000001); rsize = 2;
 	check("byte read does not clear", doorbell, 1);
@@ -4897,6 +5163,8 @@ initial begin
 	check("a store of bit 0 clears the line", doorbell, 0);
 	rd("CAUSE zero iff idle", SEC + 21'h00, 32'd0);
 	sec_wr(21'h10, 32'h1); settle;
+	check("EN stored again over the same request: no cause", doorbell, 0);
+	rd("GEN still +1", SEC + 21'h24, dg(gen0 + 1));
 	rd("REQ is a level (pending once EN)", SEC + 21'h04, 32'h800080C5);
 	rd("LBA_S[1] aliases LBA", SEC + 21'h64, 32'h00001234);
 	rd("STATUS en_sys", SEC + 21'h14, 32'h00000001);
@@ -5015,11 +5283,15 @@ initial begin
 	$display("-- stale BEGIN rejected");
 	n0 = cd_frames;
 	cd_request(32'h0000123A); settle;
+	cause_drain(SEC);
 	sec_wr(21'h0C, 32'h00009999);
 	frame_data(32'h00009999, 0, 8);
 	settle;
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
-	check("STATUS rejecting, ack low", d[3:1], 3'b100);
+	check("STATUS ack low, bit 3 reserved", d[3:1], 3'b000);
+	rd("the reject re-opens the request: its cause", SEC + 21'h00, 32'h00000001);
+	rd("REQ shows it again", SEC + 21'h04, 32'h800080C5);
+	cause_drain(SEC);
 	axi_read(SEC + 21'h20, 0, d, dl, beats);
 	check("COUNTS: rejected 1", {d[31:24], d[15:0]}, dg(24'h010100));
 	sec_wr(21'h0C, 32'h0000123A);
@@ -5062,7 +5334,7 @@ initial begin
 	rd("SUM", SEC + 21'h34, dg(frame_sum(32'h00ABCDEF, 588)));
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("TEST frame counted", d[31:16] - d0[31:16], dg(1));
-	if (!DIAG) check("lean: the BEGIN with no request is rejected", d[3:1], 3'b100);
+	if (!DIAG) rd("lean: the BEGIN with no request is rejected, re-opening nothing", SEC + 21'h04, 32'd0);
 	check("no strobes reached the CD reader", cd_strobes - s0, 0);
 	check("no ack reached the CD reader", cd_frames, n0);
 	sec_wr(21'h10, 32'h1);
@@ -5076,12 +5348,12 @@ initial begin
 
 	$display("-- EN off: the slot goes back to hps_io");
 	sec_wr(21'h10, 32'h0); settle;
-	rd("STATUS en_sys 0", SEC + 21'h14, DIAG ? 32'd0 : 32'h8);   // lean: still rejecting the TEST-less BEGIN
+	rd("STATUS en_sys 0", SEC + 21'h14, 32'd0);
 	n0 = cd_frames;
 	cause_drain(SEC);
 	cd_request(32'h00002000); settle;
 	check("SPI slot 1 offered", sd_rd[1], 1);
-	check("doorbell still rings", doorbell, 1);
+	check("EN 0: no cause", doorbell, 0);
 	spi_frame(32'h00002000);
 	wait_frame(n0);
 	check_buf("frame 0x2000 over SPI through the mux", 32'h00002000, 588);
@@ -5090,8 +5362,9 @@ initial begin
 	begin : sec_race
 		integer k, lost, kept, same, gone, stale, m;
 		realtime t0, lat_f, lat_w, off, lead;
-		// one raise per round: the request rises (EN is 0, so nothing serves it), then a core reset drops it;
+		// one raise per round: the request rises with EN set (nothing answers it), then a core reset drops it;
 		// calibrated from the clk_sys edge each starts on; the store leads the request's edge by up to 48 ns
+		sec_wr(21'h10, 32'h1); settle;
 		cause_drain(SEC);
 		fork
 			begin @(negedge clk_sys) t0 = $realtime; end
@@ -5128,6 +5401,7 @@ initial begin
 		check("the store cleared every raise before it", stale, 0);
 		check("some raises landed in the clear's own cycle (the raise won)", same > 0, 1);
 		check("no ring left after the sweep", doorbell, 0);
+		sec_wr(21'h10, 32'h0); settle;
 	end
 
 	$display("-- memory cards: EN=0 leaves both cards on hps_io");
@@ -5153,7 +5427,7 @@ initial begin
 	mc1.go(0, 7'h12); settle;
 	check("card 1 hidden from hps_io", sd_rd[2], 0);
 	check("card rd rings", doorbell, 1);
-	rd("CAUSE: the event bit", SEC + 21'h00, 32'h00000001);
+	rd("CAUSE: card 1's bit (slot 1)", SEC + 21'h00, 32'h00000002);
 	cause_drain(SEC);
 	rd("REQ card 1 read", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2]", SEC + 21'h68, 32'h00000012);
@@ -5174,7 +5448,7 @@ initial begin
 	n0 = mc2.done; s0 = mc2.strobes; r = mc1.strobes;
 	mc2.go(1, 7'h7F); settle;
 	check("card 2 wr hidden from hps_io", sd_wr[3], 0);
-	rd("CAUSE: the event bit again", SEC + 21'h00, 32'h00000001);
+	rd("CAUSE: card 2's bit (slot 2)", SEC + 21'h00, 32'h00000004);
 	cause_drain(SEC);
 	rd("REQ card 2 write", SEC + 21'h04, 32'h800080CE);
 	rd("LBA_S[3]", SEC + 21'h6C, 32'h0000007F);
@@ -5194,7 +5468,7 @@ initial begin
 	join
 	settle;
 	rd("REQ: the CD first", SEC + 21'h04, 32'h800080C5);
-	rd("CAUSE: one event bit for both", SEC + 21'h00, 32'h00000001);
+	rd("CAUSE: a bit for each", SEC + 21'h00, 32'h00000003);
 	cause_drain(SEC);
 	sec_wr(21'h44, 32'h00003000);                          // BEGIN_S[1] aliases BEGIN
 	rd("REQ: answered CD hidden, card 1 next", SEC + 21'h04, 32'h800080C9);
@@ -5217,12 +5491,15 @@ initial begin
 	mc1.go(0, 7'h21); settle;
 	cause_drain(SEC);
 	sec_wr(21'h48, 32'h00000099); settle;
-	axi_read(SEC + 21'h14, 0, d, dl, beats);
-	check("STATUS rejecting after a stale BEGIN_S", d[3:1], 3'b100);
+	rd("a stale BEGIN_S re-opens card 1: its cause", SEC + 21'h00, 32'h00000002);
+	rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
+	cause_drain(SEC);
 	sec_wr(21'h58, 32'h00000021); settle;                   // WACK for a READ request
-	axi_read(SEC + 21'h14, 0, d, dl, beats);
-	check("STATUS rejecting after a WACK on a read", d[3:1], 3'b100);
+	rd("a WACK on a read re-opens card 1: its cause", SEC + 21'h00, 32'h00000002);
+	rd("REQ shows card 1 after the WACK", SEC + 21'h04, 32'h800080C9);
+	cause_drain(SEC);
 	sec_wr(21'h5C, 32'h00000021); settle;                   // a slot with no request
+	rd("an answer for a slot with no request re-opens nothing", SEC + 21'h00, 32'd0);
 	check("no card strobe, no ack", mc1.strobes - s0 + mc1.done - r, 0);
 	sec_wr(21'h48, 32'h00000021);
 	frame_data(32'h00000021, 0, 256);
@@ -5259,8 +5536,6 @@ initial begin
 	mc1.go(0, 7'h00); settle;                              // ... the load restarts at LBA 0
 	cause_drain(SEC);                                    // the restart's ring, drained early
 	sec_wr(21'h48, 32'h00000030); settle;                  // the stale answer
-	axi_read(SEC + 21'h14, 0, d, dl, beats);
-	check("STATUS rejecting after the stale BEGIN_S", d[3:1], 3'b100);
 	check("the reject re-rings the doorbell", doorbell, 1);
 	rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
 	rd("LBA_S[2] 0", SEC + 21'h68, 32'h00000000);
@@ -5362,6 +5637,8 @@ initial begin
 	repeat (1500) @(negedge clk_sys);
 	check("card 2 frame at 0x34", mc2.done - s0, 1);
 	rd("REQ idle after both re-opened", SEC + 21'h04, 32'd0);
+
+	sec_rec_cases;
 
 	$display("-- card EN off: back to hps_io, no doorbell");
 	sec_wr(21'h10, 32'h1); settle;
@@ -6041,11 +6318,13 @@ initial begin
 			cause_drain(SEC);
 			sec_wr(21'h10, 32'h0); settle;
 			cd_request(32'h00007100); settle;
+			check("order: no SECTOR cause before EN", doorbell, 0);
+			store_read(SEC + 21'h10, 32'h1, SEC + 21'h10, v);
+			check("order: an EN store, then CTRL reads it", v, 32'h1);
+			settle;
 			check("order: SECTOR cause pending", doorbell, 1);
 			store_read(SEC, 32'h1, SEC, v);
 			check("order: a W1C store on SECTOR CAUSE, then CAUSE reads clear", v, 32'd0);
-			store_read(SEC + 21'h10, 32'h1, SEC + 21'h04, v);
-			check("order: an EN store, then REQ shows the open request", v[31], 1);
 			sec_wr(21'h10, 32'h0);
 			@(negedge clk_sys) cd_reset = 1; repeat (4) @(negedge clk_sys); cd_reset = 0; settle;
 			if (doorbell) cause_drain(SEC);
@@ -6211,6 +6490,11 @@ initial begin
 	check("models: a Gray bus took an extra cycle", cg_xa.m_n + cg_xb.m_n > 0, 1);
 	check("models: captures that took a bit still in flight (PAD, EVT's status and events, the cell bench)",
 	      win.pad.pad.pad_x.cap.m_n + win.evt.evt.st_x.cap.m_n + win.evt.evt.ev_x.cap.m_n + cx_a.cap.m_n + cx_b.cap.m_n, 0);
+`ifdef MISTER_LW_SECTOR_SLOT
+	check("models: SECTOR's request records: a capture never took a bit still in flight", win.sec.sector.rec_x.cap.m_n, 0);
+	check("models: SECTOR's record handshake's toggles took extra cycles",
+	      win.sec.sector.rec_x.sync_r.m_n + win.sec.sector.rec_x.sync_a.m_n > 0, 1);
+`endif
 `ifdef MISTER_LW_SECTOR_SLOT
 	check("models: SECTOR's crossings took extra cycles",
 	      win.sec.sector.sys_sync.m_n + win.sec.sector.ctl_sync.m_n > 0, 1);

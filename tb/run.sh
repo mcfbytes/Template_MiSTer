@@ -50,11 +50,8 @@ fi
 # Expected failures, one "arm|case" per line, the case as its "-- " heading prints. An arm with entries passes
 # only if exactly its listed cases fail: an unlisted failure, or a listed case that passes under every seed the
 # arm runs, fails the arm.
-# SECTOR's reject bundle ({tag, slot} sampled as levels beside its toggle) tears under the delay models above
-# about 60 MHz, until requests and their rejects cross as records. Which reject meets a torn sample, if any, depends
-# on the phase the cases before it leave, so the list names the cases that meet one under today's seeds.
-XFAIL='R62|adjacent rejects of two slots: both requests re-open
-R150|adjacent rejects of two slots: both requests re-open'
+# The list is empty.
+XFAIL=''
 export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
