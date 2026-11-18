@@ -57,8 +57,9 @@
 // BEGIN or WACK and at the enable's fall: its request stands, its answered mark clears, and, unless the store that
 // withdrew it answers the same slot, its CAUSE bit rises again while its EN is set and its record shows it offered
 // (not at the fall). The visible pointer (wvis) steps one entry per cycle toward wcom, and its Gray code crosses.
-// A committed frame plays out whole: nothing aborts it, the consumer reset included (that zero-fills the primary's
-// frame alone).
+// A committed frame that the feeder has begun plays out whole: nothing aborts it, the consumer reset included (that
+// zero-fills the primary's frame alone). One still queued when the enable falls is discarded unplayed with every
+// other queued entry, committed or not (below), and its request stands for SPI.
 // The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset)
 // reaches the feeder through the block's enable link alone (lw_fence, lw_cdc.sv): stores reach this block only
 // while the link is open, which is after the feeder has seen the enable.
