@@ -3,7 +3,7 @@
 
 `ifdef MISTER_LW
 `ifdef MISTER_LW_OSD
-// LW_OSD_W: the OSDBUF tier (MISTER_LW_OSD, with MISTER_LW) adds the LW shadow as a second write source.
+// LW_OSD_W: the OSDBUF tier (MISTER_LW_OSD, with MISTER_LW) writes osd_buffer through this block's own write port.
 `define LW_OSD_W
 `endif
 `endif
@@ -28,14 +28,11 @@ module osd
 	output reg    osd_status
 `ifdef LW_OSD_W
 	,
-	// OSDBUF (lw_sys_window.sv): a shadow of osd_buffer stored over the LW bridge.
-	// lw_ctrl = {LWSEL & HR, LWSEL}, registers on clk_lw: video reads the shadow; highres for the shadow.
-	input         clk_lw,
+	// OSDBUF (lw_osd.sv), on clk_sys: one byte of osd_buffer, row lw_addr[12:8], column lw_addr[7:0]. It comes only
+	// while io_osd is low, so the one write statement below takes the SPI byte if both come.
 	input         lw_we,
-	input   [9:0] lw_addr,
-	input  [31:0] lw_data,
-	input   [3:0] lw_be,
-	input   [1:0] lw_ctrl
+	input  [12:0] lw_addr,
+	input   [7:0] lw_byte
 `endif
 );
 
@@ -64,49 +61,21 @@ reg [21:0] osd_w;
 
 reg  [1:0] rot = 0;
 
-`ifdef LW_OSD_W
-// The shadow: four 1024x8 byte lanes written 32 bits wide on clk_lw, read on clk_video beside osd_buffer.
-(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf0[1024];
-(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf1[1024];
-(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf2[1024];
-(* ramstyle="no_rw_check" *) reg  [7:0] lw_buf3[1024];
-
-always @(posedge clk_lw) if (lw_we) begin
-	if (lw_be[0]) lw_buf0[lw_addr] <= lw_data[7:0];
-	if (lw_be[1]) lw_buf1[lw_addr] <= lw_data[15:8];
-	if (lw_be[2]) lw_buf2[lw_addr] <= lw_data[23:16];
-	if (lw_be[3]) lw_buf3[lw_addr] <= lw_data[31:24];
-end
-
-`define LW_SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
-`LW_SYNC reg lwhr_s0 = 0;
-`LW_SYNC reg lwhr_s1 = 0;
-`LW_SYNC reg lwsel_v0 = 0;
-`LW_SYNC reg lwsel_v1 = 0;
-`undef LW_SYNC
-`endif
-
 always@(posedge clk_sys) begin
 	reg [12:0] bcnt;
 	reg  [7:0] cmd;
 	reg        has_cmd;
 	reg        old_strobe;
 	reg        highres = 0;
-
 `ifdef LW_OSD_W
-	reg        hr;
+	reg        spi_we;
 
-	{lwhr_s1, lwhr_s0} <= {lwhr_s0, lw_ctrl[1]};
-	hr = highres | lwhr_s1;
+	spi_we = 0;
+`endif
 
-	osd_t <= rot[0] ? OSD_WIDTH : (OSD_HEIGHT<<1);
-	osd_h <= rot[0] ? (info ? infow : OSD_WIDTH) : info ? infoh : (OSD_HEIGHT<<hr);
-	osd_w <= rot[0] ? (info ? infoh : (OSD_HEIGHT<<hr)) : (info ? infow : OSD_WIDTH);
-`else
 	osd_t <= rot[0] ? OSD_WIDTH : (OSD_HEIGHT<<1);
 	osd_h <= rot[0] ? (info ? infow : OSD_WIDTH) : info ? infoh : (OSD_HEIGHT<<highres);
 	osd_w <= rot[0] ? (info ? infoh : (OSD_HEIGHT<<highres)) : (info ? infow : OSD_WIDTH);
-`endif
 
 	old_strobe <= io_strobe;
 
@@ -142,12 +111,22 @@ always@(posedge clk_sys) begin
 				end
 
 				// command 0x20: OSDCMDWRITE
+`ifdef LW_OSD_W
+				if(cmd[7:5] == 'b001) spi_we = 1;
+`else
 				if(cmd[7:5] == 'b001) osd_buffer[bcnt] <= io_din[7:0];
+`endif
 
 				bcnt <= bcnt + 1'd1;
 			end
 		end
 	end
+`ifdef LW_OSD_W
+
+	// one write port: the SPI byte, else the LW byte; an LW byte in rows 8-15 sets highres as OSDCMDWRITE's bit 3 does
+	if(spi_we | lw_we) osd_buffer[spi_we ? bcnt : lw_addr] <= spi_we ? io_din[7:0] : lw_byte;
+	if(~spi_we & lw_we & lw_addr[11] & ~lw_addr[12]) highres <= 1;
+`endif
 end
 
 (* direct_enable *) reg ce_pix;
@@ -221,22 +200,8 @@ always @(posedge clk_video) begin
 	reg [21:0] osd_hcnt2;
 	reg        osd_de1,osd_de2;
 	reg  [1:0] osd_en;
-`ifdef LW_OSD_W
-	reg        f1 = 0;
-`else
 	reg        f1;
-`endif
 	reg        half;
-`ifdef LW_OSD_W
-	reg [12:0] ra;
-	reg  [7:0] lw_q0, lw_q1, lw_q2, lw_q3;
-	reg  [1:0] lw_lane;
-	reg        lw_hdr;                 // ra[12]: the header rows, never in the shadow
-	reg  [7:0] pbyte;
-
-	lwsel_v0 <= lw_ctrl[0];
-	lwsel_v1 <= lwsel_v0;
-`endif
 
 	if(ce_pix) begin
 
@@ -317,21 +282,8 @@ always @(posedge clk_video) begin
 			end
 		end
 
-`ifdef LW_OSD_W
-		ra = rot[0] ? {1'b0, {osd_hcnt2[6:3], osd_vcnt[7:0]} ^ { {4{~rot[1]}}, {8{rot[1]}} }} : {osd_vcnt[7:3], osd_hcnt[7:0]};
-		osd_byte  <= osd_buffer[ra];
-		lw_q0     <= lw_buf0[ra[11:2]];
-		lw_q1     <= lw_buf1[ra[11:2]];
-		lw_q2     <= lw_buf2[ra[11:2]];
-		lw_q3     <= lw_buf3[ra[11:2]];
-		lw_lane   <= ra[1:0];
-		lw_hdr    <= ra[12];
-		pbyte      = (~lwsel_v1 | lw_hdr) ? osd_byte : lw_lane[1] ? (lw_lane[0] ? lw_q3 : lw_q2) : (lw_lane[0] ? lw_q1 : lw_q0);
-		osd_pixel <= pbyte[rot[0] ? ((osd_hcnt2[2:0]-1'd1) ^ {3{~rot[1]}}) : osd_vcnt[2:0]];
-`else
 		osd_byte  <= osd_buffer[rot[0] ? ({osd_hcnt2[6:3], osd_vcnt[7:0]} ^ { {4{~rot[1]}}, {8{rot[1]}} }) : {osd_vcnt[7:3], osd_hcnt[7:0]}];
 		osd_pixel <= osd_byte[rot[0] ? ((osd_hcnt2[2:0]-1'd1) ^ {3{~rot[1]}}) : osd_vcnt[2:0]];
-`endif
 		osd_de[2:1] <= osd_de[1:0];
 	end
 end

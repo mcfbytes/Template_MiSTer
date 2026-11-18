@@ -32,7 +32,8 @@
 //   - HPS_BUS has the LW width at emu and at hps_io, and each field reaches the other end: the PAD store as
 //     hps_io decodes it, the status hold from hps_io's registers to lw_sys_window, each when its tier is built;
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
-//   - with the OSD tier, each osd instance that exists carries the window's OSDBUF store ports, on clk_100m;
+//   - with the OSD tier, each osd instance that exists carries the window's OSDBUF write port, and the window takes
+//     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd) and GPO[31] on clk_sys;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
 //     also through the lane's link front;
 //   - an LW read through the bridge atom returns the directory magic and the default word;
@@ -356,36 +357,20 @@ initial begin
 `endif
 
 `ifdef MISTER_LW_OSD
-	$display("-- osd: each instance carries the OSDBUF store ports on clk_100m");
+	$display("-- osd: each instance carries the OSDBUF write port");
 	for (k = 0; k < 2; k = k + 1) begin
 		force dut.lw_sys_window.osd_we   = (k != 0) ? 1'b0 : 1'b1;
-		force dut.lw_sys_window.osd_addr = (k != 0) ? 10'h15A : 10'h2A5;
-		force dut.lw_sys_window.osd_data = (k != 0) ? 32'h3F00_11EE : 32'hC0FF_EE11;
-		force dut.lw_sys_window.osd_be   = (k != 0) ? 4'h6 : 4'h9;
-		force dut.lw_sys_window.osd_ctrl = (k != 0) ? 2'b01 : 2'b10;
+		force dut.lw_sys_window.osd_addr = (k != 0) ? 13'h15A5 : 13'h0A5A;
+		force dut.lw_sys_window.osd_byte = (k != 0) ? 8'h3C : 8'hC3;
 		#1;
-		check("vga_osd {lw_we, lw_addr, lw_data, lw_be, lw_ctrl}",
-		      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_data, dut.vga_osd.lw_be, dut.vga_osd.lw_ctrl},
-		      {dut.lw_sys_window.osd_we, dut.lw_sys_window.osd_addr, dut.lw_sys_window.osd_data,
-		       dut.lw_sys_window.osd_be, dut.lw_sys_window.osd_ctrl});
+		check("vga_osd {lw_we, lw_addr, lw_byte}", {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte},
+		      {dut.lw_sys_window.osd_we, dut.lw_sys_window.osd_addr, dut.lw_sys_window.osd_byte});
 `ifndef MISTER_DEBUG_NOHDMI
-		check("hdmi_osd {lw_we, lw_addr, lw_data, lw_be, lw_ctrl}",
-		      {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_data, dut.hdmi_osd.lw_be, dut.hdmi_osd.lw_ctrl},
-		      {dut.lw_sys_window.osd_we, dut.lw_sys_window.osd_addr, dut.lw_sys_window.osd_data,
-		       dut.lw_sys_window.osd_be, dut.lw_sys_window.osd_ctrl});
+		check("hdmi_osd {lw_we, lw_addr, lw_byte}", {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_byte},
+		      {dut.lw_sys_window.osd_we, dut.lw_sys_window.osd_addr, dut.lw_sys_window.osd_byte});
 `endif
 	end
-	release dut.lw_sys_window.osd_we; release dut.lw_sys_window.osd_addr; release dut.lw_sys_window.osd_data;
-	release dut.lw_sys_window.osd_be; release dut.lw_sys_window.osd_ctrl;
-	k = 0;
-	for (i = 0; i < 8; i = i + 1) begin
-		#1.25;
-		if (dut.vga_osd.clk_lw !== clk_100m) k = k + 1;
-`ifndef MISTER_DEBUG_NOHDMI
-		if (dut.hdmi_osd.clk_lw !== clk_100m) k = k + 1;
-`endif
-	end
-	check("osd clk_lw samples that differ from clk_100m", k, 0);
+	release dut.lw_sys_window.osd_we; release dut.lw_sys_window.osd_addr; release dut.lw_sys_window.osd_byte;
 `endif
 
 	$display("-- the link: selects, data and acknowledge as the stock decode makes them");
@@ -402,7 +387,22 @@ initial begin
 `ifndef MISTER_DEBUG_NOHDMI
 		check("hdmi_osd io_osd", dut.hdmi_osd.io_osd, {ss[1] & ~ss[0]});
 `endif
+`ifdef MISTER_LW_OSD
+`ifdef MISTER_DEBUG_NOHDMI
+		check("the OSD writer's selects: the VGA osd's, and 0 for the HDMI osd that is not built",
+		      dut.lw_sys_window.osd_sel, {dut.vga_osd.io_osd, 1'b0});
+`else
+		check("the OSD writer's selects: {VGA, HDMI} as each osd sees them", dut.lw_sys_window.osd_sel,
+		      {dut.vga_osd.io_osd, dut.hdmi_osd.io_osd});
+`endif
+		check("the OSD writer's view: the I/O view", dut.lw_sys_window.osd_view, 1'b1);
+`endif
 	end
+`ifdef MISTER_LW_OSD
+	gp_out = 32'h0000_0000;
+	sys_cycles(6);
+	check("the OSD writer's view: the ID view, GPO[31] on clk_sys", dut.lw_sys_window.osd_view, 1'b0);
+`endif
 	gp_out = 32'h8000_0000;
 	sys_cycles(6);
 	if ((dut.io_wait | dut.vs_wait) === 1'b0) begin

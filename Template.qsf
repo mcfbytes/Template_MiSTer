@@ -92,7 +92,7 @@ set_global_assignment -name SEED 1
 # LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"
 
-# LW OSD shadow, a second write source in each osd (docs/LW_BRIDGE.md, "OSDBUF block")
+# LW OSD image stores, written through each osd's own osd_buffer port (docs/LW_BRIDGE.md, "OSDBUF block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
 
 source sys/sys.tcl

@@ -25,7 +25,7 @@
 #   3. Every LW configuration has LW nets to check; the off configuration has none.
 # Then, once, the crossing structure, on every LW-only file and the LW text of the stock files, with every tier:
 #   4. The cell registers (lws0_, lws1_, lwa0_, lwa1_, lwq_, lwsrc_, lwtg_) are named only in sys/lw_cdc.sv, and
-#      the synchroniser attribute is on its two-flop stages alone, beside the listed exceptions (SYNC_ALLOW).
+#      the synchroniser attribute is on its two-flop stages alone (SYNC_ALLOW lists no exception).
 #      lw_qstat is built only inside lw_xfer, whose capture enable comes from no lwsrc_ register and whose D is
 #      its hold register; an lw_arst input is hps_rst_n or gp_out[31].
 #   5. The D of every lw_sync is a plain reference (names, selects, a concatenation of them) to registers of the
@@ -365,9 +365,8 @@ CDC = 'sys/lw_cdc.sv'
 CELLREG = ('lws0_', 'lws1_', 'lwa0_', 'lwa1_', 'lwq_', 'lwsrc_', 'lwtg_')
 CELLSYNC = {'lws0_q', 'lws1_q', 'lwa0_q', 'lwa1_q'}
 SYNATTR = 'SYNCHRONIZER_IDENTIFICATION'
-# osd.v's two synchronisers (CTRL's two bits into clk_sys and clk_video), until its LW stores write through
-# osd_buffer and the shadow goes
-SYNC_ALLOW = {'sys/osd.v': {'lwhr_s0', 'lwhr_s1', 'lwsel_v0', 'lwsel_v1'}}
+# The stock files' LW text holds no synchroniser: the list is empty
+SYNC_ALLOW = {}
 GRAYBUS = ['sector_w', 'sector_r', 'lane_w', 'lane_r', 'lane_rw', 'lane_rr', 'osd_w', 'osd_r']
 GRAY_ALLOW = {'stflg'}     # the status flag's Gray code, until the status snapshot crosses whole
 # Reads across clocks outside the cells, as (module, register, source): the request LBAs, until requests cross as
@@ -379,7 +378,8 @@ XREAD_ALLOW = {('lw_sector', 'lba', 'c_lba'), ('lw_sector', 'xlba', 'x_lba'),
 PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack x_rd x_wr x_lba x_hps_ack'),
            'lw_evt': ('clk_sys', 'stflg status_req'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
-           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout hps_lw')}
+           'lw_osd': ('clk_sys', 'sel view'),
+           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
 # piece leaves it to the pull-down. Only these nets, each assigned exactly this select, are exempt; every other bit
 # of hps_lw is on clk_sys and crosses through a cell.
@@ -789,7 +789,7 @@ for n, nets in sorted(PRESENCE.items()):
         check(got == sel, '%s: the presence net %s is %s, not %s' % (n, net, got or 'gone', sel))
 print('crossing structure: %d lw_sync instances, %d source registers, %d enable links, %d listed reads across '
       'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
-check(nfence == 2, 'enable links: %d lw_fence instances, not one each in lw_sector and lw_lane' % nfence)
+check(nfence == 3, 'enable links: %d lw_fence instances, not one each in lw_sector, lw_osd and lw_lane' % nfence)
 
 # ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
 print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')

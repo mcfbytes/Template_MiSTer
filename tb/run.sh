@@ -14,7 +14,7 @@
 #   Z  MISTER_LW alone (the floor): no block listed, the enable and the firewall whole
 #   1  LW_DIAG=1 (debug build: diagnostics compiled in), every tier but the lane
 #   0  LW_DIAG=0 (shipping build), every tier but the lane
-#   M  LW_DIAG=0 with MENU_CORE (the osd header-row gate only)
+#   M  LW_DIAG=0 with MENU_CORE (the OSD's header rows only: stored over LW, drawn as over SPI)
 #   F  LW_DIAG=0 with the floor, PAD and EVT (the Template's own configuration): no SECTOR files, no muxes, no OSD
 #   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots)
 #   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
@@ -59,8 +59,8 @@ R150|core reset during a card load: the stale BEGIN_S is rejected, the request r
 export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
-LWF="sys/lw_cdc.sv sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_pad.sv sys/lw_evt.sv sys/lw_sector.sv sys/lw_lane.sv sys/lw_blk_mux.sv"
-LWM="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window lw_pad lw_evt lw_sector lw_lane lw_link lw_blk_mux lw_card_mux"
+LWF="sys/lw_cdc.sv sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_pad.sv sys/lw_evt.sv sys/lw_sector.sv sys/lw_lane.sv sys/lw_osd.sv sys/lw_blk_mux.sv"
+LWM="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window lw_pad lw_evt lw_sector lw_lane lw_link lw_osd lw_blk_mux lw_card_mux"
 LW0="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window"
 LWD="-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_LW_LANE -DMISTER_LW_OSD"
 lint() {
@@ -131,7 +131,7 @@ EOS
 
 # The testbench's files, for every lw_tb arm.
 TBF="tb/lw_tb.sv tb/lw_stub_atom.sv sys/lw_cdc.sv sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_pad.sv"
-TBF="$TBF sys/lw_evt.sv sys/lw_sector.sv sys/lw_lane.sv sys/lw_blk_mux.sv sys/hps_io.sv sys/osd.v"
+TBF="$TBF sys/lw_evt.sv sys/lw_sector.sv sys/lw_lane.sv sys/lw_osd.sv sys/lw_blk_mux.sv sys/hps_io.sv sys/osd.v"
 
 # xarm LOG: arm X. hps_io.sv alone under a stand-in top, per tier macro: without MISTER_LW the compile fails and
 # names the guard; without the macro, and with MISTER_LW and it, the same files compile.
