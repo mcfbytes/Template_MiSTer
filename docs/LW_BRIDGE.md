@@ -505,7 +505,15 @@ lw_blk_mux blk_lw
 ```
 
 - **The mux only switches between requests.** While the host's EN is off, everything passes through to `hps_io` and
-  SPI serves the slot. Each slot's mux switches only while the slot is idle and its SPI ack is low.
+  SPI serves the slot. Each slot's mux switches only while the slot is idle and its SPI ack is low, and moves to
+  the LW side only while `hps_io`'s commit mark reads 0: from a GET_SDSTAT answer that shows the SPI host a request
+  until that host's block transfer ends, or until a GET_SDSTAT shows none, no slot's mux moves. One mark covers
+  every slot, so a bind may take effect one SPI transfer late.
+- **One request, one path.** Serve a request by the path that showed it: over SPI what GET_SDSTAT shows, over LW
+  what REQ offers; the fabric never shows one request on both. Issue a block transfer only for the request the
+  last GET_SDSTAT showed, as a stock host does. A host that starts beside a predecessor's unfinished SPI service
+  issues one GET_SDSTAT after its ENABLE and serves what it shows before its first EN store; until then the slots
+  stay on SPI.
 - **The core's write strobe is muxed, never `hps_io`'s shared `sd_buff_wr`.** An SPI transfer on another slot
   therefore cannot land in an LW frame.
 - **Card slots** use `lw_card_mux #(.CARD(0|1))` the same way, on `sd_rd`/`sd_wr`/`sd_buff_addr`. A card's LBA is 7
@@ -546,8 +554,8 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 384 bits whatever the tiers. `lw_sys_window` owns bits `[383:46]` through one port and drives every to-core bit
 (0 for a tier not built); a from-core bit is driven only by the piece named, when its tier is built. A bit no piece
 drives reads 0. Each piece drives a constant 1 on its presence bit, and the window lists a block only when its tier
-is built and its presence bit reads 1 (SECTOR: at least one slot's mux; a slot whose mux is absent has flags 0 in
-its descriptor and an EN bit that cannot be set).
+is built and its presence bit reads 1 (SECTOR: `hps_io`'s commit mark and at least one slot's mux; a slot whose
+mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 
 | bits | direction | content |
 |---|---|---|
@@ -563,7 +571,8 @@ its descriptor and an EN bit that cannot be set).
 | `[374:372]` | from core | event levels `{upload pending, info pending, a block request stands}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
-| `[383:380]` | - | reserved: nothing drives them; every reader ignores them |
+| `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT`); presence, constant 1: the mark |
+| `[383:382]` | - | reserved: nothing drives them; every reader ignores them |
 
 ## Verification
 
@@ -607,6 +616,10 @@ and 3. They cover:
 - frames that are lost, resent, out of order, aborted, rejected or reset mid-frame;
 - SECTOR requests dropped and raised again one `clk_sys` cycle later, held through their frame, and changed or
   rejected in every phase of a record's launch: each seen, answered and served once, and no slot left hidden;
+- a save slot's read and write request shown by GET_SDSTAT and served over SPI with the EN store landing before,
+  in and around the answer, across the transfer and after it: the mux never moves inside, the transfer is byte for
+  byte and the next request is offered over LW; a mark left by a GET_SDSTAT with no transfer holds every slot on
+  SPI until a GET_SDSTAT shows none; and, through the whole suite, no request acknowledged by both paths;
 - card reads and writes, and their priority;
 - the EVT block: status brackets of four shapes at 64 phase offsets, a 64-offset read/capture race, and BLK, INFO
   and UPLOAD pulses at every spacing to sixteen `clk_sys` cycles, none lost;

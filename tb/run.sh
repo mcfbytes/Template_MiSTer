@@ -23,7 +23,8 @@
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
-#      (LW_TB_BUS46), no SECTOR mux (LW_TB_NOMUX), save slot 1's mux missing (LW_TB_NOSAVE1)
+#      (LW_TB_BUS46), no SECTOR mux (LW_TB_NOMUX), save slot 1's mux missing (LW_TB_NOSAVE1), hps_io's commit
+#      mark missing (LW_TB_NOMARK)
 #   R12 R20 R21 R33 R53 R62 R100 R150  arm L with clk_sys at 12.0, 20.0, 21.477, 33.8688, 53.69, 62.5, 100.0 and
 #      150.0 MHz (the other arms run at 33.8688 MHz without the models); LW_TB_SYS_HP_PS is the half period in ps,
 #      plus 50 ppm. Each runs
@@ -173,7 +174,8 @@ sets() {
     done > "$Q/list"
   else
     A="-DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_LW_LANE -DMISTER_LW_OSD"
-    printf 'bus46 %s -DLW_TB_BUS46\nnomux %s -DLW_TB_NOMUX\nnosave1 %s -DLW_TB_NOSAVE1\n' "$A" "$A" "$A" > "$Q/list"
+    printf 'bus46 %s -DLW_TB_BUS46\nnomux %s -DLW_TB_NOMUX\nnosave1 %s -DLW_TB_NOSAVE1\nnomark %s -DLW_TB_NOMARK\n' \
+      "$A" "$A" "$A" "$A" > "$Q/list"
   fi
   cat > "$Q/one.sh" <<EOS
 n=\$1; shift

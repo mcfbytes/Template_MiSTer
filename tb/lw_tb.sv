@@ -21,7 +21,8 @@
 // runs only where it is built, and the directory, the decode and the lines are checked against the set built.
 // HPS_BUS[383:46] is the window's one port with a weak pull-down, as synthesis ties a net with no source low.
 // LW_TB_TIER runs the short tier run (arm T, and arm B with a core side that leaves pieces out: LW_TB_BUS46, a
-// 46-bit bus at the core; LW_TB_NOMUX, no SECTOR mux; LW_TB_NOSAVE1, save slot 1's mux missing).
+// 46-bit bus at the core; LW_TB_NOMUX, no SECTOR mux; LW_TB_NOSAVE1, save slot 1's mux missing; LW_TB_NOMARK,
+// hps_io's commit mark missing).
 // The reference configuration is a CD-style core: a 588-word primary frame on hps_io slot 1 and two 1 KB memory
 // cards on slots 2 and 3, each card image in DDR. Without MISTER_LW_SECTOR_SLOT the window has no SECTOR block and
 // the consumers meet hps_io directly (the Template's own configuration); the directory, the block's addresses and
@@ -261,9 +262,15 @@ localparam TB_NOSAVE1 = 1;
 `else
 localparam TB_NOSAVE1 = 0;
 `endif
+`ifdef LW_TB_NOMARK
+localparam TB_NOMARK = 1;
+`else
+localparam TB_NOMARK = 0;
+`endif
 localparam TB_PAD = TB_PADB && !TB_BUS46;
 localparam TB_EVT = TB_EVTB && !TB_BUS46;
-localparam TB_SEC = TB_SECB && !TB_BUS46 && !TB_NOMUX;
+localparam TB_CMT = TB_SECB && !TB_BUS46 && !TB_NOMARK;    // hps_io's commit mark reaches the window
+localparam TB_SEC = TB_CMT && !TB_NOMUX;
 localparam TB_W1  = TB_SEC && !TB_NOSAVE1;    // save slot 1 wired
 `ifdef LW_TB_DEFGEOM
 localparam TB_FRAME = 128;
@@ -546,11 +553,18 @@ wire [383:46] core_hi;
 `else
 `define TB_CORE_BUS hps_bus
 `endif
+// hps_io's own view: with LW_TB_NOMARK an hps_io whose commit mark [381:380] goes nowhere.
+`ifdef LW_TB_NOMARK
+wire   [1:0] mark_cut;
+`define TB_IO_BUS {hps_bus[383:382], mark_cut, hps_bus[379:0]}
+`else
+`define TB_IO_BUS `TB_CORE_BUS
+`endif
 
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
-	.HPS_BUS(`TB_CORE_BUS),
+	.HPS_BUS(`TB_IO_BUS),
 `ifdef MISTER_LW_LANE
 	.ioctl_wait(ioctl_wait), .status(hst), .RTC(rtc), .TIMESTAMP(tstamp), .img_mounted(img_m), .img_readonly(img_ro),
 	.img_size(img_sz), .gamma_bus(gbus), .sdram_sz(sdsz), .uart_mode(umode), .uart_speed(uspeed), .EXT_BUS(ebus),
@@ -674,6 +688,45 @@ integer mc_words = 0, mc_sum = 0;
 always @(posedge clk_sys) if (sd_buff_wr && sd_ack[2]) begin
 	mc_words <= mc_words + 1;
 	mc_sum   <= mc_sum + sd_buff_dout;
+end
+
+// One request, one path: a request of the CD, card 1 or card 2 begins at a rise of the core's request, or at a fall
+// of the core's ack that leaves it raised. ap_both counts requests that both hps_io (sd_ack) and the feeder (the
+// slot's LW ack) acknowledged; ap_spi and ap_lw count each path's acks. Throughout the suite, except from a
+// scramble of the clk_sys registers (ap_scr, which sets the acks themselves at random) until its case ends (fc_off).
+reg       fc_off = 0;                   // a case scrambles or forces a link
+integer   ap_both = 0, ap_spi = 0, ap_lw = 0;
+reg       ap_scr = 0;
+reg [2:0] ap_up_d = 0, ap_ack_d = 0, ap_sa_d = 0, ap_la_d = 0, ap_s = 0, ap_l = 0;
+wire [2:0] ap_up  = {mc2.rd | mc2.wr, mc1.rd | mc1.wr, cd_req};
+wire [2:0] ap_ack = {mc2_ack, mc1_ack, cd_ack};
+wire [2:0] ap_sa  = sd_ack[3:1];
+wire [2:0] ap_la  = {hps_bus[131], hps_bus[129], hps_bus[96]};
+always @(posedge clk_sys) begin : ap_mon
+	integer k;
+	if (!fc_off) ap_scr = 0;
+	for (k = 0; k < 3; k = k + 1) begin
+		if (ap_scr) begin ap_s[k] = 0; ap_l[k] = 0; end
+		if ((ap_up[k] === 1'b1 && !ap_up_d[k]) || (ap_ack_d[k] && ap_ack[k] !== 1'b1 && ap_up[k] === 1'b1)) begin
+			ap_s[k] = 0; ap_l[k] = 0;
+		end
+		if (ap_sa[k] === 1'b1 && !ap_sa_d[k]) begin
+			ap_spi = ap_spi + 1;
+			if (ap_l[k] && !ap_s[k]) begin
+				ap_both = ap_both + 1; $display("     slot %0d's request acknowledged over LW, then over SPI, at %0t", k + 1, $time);
+			end
+			ap_s[k] = 1;
+		end
+		if (ap_la[k] === 1'b1 && !ap_la_d[k]) begin
+			ap_lw = ap_lw + 1;
+			if (ap_s[k] && !ap_l[k]) begin
+				ap_both = ap_both + 1; $display("     slot %0d's request acknowledged over SPI, then over LW, at %0t", k + 1, $time);
+			end
+			ap_l[k] = 1;
+		end
+		ap_up_d[k] = ap_up[k] === 1'b1; ap_ack_d[k] = ap_ack[k] === 1'b1;
+		ap_sa_d[k] = ap_sa[k] === 1'b1; ap_la_d[k] = ap_la[k] === 1'b1;
+	end
 end
 
 // Reads have no side effect: the state a read could move, by hierarchical reference. With clk_sys stopped nothing
@@ -1256,7 +1309,6 @@ endtask
 task ena_rd(output [31:0] v); axi_read(ENA, 0, v, dl, beats); endtask
 
 // ---- The enable links: the checker on each, the bench's own rest predicate, ENABLEs against it ----
-reg fc_off = 0;                    // a case scrambles or forces a link
 `ifdef MISTER_LW_SECTOR_SLOT
 fence_chk fc_sec(.clk(clk), .off(fc_off), .st(win.sec.sector.fence.st), .lvl(win.sec.sector.fence.hen_lwx),
                  .ack_s(win.sec.sector.fence.ack_s), .stb(win.sec.sector.wsel & win.sec.sector.write));
@@ -4209,6 +4261,7 @@ endtask
 task scramble;
 	begin
 		@(negedge clk_sys);
+		ap_scr = 1;
 `ifdef MISTER_LW_PAD
 		win.pad.pad.pad_x.lwtg_a = $random; win.pad.pad.pad_x.d_v = $random;
 		win.pad.pad.pad_x.cap.lwq_d = {$random, $random};
@@ -4626,6 +4679,229 @@ task sec_rec_cases;
 		rd("REQ idle after the sweeps", SEC + 21'h04, 32'd0);
 	end
 endtask
+
+// ---- One request, one path (T-SEC10): the EN store against the stock host's GET_SDSTAT and its transfer ----
+// t10_mon: clk_sys edges are counted (t10_n). The window opens at the edge of a GET_SDSTAT answer that shows card 1's
+// request (t10_a) and closes after the edge at which card 1's SPI ack falls (t10_e, the last edge inside it).
+// t10_rise counts rises of card 1's en_sys at an edge inside a window; t10_xl is the edge at which card 1's EN
+// first read 1 on clk_sys (xen_s), so en_sys could rise at t10_xl + 1.
+wire    sp_ans = hps_io.io_enable && hps_io.io_strobe && hps_io.io_din == 16'h0016 && hps_io.byte_cnt == 0;
+integer t10_n = 0, t10_ws = 0, t10_rise = 0, t10_a = -1, t10_e = -1, t10_xl = -1, t10_f = 0;
+reg     t10_inp = 0, t10_xp = 0, t10_sp = 0;
+always @(posedge clk_sys) begin : t10_mon
+	reg inw;
+	inw = 0;
+	if (t10_ws == 0 && sp_ans && hps_io.sdn == 4'd2 && (sd_rd[2] | sd_wr[2]) === 1'b1) begin
+		t10_ws = 1; t10_a = t10_n;
+	end
+	if (t10_ws == 1) begin inw = 1; if (sd_ack[2] === 1'b1) t10_ws = 2; end
+	else if (t10_ws == 2) begin
+		if (sd_ack[2] === 1'b1) inw = 1;
+		else begin t10_ws = 0; t10_e = t10_n - 1; end
+	end
+	if (win.sec.sector.x_en_sys[0] === 1'b1 && !t10_xp && t10_inp) t10_rise = t10_rise + 1;
+	if (win.sec.sector.xen_s[0] === 1'b1 && !t10_sp && t10_xl < 0) t10_xl = t10_n - 1;
+	t10_xp  = win.sec.sector.x_en_sys[0] === 1'b1;
+	t10_sp  = win.sec.sector.xen_s[0] === 1'b1;
+	t10_inp = inw;
+	t10_n   = t10_n + 1;
+end
+
+// The stock host's poll step: GET_SDSTAT (its status word w), then, for the request it shows, the block transfer:
+// a read is SECTOR_RD with 512 words from seed, a write SECTOR_WR, whose words land in t10_buf. xfer 0: no transfer.
+reg [15:0] t10_buf [0:511];
+task spi_poll(input xfer, input [15:0] seed, output [15:0] w);
+	integer m;
+	begin
+		@(negedge clk_sys); io_enable = 1;
+		io_din = 16'h0016; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys); w = hps_io.io_dout;
+		for (m = 1; m < 4; m = m + 1) begin
+			io_din = 16'd0; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys);
+		end
+		io_enable = 0; @(negedge clk_sys);
+		if (xfer && w[1:0] != 2'b00) begin
+			@(negedge clk_sys); io_enable = 1;
+			io_din = {4'd0, w[5:2], w[0] ? 8'h17 : 8'h18}; io_strobe = 1; @(negedge clk_sys); io_strobe = 0;
+			repeat (2) @(negedge clk_sys);
+			for (m = 0; m < 512; m = m + 1) begin
+				io_din = seed + m; io_strobe = 1; @(negedge clk_sys); io_strobe = 0;
+				t10_buf[m] = hps_io.io_dout; repeat (2) @(negedge clk_sys);
+			end
+			io_enable = 0; @(negedge clk_sys);
+		end
+	end
+endtask
+
+// Every en_sys low, or one of them still high after n clk_sys edges
+task t10_low(input integer n);
+	integer t;
+	begin
+		t = 0;
+		while ((blk_dn[18] || card_dn[9] || card_dn[11]) && t < n) begin @(negedge clk_sys); t = t + 1; end
+	end
+endtask
+
+// One step: card 1 raises a read (wr 0) or write (wr 1) request at LBA l; the stock host polls from clk_sys edge
+// lead, and card 1's EN is stored sub ns after edge at. The request is served by the path that showed it, and then the
+// next request (a write at l ^ 0x40) over LW; EN is cleared. Counts: t10_cnt[0] data words wrong, [1] transfers
+// that did not complete card 1's handshake once, [2] requests the answer did not show and LW did not offer or
+// serve, [3] next requests LW did not offer or serve, [4] steps whose answer showed the request, [5] steps after
+// which en_sys did not rise.
+integer t10_cnt [0:5];
+task t10_step(input wr, input [6:0] l, input [15:0] seed, input integer lead, input integer at, input real sub,
+              output integer rel_a, output integer rel_e, output shown);
+	reg [15:0] w;
+	reg [31:0] v;
+	integer m, d0, t;
+	begin
+		for (m = 0; m < 512; m = m + 1) mc1.ram[m] = seed ^ 16'hA5A5 ^ m;
+		d0 = mc1.done;
+		mc1.go(wr, l); settle;
+		@(negedge clk_sys); t10_ws = 0; t10_a = -1; t10_e = -1; t10_xl = -1; t10_f = t10_n;
+		fork
+			begin repeat (lead) @(negedge clk_sys); spi_poll(1, seed, w); end
+			begin repeat (at) @(negedge clk_sys); #(sub); sec_wr(21'h10, 32'h40); end
+		join
+		t = 0; while (t10_xl < 0 && t < 64) begin @(negedge clk_sys); t = t + 1; end
+		rel_a = (t10_a < 0 || t10_xl < 0) ? -1000 : t10_xl - t10_a;
+		rel_e = (t10_e < 0 || t10_xl < 0) ? -1000 : t10_xl - t10_e;
+		shown = w[1:0] != 2'b00;
+		repeat (20) @(negedge clk_sys);
+		if (shown) begin
+			t10_cnt[4] = t10_cnt[4] + 1;
+			for (m = 0; m < 512; m = m + 1)
+				if ((wr ? t10_buf[m] : mc1.ram[m]) !== (wr ? (seed ^ 16'hA5A5 ^ m) : seed + m)) t10_cnt[0] = t10_cnt[0] + 1;
+			if (mc1.done - d0 != 1) t10_cnt[1] = t10_cnt[1] + 1;
+		end
+		else begin
+			axi_read(SEC + 21'h04, 0, v, dl, beats);
+			if (v !== (wr ? 32'h800080CA : 32'h800080C9)) t10_cnt[2] = t10_cnt[2] + 1;
+			if (wr) sec_wr(21'h58, {25'd0, l});
+			else begin sec_wr(21'h48, {25'd0, l}); frame_data({25'd0, l}, 0, 256); end
+			repeat (1500) @(negedge clk_sys);
+			if (mc1.done - d0 != 1 || (!wr && mc1_bad({25'd0, l}) != 0)) t10_cnt[2] = t10_cnt[2] + 1;
+		end
+		t = 0; while (!card_dn[9] && t < slow(400)) begin @(negedge clk_sys); t = t + 1; end
+		if (!card_dn[9]) t10_cnt[5] = t10_cnt[5] + 1;
+		d0 = mc1.done;
+		mc1.go(1, l ^ 7'h40); settle;
+		axi_read(SEC + 21'h04, 0, v, dl, beats);
+		if (v !== 32'h800080CA) t10_cnt[3] = t10_cnt[3] + 1;
+		sec_wr(21'h58, {25'd0, l ^ 7'h40});
+		repeat (100) @(negedge clk_sys);
+		if (mc1.done - d0 != 1) t10_cnt[3] = t10_cnt[3] + 1;
+		sec_wr(21'h10, 32'h0);
+		t10_low(slow(400));
+		cause_drain(SEC);
+	end
+endtask
+
+task sec10_cases;
+	integer i, wr, lat, t, ra, re, dlen, aoff, n_hid, n_crit, n_held, n_end, n_aft, nb, nx;
+	integer tg [0:63];
+	integer ntg, a0, r0;
+	reg [15:0] w;
+	reg        sh;
+	string  dn;
+	begin
+		$display("-- T-SEC10: the EN store in every cycle around a GET_SDSTAT and its transfer: the mux never moves inside");
+		mc1.hold = 0;
+		sec_wr(21'h10, 32'h0); t10_low(slow(400)); cause_drain(SEC);
+		// the EN store's latency, from the clk_sys edge it is issued at to card 1's EN on clk_sys
+		@(negedge clk_sys); lat = 0;
+		fork
+			sec_wr(21'h10, 32'h40);
+			while (!win.sec.sector.xen_s[0]) begin @(negedge clk_sys); lat = lat + 1; end
+		join
+		sec_wr(21'h10, 32'h0); t10_low(slow(400));
+		r0 = t10_rise;
+		for (i = 0; i < 6; i = i + 1) t10_cnt[i] = 0;
+		// a first step with the store long after the transfer measures the answer's edge from the poll's start
+		// (aoff, the link front's delay included) and the window's length (dlen)
+		t10_step(1, 7'h11, 16'h1000, lat + 48, lat + 48 + 3000, 0.0, ra, re, sh);
+		aoff = t10_a - t10_f - (lat + 48);
+		dlen = t10_e - t10_a;
+		$display("     EN store latency %0d clk_sys edges; the answer %0d edges after the poll starts; the window, answer to ack fall, %0d edges",
+		         lat, aoff, dlen);
+		// the landing edges, relative to the answer edge: two before it, every edge from -4 to +12, a stride of
+		// 96 across the transfer, every edge from 8 before its end to 8 after, and -3 to +1 twice more
+		ntg = 0;
+		tg[ntg] = -40; ntg = ntg + 1; tg[ntg] = -12; ntg = ntg + 1;
+		for (t = -4; t <= 12; t = t + 1) begin tg[ntg] = t; ntg = ntg + 1; end
+		for (t = 108; t < dlen - 8 && ntg < 40; t = t + 96) begin tg[ntg] = t; ntg = ntg + 1; end
+		for (t = dlen - 8; t <= dlen + 8 && ntg < 64; t = t + 1) begin tg[ntg] = t; ntg = ntg + 1; end
+		// the edges around the answer once more at two other phases of the poll's start
+		for (t = -3; t <= 1 && ntg < 64; t = t + 1) begin tg[ntg] = t; ntg = ntg + 1; end
+		for (t = -3; t <= 1 && ntg < 64; t = t + 1) begin tg[ntg] = t; ntg = ntg + 1; end
+		for (wr = 0; wr < 2; wr = wr + 1) begin
+			dn = wr ? "a write and SECTOR_WR" : "a read and SECTOR_RD";
+			n_hid = 0; n_crit = 0; n_held = 0; n_end = 0; n_aft = 0;
+			for (i = 0; i < 6; i = i + 1) t10_cnt[i] = 0;
+			for (i = 0; i < ntg; i = i + 1) begin
+				// the answer edge is aoff edges after the poll starts at a0; the store lands lat edges after it is issued
+				a0 = lat + 48 + i % 3;
+				t10_step(wr, 7'h20 + i[6:0], 16'h2000 + 16'h0100 * i[7:0], a0, a0 + aoff + tg[i] - lat, 1.25 * (i % 4),
+				         ra, re, sh);
+				if (!sh) n_hid = n_hid + 1;
+				else if (ra == -1) n_crit = n_crit + 1;
+				else if (re < 0) n_held = n_held + 1;
+				else if (re == 0) n_end = n_end + 1;
+				else n_aft = n_aft + 1;
+			end
+			// the store's landing jitters with the clocks' phase: until one has landed one edge before the answer,
+			// up to 24 more steps around it, each at another sub-cycle offset
+			nx = 0;
+			while (n_crit == 0 && nx < 24) begin
+				a0 = lat + 48 + nx % 3;
+				t10_step(wr, 7'h60 + nx[6:0], 16'h6000 + 16'h0100 * nx[7:0], a0, a0 + aoff - 2 + nx % 3 - lat,
+				         0.625 * (nx % 8), ra, re, sh);
+				if (sh && ra == -1) n_crit = n_crit + 1;
+				nx = nx + 1;
+			end
+			$display("     %s: %0d steps; EN read 1 before the answer %0d, one edge before it %0d, inside the window %0d, at its last edge %0d, after it %0d",
+			         dn, ntg + nx, n_hid, n_crit, n_held, n_end, n_aft);
+			check({dn, ": en_sys rises inside the window"}, t10_rise - r0, 0);
+			check({dn, ": SPI transfers byte for byte (words wrong)"}, t10_cnt[0], 0);
+			check({dn, ": SPI transfers that did not end card 1's handshake once"}, t10_cnt[1], 0);
+			check({dn, ": requests the answer did not show, not served over LW"}, t10_cnt[2], 0);
+			check({dn, ": the next request not offered and served over LW"}, t10_cnt[3], 0);
+			check({dn, ": en_sys did not rise after the transfer"}, t10_cnt[5], 0);
+			check({dn, ": some answers showed the request"}, t10_cnt[4] > 0, 1);
+			check({dn, ": some stores landed before the answer (the request hidden)"}, n_hid > 0, 1);
+			check({dn, ": some stores landed one edge before the answer (held by the answer cycle)"}, n_crit > 0, 1);
+			check({dn, ": some stores landed inside the window"}, n_held > 0, 1);
+			check({dn, ": some stores landed after the window"}, n_aft > 0, 1);
+			r0 = t10_rise;
+		end
+
+		$display("-- T-SEC10: a mark left by a GET_SDSTAT with no transfer holds every en_sys low until one shows none");
+		n0 = mc1.done;
+		mc1.go(0, 7'h33); settle;
+		spi_poll(0, 16'h0, w);
+		check("the GET_SDSTAT shows card 1's read", w[5:0], {4'd2, 2'b01});
+		check("the mark reads 1", hps_bus[380], TB_SEC);
+		sec_wr(21'h10, 32'hC1);
+		nb = 0;
+		repeat (slow(2000)) begin @(negedge clk_sys); if (blk_dn[18] || card_dn[9] || card_dn[11]) nb = nb + 1; end
+		check("EN for every slot stored: no en_sys rose", nb, 0);
+		spi_poll(0, 16'h0, w);
+		check("the request still shows over SPI", w[5:0], {4'd2, 2'b01});
+		repeat (slow(200)) begin @(negedge clk_sys); if (blk_dn[18] || card_dn[9] || card_dn[11]) nb = nb + 1; end
+		check("after it: no en_sys rose", nb, 0);
+		@(negedge clk_sys); mc1.rd = 0; mc1.busy = 0;            // the core drops its request
+		settle;
+		check("still none with the request gone", {blk_dn[18], card_dn[9], card_dn[11]}, 3'b000);
+		spi_poll(0, 16'h0, w);
+		check("a GET_SDSTAT shows no request", w[1:0], 2'b00);
+		repeat (20) @(negedge clk_sys);
+		check("the mark cleared", hps_bus[380], 0);
+		check("every wired slot's en_sys rose", {blk_dn[18], card_dn[9], card_dn[11]}, {1'b1, 1'b1, TB_W1 != 0});
+		check("card 1 never acked", mc1.done - n0, 0);
+		settle;
+		cause_drain(SEC);
+		rd("REQ idle after T-SEC10", SEC + 21'h04, 32'd0);
+	end
+endtask
 `endif
 
 // SECTOR's sweep: a primary frame stored in full, the enable ended by an ID view at each offset from the last store's
@@ -4825,6 +5101,7 @@ task tier_cases;
 		check("PAD listed", win.has_pad, TB_PAD);
 		check("EVT listed", win.has_evt, TB_EVT);
 		check("SECTOR listed", win.has_sec, TB_SEC);
+		check("hps_io's commit mark present", win.pres_cmt, TB_CMT);
 		rd("COUNT", DIRB + 21'h0C, TB_COUNT);
 		pm = (32'd1 << TB_COUNT) - 32'd1;
 		if (TB_SEC) begin
@@ -5639,6 +5916,7 @@ initial begin
 	rd("REQ idle after both re-opened", SEC + 21'h04, 32'd0);
 
 	sec_rec_cases;
+	sec10_cases;
 
 	$display("-- card EN off: back to hps_io, no doorbell");
 	sec_wr(21'h10, 32'h1); settle;
@@ -6523,6 +6801,11 @@ initial begin
 		if (TB_SEC) sec7_sweep;
 	end
 	ena_summary(1);
+
+	$display("-- one request, one path: no request acknowledged by both hps_io and the feeder (the whole suite)");
+	$display("     %0d SPI acks, %0d LW acks", ap_spi, ap_lw);
+	check("requests acknowledged by both paths", ap_both, 0);
+	if (TB_SEC) check("acks met on both paths", ap_spi > 0 && ap_lw > 0, 1);
 
 	$display("-- firewall: idle is a register, 1 exactly while both state machines are idle (the model, every cycle)");
 	$display("     %0d cycles compared with the model of the marks, the machines freed and idle", fm_cycles);

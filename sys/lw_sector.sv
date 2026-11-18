@@ -42,6 +42,10 @@
 // The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset)
 // reaches the feeder through the block's enable link alone (lw_fence, lw_cdc.sv): stores reach this block only
 // while the link is open, which is after the feeder has seen the enable.
+// One request, one path: hps_io's commit mark (c_commit) reads 1 from the GET_SDSTAT answer that shows the SPI host a
+// request until that host's transfer ends or a GET_SDSTAT shows none, and while it does no slot's en_sys rises
+// (falls are not held back). A request is hidden from hps_io from the cycle its en_sys rises, and a BEGIN or WACK is
+// served only with en_sys set, so no request is served by both paths and a mux moves only between requests.
 // Every EN, TEST included, is cleared in the cycle the link's level falls, four cycles after the last stored word
 // has been launched toward clk_sys, so each slot's mux returns to SPI once the feeder is off it and its SPI ack is
 // low, and a frame whose every word was stored still completes with its data. A frame in flight that waits for
@@ -90,6 +94,7 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	input wire        c_req,
 	input wire [31:0] c_lba,
 	input wire        hps_ack,      // the SPI path's ack for this slot
+	input wire        c_commit,     // hps_io's commit mark: the SPI host was shown a request it has not finished
 	output reg        en_sys = 0,   // mux state: 1 = this block owns the consumer's ack/write/data
 	output wire       o_ack,
 	output reg        o_wr   = 0,
@@ -484,10 +489,11 @@ always @(posedge clk_sys) begin
 	o_wr <= 0;
 	if (rj) evt[0] <= ~evt[0];
 
-	// each slot's mux follows its EN only while the feeder is off that slot and its SPI ack is low
-	if ((fidle || fsel != 2'd0) && !hps_ack) en_sys <= en_s;
-	if ((fidle || fsel != 2'd1) && !x_hps_ack[0]) x_en_sys[0] <= xen_s[0];
-	if ((fidle || fsel != 2'd2) && !x_hps_ack[1]) x_en_sys[1] <= xen_s[1];
+	// each slot's mux follows its EN only while the feeder is off that slot and its SPI ack is low, and moves to
+	// this block only while hps_io's commit mark reads 0
+	if ((fidle || fsel != 2'd0) && !hps_ack) en_sys <= en_s & (en_sys | ~c_commit);
+	if ((fidle || fsel != 2'd1) && !x_hps_ack[0]) x_en_sys[0] <= xen_s[0] & (x_en_sys[0] | ~c_commit);
+	if ((fidle || fsel != 2'd2) && !x_hps_ack[1]) x_en_sys[1] <= xen_s[1] & (x_en_sys[1] | ~c_commit);
 
 	if (fs == F_ACK) begin
 		ackc <= ackc - 1'd1;
