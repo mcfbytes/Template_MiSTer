@@ -22,9 +22,10 @@
 //     HPS_BUS[383:46] (sys_top's lw_bus) has a weak pull-down here, as synthesis ties a net with no source low,
 //     and each of its bits is driven exactly when the bit map says: every to-core bit by lw_sys_window, the PAD
 //     and EVT exports and presence bits by hps_io when their tier is built, SECTOR's commit mark and its
-//     presence bit by hps_io when SECTOR is built, and nothing else, since the Template has no SECTOR mux;
-//   - presence: PAD and EVT are listed exactly when built (the Template passes the wide bus to hps_io), SECTOR
-//     never (no mux), OSDBUF and LANE when built, and COUNT agrees;
+//     presence bit by hps_io and the primary's request, LBA and mux presence bit by the Template's block reader
+//     (its lw_blk_mux) when SECTOR is built, and nothing else (the Template has no save-slot mux);
+//   - presence: PAD, EVT and SECTOR are listed exactly when built (the Template passes the wide bus to hps_io and
+//     to its block reader's mux), OSDBUF and LANE when built, and COUNT agrees;
 //   - GPI: the ID view reads the core magic (bits 25, 24 and 22 clear); in the I/O view bit 25 is the firewall's
 //     present output, 1, bit 24 its idle register and bit 22 the window's enable register, in every clk_100m cycle
 //     of the run, each moving when its source is forced; without MISTER_LW bits 27:21 are clear;
@@ -35,6 +36,9 @@
 //   - forcing each bit of lw_sys_window's lines (ordinal k) moves f2h_irq[7+k] at the interrupt atom and no other;
 //   - with the lane, its entry names line 3 and its CAUSE word, and a frame stored through the bridge atom and
 //     played raises the lane's cause and f2h_irq[10] once its LINE_EN bit is set; the store-back lowers it;
+//   - with SECTOR, the Template's block reader: a block served over LW lands in its RAM in strobe order, its sum
+//     and LBA come back once through status_in, and hps_io never sees the request; with the slot's EN clear the
+//     next request reaches hps_io's sd_rd with the next LBA;
 //   - with the OSD tier, each osd instance that exists carries the window's OSDBUF write port, and the window takes
 //     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd) and GPO[31] on clk_sys;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
@@ -144,18 +148,13 @@ task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 assign (weak0, weak1) dut.lw_bus = 338'd0;
 `ifdef MISTER_LW_EVT
 // The Template leaves these hps_io inputs open, and synthesis ties an open input port low; the event exports read
-// them, and the requests also the commit mark.
+// them. With SECTOR the Template's block reader drives the requests.
 assign (weak0, weak1) dut.emu.hps_io.info_req = 1'b0;
 assign (weak0, weak1) dut.emu.hps_io.ioctl_upload_req = 1'b0;
-`define LW_TB_SDTIE
-`endif
-`ifdef MISTER_LW_SECTOR_SLOT
-`define LW_TB_SDTIE
-`endif
-`ifdef LW_TB_SDTIE
+`ifndef MISTER_LW_SECTOR_SLOT
 assign (weak0, weak1) dut.emu.hps_io.sd_rd = 1'b0;
 assign (weak0, weak1) dut.emu.hps_io.sd_wr = 1'b0;
-`undef LW_TB_SDTIE
+`endif
 `endif
 
 `ifdef MISTER_LW_PAD
@@ -169,7 +168,7 @@ localparam TB_EVT = 1;
 localparam TB_EVT = 0;
 `endif
 `ifdef MISTER_LW_SECTOR_SLOT
-localparam TB_SEC = 1;
+localparam TB_SEC = 1, TB_SLOT = `MISTER_LW_SECTOR_SLOT;
 `else
 localparam TB_SEC = 0;
 `endif
@@ -186,7 +185,8 @@ localparam TB_LANE = 0;
 
 // The bits of HPS_BUS[383:46] some piece drives in this configuration (bit i - 46 of the mask is bus bit i): every
 // to-core bit [131:46]; with PAD hps_io's presence bit [375]; with EVT the event pulses [239:237], the status
-// hold [371:240], the event levels [374:372] and [376]; with SECTOR hps_io's commit mark [380] and [381].
+// hold [371:240], the event levels [374:372] and [376]; with SECTOR hps_io's commit mark [380] and [381], and the
+// Template's block reader: its mux's {lba, req, ack, reset} [166:132] and presence bit [377].
 function [383:46] bus_driven;
 	reg [383:0] m;
 	begin
@@ -194,7 +194,7 @@ function [383:46] bus_driven;
 		m[131:46] = '1;
 		if (TB_PAD) m[375] = 1'b1;
 		if (TB_EVT) begin m[374:237] = '1; m[376] = 1'b1; end
-		if (TB_SEC) m[381:380] = 2'b11;
+		if (TB_SEC) begin m[381:380] = 2'b11; m[166:132] = '1; m[377] = 1'b1; end
 		bus_driven = m[383:46];
 	end
 endfunction
@@ -211,6 +211,27 @@ generate for (gb = 46; gb < 384; gb = gb + 1) begin : bw
 		bus_strong[gb] = t.substr(0, 1) != "We";
 	end
 end endgenerate
+
+`ifdef MISTER_LW_SECTOR_SLOT
+// The Template's block reader: its status write-backs, and any sign of its request at hps_io while blk_watch is set.
+integer       n_set = 0, n_hrq = 0;
+reg   [127:0] set_val;
+reg           blk_watch = 0;
+always @(posedge clk_sys) begin
+	if (dut.emu.status_set === 1'b1) begin n_set = n_set + 1; set_val = dut.emu.status_in; end
+	if (blk_watch && (dut.emu.hps_io.sd_rd[TB_SLOT] !== 1'b0 || dut.emu.hps_io.sd_ack[TB_SLOT] !== 1'b0))
+		n_hrq = n_hrq + 1;
+end
+
+task blk_press;   // the Template's second pad button, "Read block" (hps_io's joystick_0 reads x: no SPI host)
+	begin
+		force dut.emu.joystick_0 = 32'h00; sys_cycles(2);
+		force dut.emu.joystick_0 = 32'h20; sys_cycles(4);
+		force dut.emu.joystick_0 = 32'h00; sys_cycles(2);
+		release dut.emu.joystick_0;
+	end
+endtask
+`endif
 
 integer n_freed = 0;   // the firewall's read machine freed at a release
 always @(posedge clk_100m) if (dut.hps_lw_bridge.lw_freed === 2'b01) n_freed = n_freed + 1;
@@ -278,6 +299,10 @@ reg  [2:0] ss;
 integer i, k;
 reg [63:0] irq0, irq1;
 localparam [63:0] IRQ_LW = 64'hFFFF_FFFF_FFFF_FFFC;   // f2h_irq less upstream's two lines
+`ifdef MISTER_LW_SECTOR_SLOT
+reg [31:0] blk_w, blk_w0;
+reg [15:0] blk_sum;
+`endif
 
 // The Template leaves hps_io's ioctl_wait unconnected, and synthesis ties an unconnected input low.
 `ifndef VERILATOR
@@ -464,16 +489,18 @@ initial begin
 	lw_read(21'h40000, d); check("directory magic at 0x40000", d, 32'h5244574C);
 	lw_read(21'h00000, d); check("undecoded 0x00000", d, 32'hDEADBEEF);
 
-	$display("-- presence: the tiers built and wired are listed; SECTOR has no mux in the Template");
+	$display("-- presence: the tiers built and wired are listed; SECTOR through the Template's block reader");
 	check("PAD listed: built, and hps_io's write arm present", dut.lw_sys_window.has_pad, TB_PAD);
 	check("EVT listed: built, and hps_io's exports present", dut.lw_sys_window.has_evt, TB_EVT);
-	check("SECTOR not listed: no slot's mux is present", dut.lw_sys_window.has_sec, 1'b0);
+	check("SECTOR listed: built, the block reader's mux and hps_io's commit mark present", dut.lw_sys_window.has_sec,
+	      TB_SEC);
+	check("SECTOR's wired slots: the primary alone", dut.lw_sys_window.wired, TB_SEC ? 3'b001 : 3'b000);
 	check("hps_io's commit mark present exactly when SECTOR is built", dut.lw_sys_window.pres_cmt, TB_SEC);
 	lw_read(21'h4000C, d);
-	check("COUNT: PAD, EVT, OSDBUF and LANE as built", d, TB_PAD + TB_EVT + TB_OSD + TB_LANE);
+	check("COUNT: PAD, SECTOR, OSDBUF, EVT and LANE as built", d, TB_PAD + TB_SEC + TB_EVT + TB_OSD + TB_LANE);
 	lw_read(21'h80000, d); check("the PAD block's first word", d, TB_PAD ? 32'd0 : 32'hDEADBEEF);
 	lw_read(21'h4301C, d); check("the EVT block's ID word", d, TB_EVT ? 32'h32545645 : 32'hDEADBEEF);
-	lw_read(21'h48000, d); check("the SECTOR block's first word", d, 32'hDEADBEEF);
+	lw_read(21'h48014, d); check("the SECTOR block's ID word", d, TB_SEC ? 32'h33434553 : 32'hDEADBEEF);
 
 	$display("-- the host enable: GPI[22] is the window's enable register; GPO[31] low clears it");
 	check("no enable: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b0);
@@ -517,7 +544,7 @@ initial begin
 	check("enabled again: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b1);
 `ifdef MISTER_LW_LANE
 	$display("-- line 3: a lane frame played raises f2h_irq[10] through the lane's cause and its LINE_EN bit");
-	i = TB_PAD + TB_OSD + TB_EVT;                       // the lane's entry: the last listed, SECTOR is not
+	i = TB_PAD + TB_SEC + TB_OSD + TB_EVT;              // the lane's entry: the last listed
 	lw_read(21'h40050 + 21'h80 * i, d); check("the lane's entry: CAUSE at window offset 0x06024", d, 32'h00006024);
 	lw_read(21'h40054 + 21'h80 * i, d); check("the lane's entry: LINE 3", d, 32'd3);
 	lw_read(21'h40058 + 21'h80 * i, d); check("the lane's entry: CAUSE_BITS", d, 32'h7);
@@ -536,6 +563,58 @@ initial begin
 	lw_write(21'h46024, 32'h7);
 	repeat (2) @(negedge clk_100m);
 	check("the store-back: f2h_irq[10] low", {dut.interrupts.irq & IRQ_LW}, 64'd0);
+`endif
+
+`ifdef MISTER_LW_SECTOR_SLOT
+	$display("-- the Template's block reader: a block served over LW fills its RAM; its sum comes back as status");
+	i = TB_PAD;                                         // SECTOR's entry: after PAD's
+	k = 0; d = 0;
+	while (!d[i] && k < 200) begin lw_read(21'h4002C, d); k = k + 1; end
+	check("SECTOR's OPEN bit", d[i], 1'b1);
+	lw_write(21'h48008, 32'd1);                         // CTRL: EN for slot 0, the primary
+	k = 0; d = 0;
+	while (!d[0] && k < 200) begin lw_read(21'h4800C, d); k = k + 1; end
+	check("STATUS: the primary's en_sys", d[0], 1'b1);
+	check("the block reader's mux takes the LW side", dut.emu.blk_lw.en, 1'b1);
+	// sysmem holds the core in its power-on reset for 20 ms, the whole run: the case lifts the Template's own reset
+	force dut.emu.reset = 1'b0;
+	sys_cycles(4);
+	n_set = 0; n_hrq = 0; blk_watch = 1;
+	blk_press;
+	k = 0; d = 0;
+	while (!d[31] && k < 200) begin lw_read(21'h48004, d); k = k + 1; end
+	check("REQ: the primary's read on its hps_io slot, BLKSZ 2", d,
+	      32'h8000_8081 | ({28'd0, TB_SLOT[3:0]} << 2));
+	lw_read(21'h48104, d); check("LBA_S[0]: the first block after a reset, 0", d, 32'd0);
+	lw_write(21'h48108, 32'd0);                         // BEGIN_S[0], the LBA echoed
+	blk_sum = 0;
+	for (k = 0; k < 128; k = k + 1) begin
+		blk_w = 32'h9E37_79B9 * (k + 1);
+		lw_write(21'h4C000 + 4 * k, blk_w);             // DATA[k]
+		blk_sum = blk_sum + blk_w[15:0] + blk_w[31:16];
+		if (k == 0) blk_w0 = blk_w;
+	end
+	k = 0;
+	while (n_set == 0 && k < 4000) begin sys_cycles(1); k = k + 1; end
+	sys_cycles(8);
+	check("status written back once", n_set, 1);
+	check("status_in[63:32]: {LBA 0, the 16-bit sum of the block's 256 words}", set_val[63:32], {16'd0, blk_sum});
+	check("the RAM, words 0 and 1: DATA[0], low half first", {dut.emu.blk_ram[1], dut.emu.blk_ram[0]}, blk_w0);
+	check("the RAM, word 255: DATA[127]'s high half", dut.emu.blk_ram[255], blk_w[31:16]);
+	check("the request seen at hps_io (sd_rd, sd_ack): cycles", n_hrq, 0);
+	blk_watch = 0;
+	$display("-- the Template's block reader: with the slot's EN clear, its next request goes to hps_io");
+	lw_write(21'h48008, 32'd0);
+	k = 0; d = 1;
+	while (d[0] && k < 200) begin lw_read(21'h4800C, d); k = k + 1; end
+	check("STATUS: the primary's en_sys clear", d[0], 1'b0);
+	blk_press;
+	check("hps_io's sd_rd[slot]", dut.emu.hps_io.sd_rd[TB_SLOT], 1'b1);
+	check("hps_io's sd_lba[slot]: the next block, 1", dut.emu.hps_io.sd_lba[TB_SLOT], 32'd1);
+	check("the block reader's mux keeps the SPI side", dut.emu.blk_lw.en, 1'b0);
+	release dut.emu.reset;
+	sys_cycles(2);
+	check("the Template's reset again: the request dropped", dut.emu.hps_io.sd_rd[TB_SLOT], 1'b0);
 `endif
 
 	$display("-- the HPS reset reaches the firewall");
