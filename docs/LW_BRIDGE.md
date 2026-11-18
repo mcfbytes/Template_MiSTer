@@ -3,8 +3,8 @@
 An optional extension of `sys/` that gives the HPS a second, memory-mapped path into the core, beside the
 GPO/GPI ("SPI") link that `hps_io` decodes. It lives on the Cyclone V **HPS-to-FPGA lightweight bridge**
 (`lwhps2fpga`, physical `0xFF200000`, 2 MB). The HPS stores pads, OSD pixels and disk blocks as plain 32-bit
-writes, and reads the core's status back-channel and block requests as registers. Two interrupt lines tell it
-when to look. An optional frame lane carries whole link transactions, and their replies, over the same bridge.
+writes, and reads the core's status back-channel and block requests as registers. Interrupt lines tell it when
+to look. An optional frame lane carries whole link transactions, and their replies, over the same bridge.
 
 - **The core sees nothing new.** Pads land in the same `hps_io` registers (`joystick_0`, ...), blocks arrive as the
   same `sd_ack`/`sd_buff_wr`/`sd_buff_dout` strobes, and the status back-channel is the stock
@@ -12,14 +12,15 @@ when to look. An optional frame lane carries whole link transactions, and their 
 - **The SPI link is untouched.** `hps_io` keeps every SPI decode, so a host that knows nothing about the window (the
   stock MiSTer Main) drives an LW-enabled bitstream exactly as before. The window is a second carrier, not a
   replacement.
-- **Opt-in.** Without `MISTER_LW` the framework is not built: `HPS_BUS` stays 46 bits, `CONF_STR` is the stock
-  string byte for byte, and `sys/` elaborates to the stock netlist. This repository's `Template.qsf` carries the
-  define commented out, so the Template builds stock until it is uncommented.
+- **Opt-in, in tiers.** Without `MISTER_LW` the framework is not built: `HPS_BUS` stays 46 bits, `CONF_STR` is the
+  stock string byte for byte, and `sys/` preprocesses to upstream's text. With it, a core builds the floor and
+  only the tiers its `.qsf` names. This repository's `Template.qsf` carries the defines commented out, so the
+  Template builds stock until they are uncommented.
 
 Status: proof of concept. The directory is layout 2 (magic `LWDR`, version 2.0): 32-word entries with common CAUSE
 and LINE words, every offset window-relative. A minor revision may add blocks (new kinds), header words, entry
-words or a larger stride, and a host that walks by the rules under "Directory" keeps working. See "Revision and
-validation" at the end.
+words or a larger stride, and a host that walks by the rules under "Directory" keeps working. Every cost figure
+below is an estimate, and this revision has not been fitted or run on hardware ("Revision and validation").
 
 ## Adopting it in a core
 
@@ -46,17 +47,27 @@ validation" at the end.
    blocks and declares their lines. Without it, it expands to nothing.
 
 3. **Nothing else for pads, the OSD image and the status back-channel**, each with its tier macro
-   (`MISTER_LW_PAD`, `MISTER_LW_OSD`, `MISTER_LW_EVT`). A core that passes `HPS_BUS` to `hps_io` gets them. `Template.sv` shows the status back-channel: the first pad button cycles an option and writes the new
-   status word back with `status_in`/`status_set`.
+   (`MISTER_LW_PAD`, `MISTER_LW_OSD`, `MISTER_LW_EVT`). A core that passes `HPS_BUS` to `hps_io` gets them.
+   `Template.sv` shows the status back-channel: the first pad button cycles an option and writes the new status
+   word back with `status_in`/`status_set`. With `MISTER_LW_SECTOR_SLOT` it also builds a block reader on that
+   slot, served over SECTOR or, without the host's EN, over SPI from an image mounted on its `S` line.
 
 4. **Optional: the SECTOR block**, for a core that reads blocks through an `hps_io` slot ("Hooking the SECTOR block",
    below).
 
 5. **Optional: the frame lane** (`MISTER_LW_LANE`). It needs nothing in the core either: it lives in `sys_top`.
 
+6. **The timing rule** ("Tiers and their cost"): the core ships only with a timing report in which no failing path
+   starts or ends in LW logic.
+
 A core that instantiates its own modules on `HPS_BUS` must widen those ports to `[383:0]` under `MISTER_LW`; bits
 45:0 keep their stock meaning. A port left at `[45:0]` truncates the bus with only a width warning: the pieces
-beyond it then show no presence bit, and their blocks are not listed in the directory.
+beyond it then show no presence bit, and their blocks are not listed in the directory ("`HPS_BUS` with
+`MISTER_LW`", below, has the bit map and who drives each field).
+
+**Reserved names.** In an LW build the module names `lw_*` and `hps_lw_*` and the macro names `MISTER_LW*` and
+`LW_*` belong to the framework; a core uses none of them for its own. Without `MISTER_LW` every LW file
+preprocesses to nothing and leaves no macro defined.
 
 ### Macros
 
@@ -84,6 +95,45 @@ outside 1-32, a gap outside 2-15, an `hps_io` slot above 15, two slots on one `h
 an image base. Frames are one fixed length per slot; a slot whose requests vary in length or use `sd_blk_cnt`
 stays on SPI by not being declared.
 
+### Tiers and their cost
+
+A core pays only for what its `.qsf` names. Every figure is **ESTIMATED**: registers counted from the RTL, ALMs by
+analogy with a fit of an earlier revision. None of this revision has been fitted.
+
+| tier | macro | builds | cost (ESTIMATED) |
+|---|---|---|---|
+| L0 floor | `MISTER_LW` | the firewall, the decode, the directory and its header words, the host enable, GPI bits 25, 24 and 22, the 384-bit `HPS_BUS` | 150-200 ALMs, no block memory |
+| L1 pads | `MISTER_LW_PAD` | the PAD block, `hps_io`'s LW write arm | 150-185 ALMs, 1 M10K |
+| L2 events | `MISTER_LW_EVT` | the EVT block, `hps_io`'s event exports, line 2 | 85-120 ALMs, 132 of its registers being the status hold on `clk_sys`; no block memory |
+| L3 SECTOR | `MISTER_LW_SECTOR_SLOT` and its geometry | the SECTOR block and its enable link, line 1, the core-side muxes, `hps_io`'s commit mark | 325-400 ALMs and about 12 per mux, 3 M10K |
+| L3 lane | `MISTER_LW_LANE` | the LANE block and its enable link, `lw_link`, line 3 | 225-255 ALMs, 3 M10K |
+| L3 OSD | `MISTER_LW_OSD` | the OSDBUF block and its enable link, a second write source in each `osd` | 75-100 ALMs, 2 M10K |
+| debug | `LW_DIAG=1` | SCRATCH, the SECTOR counters and timestamps | not estimated |
+
+`MISTER_LW` alone is legal: a safe, discoverable window with COUNT = 0 and a host enable.
+
+**A tier also costs timing margin, and the timing rule binds every core that builds one.** The bridge's clock,
+`clk_100m` (`h2f_user0_clk`), also clocks the scaler's Avalon side and the frame-buffer port, and everything the
+firewall's promise rests on runs on it: its state machines, its reset marks and idle bit, the read path, the gates.
+A failing path there is not a picture fault: a setup failure in the firewall can leave a transaction unanswered,
+which hangs the SoC, and one in the read path returns wrong data. So **a core that builds any tier ships only with a
+timing report in which no failing setup, hold, recovery or removal path starts or ends in LW logic**, on any
+clock: a register of `hps_lw_bridge`, of `lw_sys_window`, of any `lw_*` module, or of the LW text in `hps_io`,
+`osd` and `sys_top`. What else in the core fails is the core's own business; a core that ships with negative slack
+elsewhere checks its report by these names. The deepest LW path is the read: the firewall's address register,
+through the block select and the block's register mux, to the read data register, in one 10 ns cycle, and it grows
+with each tier. The store path is the other: `lw_write`, the enable gate, a block's OPEN bit, a register's enable.
+
+**Measured on an earlier revision of this branch** (Quartus 17.0.2 Lite, 2026-11-14, before the host enable, the
+tier modules and the write-through OSD; not a measurement of this revision): the Template with the floor, PAD, EVT
+and its example took 7,768 ALMs against stock's 7,273 (+495), 12,150 registers against 11,226 (+924) and 68 RAM
+blocks against 59 (+9). Of the +924 registers, `hps_io` accounted for +261 and `emu` for +132, most of it the
+example's status and pad logic, which the stock Template leaves unconnected and Quartus prunes, so a core that
+already uses those ports pays less. The HDMI clock failed setup in two of three seeds (-0.125 and -0.154 ns), every
+failing path inside the scaler (`ascal` to `ascal`), and the bridge clock had 2.2-2.9 ns to spare, its worst path
+inside the PAD drain. That build with `MISTER_LW` off gave an rbf bit-identical to upstream's. The frame lane
+without reply capture, measured on a larger core, took 165-177 ALMs plus 6-7 for `lw_link`, and 2 M10K.
+
 ## Discovery and safety
 
 An LW access the fabric does not answer **hangs the SoC**. Nothing here is probed, so the HPS must know the
@@ -100,54 +150,97 @@ window exists before it touches it:
 - **The directory** at the window's first word: MAGIC `LWDR`, a directory major the host knows (2), and WIN_BASE
   and WIN_SIZE equal to the token's two numbers; then the entries.
 
-In the ID view (`gp_out[31] = 0`) GPI carries the core magic, which has bits 25, 24 and 22 clear, and an unconfigured
-FPGA reads all ones, so the bits count only in a sample that also shows bit 31 = 0. Before its first LW access,
-and again after every core load and every bridge or HPS reset (with every cached directory value discarded), a
-host takes **one** GPI sample in the I/O view that shows bit 31 = 0, bit 25 = 1 and bit 24 = 1. Bit 24 = 0 at that
-point, with no access of its own in flight, means the firewall still holds a transaction nobody will finish: stay
-on SPI until the core is loaded again. Then the `CONF_STR` token, then MAGIC, VERSION, WIN_BASE and WIN_SIZE. Any
-failure: never touch the
-bridge. Bit 25 says nothing about the HPS side: the bridge must also be out of reset (the reset manager's bit for
-this bridge reads 0), which a host that did not release the bridge itself checks. A periodic task that accesses
-the window samples GPI first and requires bit 31 = 0 and bit 25 = 1 before each access (not bit 24, which another
-thread's access makes 0); a failed sample means no access now and the whole discovery again before the next.
+In the ID view (`gp_out[31] = 0`) GPI carries the core magic, which has bits 25, 24 and 22 clear, and an
+unconfigured FPGA reads all ones, so the bits count only in a sample that also shows bit 31 = 0.
 
-`hps_lw_bridge.sv` answers **every** address of the 2 MB bridge, every burst and both channels, in fixed cycles.
-No reset holds it, so a read during a core reset, or while the HPS holds the fabric reset, still completes. After an
-HPS reset it drops only a transaction the reset orphaned: one whose master made no handshake on its channel between
-the reset reaching the fabric and its release. The first access after the reset is answered; nothing else is
-touched. A reset of the bridge alone is invisible to the fabric, so **no LW access may be in flight when anything
-resets the bridge, asserts the fabric reset or programs the FPGA**: a transaction left in flight through a
-bridge-only reset holds its channel until the next HPS reset or core load. Addresses outside every block read
-`0xDEADBEEF`, and writes there are dropped.
+**The four host rules.** The firewall answers every access that reaches it; these rules are about the accesses
+that cannot reach it.
+
+1. **What bit 25 covers.** It proves the firewall is in the bitstream and says nothing about the HPS side: the
+   bridge must also be out of reset (the reset manager's bit for this bridge reads 0), which a host that did not
+   release the bridge itself checks.
+2. **Quiesce.** Before anything resets the bridge, asserts the fabric reset or programs the FPGA, every LW access of
+   every thread has completed, and none starts again before rule 3. An access during programming, through a
+   bridge in reset, or into a newly loaded bitstream without the firewall hangs the SoC.
+3. **Discover, and discover again.** Before its first LW access, and again after every core load and every bridge
+   or HPS reset (with every cached directory value discarded first), a host takes **one** GPI sample in the I/O
+   view that shows bit 31 = 0, bit 25 = 1 and bit 24 = 1. Bit 24 = 0 at that point, with no access of its own in
+   flight, means the firewall still holds a transaction nobody will finish: stay on SPI until the core is loaded
+   again. Then the `CONF_STR` token, then MAGIC, VERSION, WIN_BASE and WIN_SIZE. Any failure: never touch the
+   bridge.
+4. **Sample before each access.** A periodic task that accesses the window samples GPI first and requires bit
+   31 = 0 and bit 25 = 1 before each access (not bit 24, which another thread's access makes 0). A failed sample
+   means no access now, and the whole of rule 3 before the next.
+
+**What the rules cannot close.** A second program that resets the bridge or loads a core without coordinating with
+the LW host can land between a sample and its access (one GPI read plus one LW access wide). So one program owns
+the window, the link and core loading, or the programs that share them coordinate.
+
+**Resets.** `hps_lw_bridge.sv` answers **every** address of the 2 MB bridge, every burst and both channels, in
+fixed cycles. No reset holds it, so a read during a core reset, or while the HPS holds the fabric reset, still
+completes. After an HPS reset it drops only a transaction the reset orphaned: one whose master made no handshake on
+its channel between the reset reaching the fabric and its release. The first access after the reset is answered;
+nothing else is touched. A live transaction whose master makes no handshake on its channel for the whole of a
+fabric reset that software asserted looks the same and is dropped too, which rule 2 rules out. A reset of the
+bridge alone is invisible to the fabric, so **no LW access may be in flight when anything resets the bridge,
+asserts the fabric reset or programs the FPGA**: a transaction left in flight through a bridge-only reset holds its
+channel until the next HPS reset or core load. Addresses outside every block read `0xDEADBEEF`, and writes there
+are dropped.
+
+Two orderings on the HPS side, which the fabric cannot see, decide whether its reset handling alone is enough:
+every reset that can orphan a transaction must reach the fabric as an HPS reset (a cold reset does; whether a warm
+reset does is set by the reset manager's warm-reset masks, which software owns), and the bridge's master, once out
+of reset, must issue nothing until the fabric has seen the reset end (about four `clk_100m` cycles after the HPS
+releases it, and never while software holds the fabric reset). A host that keeps rule 3 depends on neither: bit 24
+= 0 shows the transaction left behind. RESETS (below) counts the HPS resets the fabric saw and the state machines
+it freed, so a host can tell whether a reset it knows of reached the fabric at all. A stuck state machine is freed
+by an HPS reset or a core load, and by nothing a host can do through the window.
 
 Nothing back-pressures. A store is accepted in fixed cycles. Where a FIFO is full, the store is dropped and counted,
-and the protocol detects the loss (PAD spinner drops, SECTOR `ACCEPT`).
+and the protocol detects the loss (PAD spinner drops, OSDBUF drops, SECTOR `ACCEPT`, LANE DROPS).
+
+### When a store is in effect
 
 **A store is a single-beat write** (`AWLEN` 0). The beats of a burst write are accepted, answered OKAY and dropped,
 so a `memcpy` into the window, or a write-combined or cached mapping that merges stores into bursts, loses them.
-**A store is in effect once its write response has returned**: read anything that depends on it (a CAUSE word after
-clearing it, ACCEPT after the last DATA, RHEAD after RPOP) only after that. Map the window strongly ordered, where
+
+**A store is in effect once its write response has returned.** The fabric applies a store in the cycle its data
+beat is accepted and answers it in the next; a read samples its word one cycle after its address is accepted. The
+read and write channels are independent, and the fabric orders nothing between them, so between a store and any
+read whose meaning depends on it the host must have the store's response. Map the window strongly ordered, where
 each access completes before the next begins (on ARMv7 Linux an `mmap` of `/dev/mem` or a UIO mapping, both
-non-cached), or, with a Device mapping (`ioremap`), issue a DSB after the store. Read bursts of every type return
-the words of the addresses they step through; one that would cross a 4 KB boundary (an AXI master never issues
-one) wraps inside its 4 KB.
+non-cached), or, with a Device mapping (`ioremap`), issue a DSB after the store. A write-combined, cached or
+Normal-memory mapping is never legal: its stores may merge into bursts, reorder or repeat.
+
+The sequences that depend on it: a CAUSE store-back, then the block's level registers; the ENABLE store, then the
+ENABLE read; an EN store, then REQ; the last DATA, then ACCEPT; RPOP, then RHEAD; END, then RSTAT or PLAYED. A read
+shows bridge-clock registers only. What a store sets moving on `clk_sys` shows in the level registers later, which
+is why every procedure below reads levels after events.
+
+Read bursts of every type return the words of the addresses they step through; one that would cross a 4 KB
+boundary (an AXI master never issues one) wraps inside its 4 KB.
 
 ## The window
 
-Offsets are from the window start; absolute LW offset = `0x40000` + offset. Each block's range is decoded by a
-compare of the address's high bits; an address in no block that is built reads `0xDEADBEEF` and drops stores,
-inside the window or outside it, and an unassigned offset inside a block reads 0.
+Offsets are from the window start; absolute LW offset = `0x40000` + offset. An address in no block that is built
+reads `0xDEADBEEF` and drops stores, inside the window or outside it, and an unassigned offset inside a block reads
+0 and ignores stores.
 
 | window offset | absolute LW | size | block |
 |---|---|---|---|
 | `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
-| `0x03000` | `0x43000` | `0x1000` | EVT |
-| `0x04000` | `0x44000` | `0x2000` | OSDBUF |
+| `0x03000` | `0x43000` | `0x1000` | EVT (with `MISTER_LW_EVT`) |
+| `0x04000` | `0x44000` | `0x2000` | OSDBUF (with `MISTER_LW_OSD`) |
 | `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`) |
 | `0x08000` | `0x48000` | `0x8000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`): registers at `+0x0000`, DATA at `+0x4000` |
 | `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
-| `0x40000` | `0x80000` | `0x40000` | PAD |
+| `0x40000` | `0x80000` | `0x40000` | PAD (with `MISTER_LW_PAD`) |
+
+**The register bus.** Behind the firewall every block sits on one bus and keeps two rules: it answers every address
+combinationally from `clk_100m` registers and constants, and it never back-pressures. The bus has no read strobe,
+so no read of any address, size or burst changes anything. Each block's select compares the address's high bits
+with a constant, the selects are disjoint, each block's word is 0 unless it is selected, and the read word is one
+AND-OR of the block words and the `0xDEADBEEF` default. A block added later keeps the same rules.
 
 ### Directory
 
@@ -167,13 +260,13 @@ inside the window or outside it, and an unassigned offset inside a block reads 0
 | `0x24` | OWNED | bit *i* = entry *i*'s block has not yet returned to SPI: its core-clock half has not acknowledged rest since the enable last fell (or since configuration), or the enable fell before the half answered its rise; only blocks with an enable link (SECTOR, OSDBUF, LANE) ever set it |
 | `0x28` | SCRATCH | read/write with `LW_DIAG=1` (while enabled, like every store); 0 otherwise |
 | `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now: the enable for a block without an enable link, and for SECTOR, OSDBUF and LANE the enable and the block's core-clock half having answered its rise; a store to a linked block before its bit is set is dropped and sets `stale` |
-| `0x30` | LINE_EN | read/write while enabled: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever the enable does |
+| `0x30` | LINE_EN | read/write while enabled: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever the enable does, and after every ENABLE taken |
 | `0x34` | RESETS | `{freed[15:8], hrst[7:0]}`: the firewall's state machines freed at a reset's release, and the HPS resets the fabric saw; each counts from configuration and stops at 255 |
 | `0x38`-`0x3C` | - | 0, reserved |
 
 **Entries.** Entry *i* is at `header_len + i x entry_stride`, `0x40 + 0x80 x i` in this revision: 8 common words,
 then the kind's own words K0-K23. The table is compact and in ascending kind order, listing only the blocks this
-bitstream builds, so an entry's index (and its PENDING bit) depends on the core's configuration.
+bitstream builds, so an entry's index (and its PENDING, OWNED and OPEN bits) depends on the core's configuration.
 
 | word | offset | name | value |
 |---|---|---|---|
@@ -206,16 +299,40 @@ bitstream builds, so an entry's index (and its PENDING bit) depends on the core'
 - gives no line to an entry whose ordinal another entry also names, or that lies outside its kind's range (1-15
   for framework kinds, 16-31 for a core's own).
 
-A minor revision only adds: reserved words that read 0 today, a larger header or stride, new kinds. A kind number is
-never reused; a kind's major changes only if one of its registers changes meaning. Reserved bits read 0 and are
-written 0.
+**Versioning.** The directory's major changes only if a header word or a common entry word changes meaning. A minor
+revision only adds: reserved words that read 0 today, a larger header or stride, new kinds. A kind number is never
+reused; a kind's major changes only if one of its registers changes meaning. Reserved bits read 0 and are written 0.
+
+**What a host that skips an entry is owed:**
+- **An ordinal belongs to one entry**, in the kind's range, so a line never carries a cause the host cannot clear.
+- **A line rises only for an entry whose LINE_EN bit a host has set**, so an entry it skipped never interrupts it.
+- **A block acts only on explicit stores under the enable.** An entry nobody stores to takes nothing from SPI and
+  changes nothing in the core. This binds every block a later minor adds, and every core's own block.
+- **A minor adds no obligation.** A cause bit added in a minor is advisory: a level register shows the same
+  condition, so a host that clears it unserved loses latency and nothing else. An event that must be served comes
+  with a new kind major, or a new kind. The drain's store-back clears bits the host does not know, which this makes
+  safe.
+- **The ENABLE gate is shared, and that is a cost.** An ENABLE is taken only while every linked block in the
+  bitstream is at rest, the ones the host skips included, because a block that has not returned could still run a
+  previous host's work under the new enable. So a linked block that cannot return keeps the window from every
+  host. Every linked block, in this revision, in a later one and among a core's own, therefore has its core-clock
+  half on `clk_sys`, and on its way to rest waits only on what a stock link word waits on: a running `clk_sys`, no
+  link select asserted, and the core's link wait released. The window is then closed to an ENABLE for each block's
+  bounded return, and for as long as the stock link is itself stopped or held, which stops a stock session too.
+  OWNED names the entry that holds the gate; a host that cannot enable stays on SPI.
+- **A host never waits for a block it does not serve to open.** OPEN is read per entry, and a block that does not
+  open costs a host that block over LW, and nothing else.
+
+A core's own blocks (kinds `0x8000`-`0xFFFF` with a TAG, ordinals 16-31, window `0x20000`-`0x3FFFF`) are reserved
+and not built in this revision. The revision that adds them defines their core-side interface, and a linked one
+keeps the rule above.
 
 ### The host enable
 
 **No store has effect without the host enable, except a store to ENABLE itself.** Every other store, to any block
 or header word, is answered and dropped, and ENABLE's `stale` bit records it. Every block is off until a host that
-knows this window enables it and then binds each block with its own stores, so a stock program that never touches
-the window meets a stock core. One program owns the window at a time, and with it the link.
+knows this window enables it and then binds each block with its own stores (SECTOR's EN, OSD image stores, lane
+frames, LINE_EN, pad stores), so a stock program that never touches the window meets a stock core.
 
 **ENABLE** is set by a single full-word store of exactly `0x4C570001`; any other store to it is ignored. The store
 is taken only while the enable is clear, `quiet` is 1, no HPS reset is seen and GPO bit 31 is 1. Then the enable is
@@ -241,10 +358,11 @@ A read returns `{en[31], quiet[30], stale[29], burst[28], 12'd0, hrst[15], 3'd0,
 **When the enable falls**, every line falls, LINE_EN reads 0, OSD image stores still queued are discarded unwritten,
 the SECTOR block's EN bits clear (a primary frame in flight completes, zero-filled from the first word the host
 did not store; a save-slot frame not stored in full never reached the core and is withdrawn, its request standing
-for SPI; each slot returns to SPI once its frame is done), queued SECTOR entries are discarded (a BEGIN not yet taken leaves its request standing for SPI),
-the open LANE frame is abandoned, queued LANE frames are discarded unplayed (one already playing finishes), and
-reply words still to come are discarded. A frame stored in full before the fall is delivered whole. PAD levels
-already delivered stay in the core, as a stock program's would, until the next pad store over either path.
+for SPI; each slot returns to SPI once its frame is done), queued SECTOR entries are discarded (a BEGIN not yet
+taken leaves its request standing for SPI), the open LANE frame is abandoned, queued LANE frames are discarded
+unplayed (one already playing finishes), and reply words still to come are discarded. A frame stored in full
+before the fall is delivered whole. PAD levels already delivered stay in the core, as a stock program's would,
+until the next pad store over either path.
 
 **The enable links.** SECTOR, OSDBUF and LANE each carry the enable to their core-clock half over a link with one
 level each way: the enable level, and the half's acknowledge that it is at rest (nothing queued, nothing in flight,
@@ -252,23 +370,48 @@ every handshake idle). The half's only enable input is that level, and it reache
 is low. A link opens a block's stores only after the half has seen the level rise, and the level falls only after
 the half has answered it, so an enable that falls within a few cycles of its rise still leaves the link closed until
 the half answers. An ENABLE is taken only while every link is at rest (`quiet`). At an ENABLE the causes are
-reloaded: EVT ORs in STATUS and every level PEND shows; SECTOR's word starts clear and raises a slot's bit when EN is set over a request that
-stands; LANE's word starts clear. While GPO bit 31 is 0 (the ID view) neither the lane player nor the OSD writer starts anything, so nothing
-queued by a host that has gone plays inside the next program's identification.
+reloaded: EVT ORs in STATUS and every level PEND shows (a predecessor may have cleared a cause and stopped before
+serving it); SECTOR's word starts clear and raises a slot's bit when EN is set over a request that stands; LANE's
+word starts clear. While GPO bit 31 is 0 (the ID view) neither the lane player nor the OSD writer starts anything,
+so nothing queued by a host that has gone plays inside the next program's identification.
 
 **The enable needs the link's I/O view.** A host that holds it never leaves the I/O view, identifies the core
 before it enables, and enables again after its own core reset through GPO.
 
-**A host's start:** (1) Before its first GPO store and its first link word, read the FPGA manager's GPO register
-itself (not a software copy: the usual first act, storing GPO = 0, clears a live enable). If bit 31 reads 1, take
-one GPI sample: bit 31 = 0, bit 25 = 1 and bit 22 = 1 mean another LW program has the window. Then store nothing to
-GPO and send no link word, and stop; or, if this program is configured as the machine's one LW program, go on and
-take over by identifying. (2) Identify the core and run discovery. (3) Read ENABLE until `quiet` reads 1 (stay on
-SPI meanwhile, and for good if it never comes: OWNED names the block that cannot return). (4) Store `0x4C570001`,
-read ENABLE and require `en`. (5) Read OPEN until the bits of the entries it serves are set; store nothing to an
-entry before its bit is set. An entry whose bit does not set stays on SPI, and may be bound later if its bit sets.
-(6) Store LINE_EN with those entries' bits, and re-store every pad level. Nothing is needed to keep the enable, and
-nothing to give it up: the next program's start, a core load and a bridge reset each clear it.
+**One program owns the window**, and with it the link and whatever loads cores and resets the bridge (or it
+coordinates with what does).
+
+**A host's start:**
+1. **Look before touching the link.** Before its first GPO store and its first link word, read the FPGA manager's
+   GPO register itself (not a software copy: the usual first act, storing GPO = 0, clears a live enable). If bit 31
+   reads 1, take one GPI sample: bit 31 = 0, bit 25 = 1 and bit 22 = 1 mean another LW program has the window.
+   Then store nothing to GPO, send no link word, and stop; or, if this program is configured as the machine's one
+   LW program, go on and take over by identifying. With no timer there is nothing to wait out.
+2. **Identify the core** (this clears any enable, and every block starts its return to SPI) and run discovery
+   (rule 3).
+3. **Read ENABLE until `quiet` reads 1.** Stay on SPI meanwhile, and for good if it never comes (a stopped `clk_sys`,
+   a link select held, the core's link wait held): OWNED names the block that cannot return.
+4. **Store `0x4C570001`**, read ENABLE and require `en`.
+5. **Read OPEN until the bits of the linked entries it serves are set**: a few reads while `clk_sys` runs. Store
+   nothing to an entry before its bit is set. An entry whose bit does not come within the host's own bound stays on
+   SPI, and may be bound later if its bit sets. The host never waits for an entry it does not serve.
+6. **Issue one GET_SDSTAT and serve over SPI what it shows** ("One request, one path", below), then bind the blocks
+   and re-store every pad level.
+7. **Store LINE_EN** with the bits of the entries it serves, and arm its interrupt nodes, each level-high. Every
+   block reloaded its cause word at the ENABLE, so standing requests ring at once; a host without lines reads
+   PENDING once.
+
+While it runs, a host does nothing to keep the enable, and nothing to give it up: the next program's start, a core
+load and an HPS reset each clear it. Before its own GPO core reset or a core load it does nothing either: the reset
+clears the enable, and the host enables again after it (with discovery again after a load).
+
+**What the start order cannot close.**
+- The fabric cannot tell one program from another before it stores. A stock program, or one that skips step 1,
+  takes the link by starting and clears the enable by identifying.
+- Stores carry no identity. If a previous program's threads still store after the next program has enabled, their
+  stores land in its open blocks. A program that takes over a live one (step 1's configured path) owns that risk.
+- A program that takes the link without identifying meets whatever the previous host left bound: SECTOR slots on
+  LW, queued lane frames that play whenever the link lets them. The stock Main identifies the core first.
 
 ### Interrupt lines
 
@@ -284,18 +427,27 @@ shared interrupt 47 + *k*, and no two entries name the same ordinal.
 | 16-31 | `f2h_irq[23]`-`[38]` | 63-78 | a core's own kinds |
 
 A line is a register, high while the enable is set, its entry's LINE_EN bit is set and its CAUSE word is non-zero;
-it falls only when one of the three stops being true, and never pulses per event. Configure it level-sensitive,
-active high, at the interrupt controller (`IRQ_TYPE_LEVEL_HIGH` in a Linux device tree): a raise in the cycle of a
-store-back keeps the line high, so an edge-triggered input would see no new edge after it. The HPS kernel must expose it to userspace (for
-example as a `uio_pdrv_genirq` node); a host without one polls PENDING instead. A CAUSE word's `[15:0]` are event
-bits, each raised by every occurrence of its event, and `[31:16]` read 0; the word is 0 when nothing is pending.
-**Reads change nothing**, in any size or burst. **A full 32-bit store clears each bit written as 1**; a bit raised
-in the store's own cycle stays set, and a partial-width store clears nothing.
+it falls only when one of the three stops being true, and never pulses per event. **Configure it level-sensitive,
+active high,** at the interrupt controller (`IRQ_TYPE_LEVEL_HIGH` in a Linux device tree). An edge-configured line
+is not legal: a raise in the cycle of a store-back keeps the line high, so an edge-triggered input would see no new
+edge after it and the entry would be silent for good. (Upstream's own two lines, `f2h_irq[0]` and `[1]`, are sync
+pulses and are taken as edges; these are not.) The HPS kernel must expose each line the host wants to userspace
+(for example as a `uio_pdrv_genirq` node); a host with no node for an ordinal polls PENDING instead, whatever
+LINE_EN holds.
+
+**Cause words.** A CAUSE word's `[15:0]` are event bits and `[31:16]` read 0; the word is 0 when nothing is pending.
+Every bit is raised by each occurrence of its event, detected in the domain that makes it; none is the edge of a
+level that the host's own store or service also moves. **Reads change nothing**, in any size or burst. **A full
+32-bit store clears each bit written as 1**; a bit raised in the store's own cycle stays set, and a partial-width
+store clears nothing. Each block also has level registers, computed from the same registers that raise its events,
+so a level read after an event shows it.
 
 **Drain:** read CAUSE; store the value back; once that store's response has returned, read the block's level
 registers and serve what they show; after the last service, read the level again until it shows nothing; then
-re-arm the interrupt. An event before the store-back is in the level read after it, and one after it sets its bit
-again, so the line is high at the re-arm. A bit the host does not know is cleared by the store-back.
+re-arm the interrupt. That is: RPOP until RSTAT reads 0 (LANE); BEGIN_S or WACK_S until REQ reads 0 (SECTOR); the
+SPI service until PEND's bits read 0 (EVT). An event before the store-back is in the level read after it, and one
+after it sets its bit again, so the line is high at the re-arm. The re-read costs one access and keeps a host safe
+from a block that gets the event rule wrong. A bit the host does not know is cleared by the store-back.
 
 ### PAD block (kind 1)
 
@@ -318,9 +470,11 @@ One store **is** one SPI set-command: a full 32-bit word (all four byte enables)
   0-5 and 8-13), and a partial-width store.
 - **Reads:** `PAD + 0x0` STAT `{16'd0, spinner drops}` (a free-running 16-bit count); `PAD + 0x4` ID `0x31444150`
   ("PAD1"); every other word reads 0.
-- **Delivery:** a toggle handshake drains the slots to `clk_sys`, a scan visiting one slot or the FIFO per cycle.
+- **Delivery:** a held-data handshake drains the slots to `clk_sys`, a scan visiting one slot or the FIFO per cycle.
   `hps_io` then writes the same registers its SPI arms write. Analog triggers (`0x46`) and every other opcode stay
   on SPI.
+- **No enable link:** everything PAD holds is bridge-clock state, so a store taken under the enable is delivered
+  whenever `clk_sys` runs, and the levels stay as stored when the enable falls.
 
 ### OSDBUF block (kind 3)
 
@@ -344,10 +498,11 @@ the SPI one.
 - **Behind the enable:** OSDBUF has an enable link. Stores are taken only while its OPEN bit is set; once the enable
   falls the writer discards every queued entry unwritten, so a repaint still queued for a host that has gone never
   draws into the next program's OSD.
+- **No atomic flip:** a repaint is visible as it lands, as over SPI.
 - **Still on SPI:** enable/disable, the info box, rotation and `osd_status`. The pixel path is upstream's.
 - **Host rules:** compare `drops` around a repaint and store again if it moved; send SPI OSD control words only at
   `level` = 0, so a late byte of rows 8-15 cannot set highres after a disable.
-- **Cost:** the FIFO, 256 x 47 bits (two M10K).
+- **Cost:** the FIFO, 256 x 47 bits (two M10K). Nothing of the block reaches a video clock.
 
 ### EVT block (kind 4, "EVT2"): the core's flags
 
@@ -365,11 +520,14 @@ and serving them is how a host clears the levels.
 
 - **The status crosses whole.** When the core raises `status_set`, `{status_req, flag}` crosses to the bridge in
   one held-data handshake: a transfer is never torn, at any `clk_sys`. Requests faster than the handshake coalesce
-  into the latest, and the latest always arrives. STFLG's flag and the four words read one register; SEQ moves one
-  cycle after them.
+  into the latest, and the latest always arrives.
 - **Read the status in a bracket:** STFLG, any of the four words, STFLG. If the two STFLG words are equal, the
   words are one transfer, whichever words were read and however (single reads or a burst). If not, read again. A
   host that reads no STATUS word needs no bracket.
+- **Why the bracket is exact,** with no timing argument: the 132 bits are held on `clk_sys` from launch to
+  acknowledge and land under one enable, so a capture is never torn; STFLG's flag and the four words read one
+  register, and SEQ changes one `clk_100m` cycle after it; and any two reads are at least two cycles apart, as
+  beats of a burst or as single accesses.
 - **Drain:** read CAUSE and store it back; read STFLG and the words if STATUS was set; then serve over SPI what
   the level bits show (the block request with `0x16`, info with `0x36`, upload with `0x3C`) and read PEND again
   until the bits served read 0.
@@ -433,7 +591,8 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero 
 
 **Save slots:**
 - A save slot's READ is the same flow on its BEGIN_S.
-- A save slot's WRITE is answered by its WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`.
+- A save slot's WRITE is answered by its WACK_S; the host takes the bytes from the core's own DDR image at `wsrc`
+  (below).
 - **A save slot's READ frame is all or nothing.** None of it reaches the core until its last word is stored; from
   then it plays out whole, whatever follows. A frame not stored in full is withdrawn by ABORT, by any BEGIN_S or
   WACK_S, and when the enable falls: its request stands, its answered mark clears, and while EN is set its CAUSE bit
@@ -441,8 +600,31 @@ GET_SDSTAT word: `{1, 6'd0, BLKSZ[2:0], hps_io slot[3:0], wr, rd}`, with a zero 
   core's save block untouched, for the next host or SPI. A save slot's frame must fit the FIFO: 1-510 words.
 - **The primary streams:** each word reaches the core as it is stored. ABORT, or the consumer reset on the primary's
   mux, zero-fills the rest of its open frame, so the core is never left waiting. A host that dies mid-frame costs
-  the primary's consumer one zero-filled block, so the primary is for data the core can ask for again or lose once,
-  such as an optical sector; anything the core writes back belongs on a save slot.
+  the primary's consumer one zero-filled block (`hps_io`'s handshake has no cancel), so the primary is read-only and
+  for data the core can ask for again or lose once, such as an optical sector; anything the core writes back
+  belongs on a save slot.
+
+**Write requests and WACK.** Let *FB* be 4 x the slot's `frame_words`, in bytes.
+- **Which bytes.** A write request with LBA *n* on slot *k* concerns image bytes `[K6 + n x FB, K6 + (n + 1) x FB)`
+  of that slot's descriptor. The host reads that range for the request REQ or RSTAT_S shows (direction `wr`), and
+  bound-checks it against K7.
+- **One WACK, one block.** A WACK_S[k] store with LBA *n* answers exactly that block: one ack pulse, no strobes. A
+  range past K7 has no bytes: the host still stores WACK (a core paused on its save must never wait) and persists
+  nothing.
+- **The core's rules.** (1) The bytes are there first: a write beat an f2sdram port has accepted is only queued, and
+  the proof that it was carried out is a later read on the same port returning, since one port serves its commands
+  in order; so the core raises the request only after the block's last write beat was accepted and a read issued
+  on that port after it has returned its data. (2) The bytes hold still: the block does not change from the rise
+  of the request until its ack falls. (3) No cache holds a copy: the image lies in memory the HPS operating system
+  does not manage, as every core's DDR region above the kernel's limit does.
+- **The host's rules.** (1) It reads the image through an uncached mapping (on Linux, an `mmap` of `/dev/mem` over
+  memory outside the kernel's range is one), or invalidates the range before each read. (2) It copies the block
+  before it stores WACK, because the core may change it after the ack. When it persists the copy is its own
+  policy; a host that persists after the ack owns the loss if it dies in between.
+- A host that dies before WACK leaves the request standing; once the enable falls the slot returns to SPI, and a
+  stock Main serves the write by the stock path. A write served twice is the same write.
+- Without the core's first rule and the host's first, a WACK can persist stale bytes with no fault visible
+  anywhere.
 
 ### LANE block (kind 5, "LAN1")
 
@@ -486,8 +668,8 @@ Stores must be full words (all four byte enables). Every other offset reads 0.
   frames, sel 2 then sel 3.
 
 **Playing:**
-- The player starts a frame only after the link's own selects have been low for two `clk_sys` cycles, so it never
-  splits a link transaction.
+- The player starts a frame only after the link's own selects have been low, and the link in its I/O view, for two
+  `clk_sys` cycles, so it never splits a link transaction.
 - After each strobe it waits `strobe_gap` cycles with `io_wait` and `vs_wait` low, the same terms that hold the
   link's ack, so `ioctl_wait` and `0x30`'s vsync wait pace the lane as they pace the link.
 - At END it drops the select for two cycles, so every falling-select arm fires (`hps_io`'s RTC and timestamp toggles,
@@ -535,17 +717,17 @@ lw_blk_mux blk_lw
   the LW side only while `hps_io`'s commit mark reads 0: from a GET_SDSTAT answer that shows the SPI host a request
   until that host's block transfer ends, or until a GET_SDSTAT shows none, no slot's mux moves. One mark covers
   every slot, so a bind may take effect one SPI transfer late.
-- **One request, one path.** Serve a request by the path that showed it: over SPI what GET_SDSTAT shows, over LW
-  what REQ offers; the fabric never shows one request on both. Issue a block transfer only for the request the
-  last GET_SDSTAT showed, as a stock host does. A host that starts beside a predecessor's unfinished SPI service
-  issues one GET_SDSTAT after its ENABLE and serves what it shows before its first EN store; until then the slots
-  stay on SPI.
+- **One request, one path.** Serve a request by the path that showed it: over SPI what GET_SDSTAT shows (EVT's BLK
+  and PEND say when to ask), over LW what REQ offers; the fabric never shows one request on both. Issue a block
+  transfer only for the request the last GET_SDSTAT showed, as a stock host does. A host that starts beside a
+  predecessor's unfinished SPI service issues one GET_SDSTAT after its ENABLE and serves what it shows before its
+  first EN store; until then the slots stay on SPI, which is safe and slow.
 - **The core's write strobe is muxed, never `hps_io`'s shared `sd_buff_wr`.** An SPI transfer on another slot
   therefore cannot land in an LW frame.
 - **Save slots** use `lw_save_mux #(.SAVE(0|1))` the same way, on `sd_rd`/`sd_wr`/`sd_buff_addr`. A save slot's LBA
   keeps `_LBA_BITS` bits (the rest are not crossed or compared), and its image must sit in DDR at `wsrc`, where the
-  host reads it for writes. Its frame must fit the FIFO (at most 510 words). Every declared slot sits on an
-  `hps_io` slot of its own, 0-15.
+  host reads it for writes under the rules above. Its frame must fit the FIFO (at most 510 words). Every declared
+  slot sits on an `hps_io` slot of its own, 0-15.
 - **Frames are block-sized:** `frame_words` x 4 bytes is what the reader expects per request. 588 words (2,352 bytes)
   serves a raw CD sector.
 - **The host decides.** It serves a slot only when it knows what a frame on that slot means. A core gains nothing
@@ -553,28 +735,61 @@ lw_blk_mux blk_lw
 
 ## Clock-domain contracts
 
-The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core is on the core's `clk_sys`.
+The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core is on the core's `clk_sys`, and
+every crossing is built from the cells of `sys/lw_cdc.sv`: a two-flop synchroniser, an asynchronously set reset
+chain, and a held-data handshake with its capture register. Nothing else crosses, and no crossing reaches a video
+clock.
 
-- **PAD:** a toggle handshake with the data held at least two `clk_sys` cycles. No ratio bound.
-- **EVT:** the status flag and snapshot cross whole in one held-data handshake, the BLK/INFO/UPLOAD pulses in a
-  second; both land on `clk_100m`. No ratio bound. The PEND levels cross through two-flop synchronisers.
-- **SECTOR requests:** each slot's request crosses as one record (offered, new, rejected with the rejected entry's
-  tag, direction, LBA) in a held-data handshake, one slot at a time, round robin; a change during a launch sends
-  the slot again. No ratio bound.
-- **SECTOR FIFO:** dual-clock with Gray pointers. No ratio bound.
-- **Enable links (SECTOR, LANE):** one level each way, each through a two-flop synchroniser; the acknowledge needs
-  four `clk_sys` cycles of rest and the bridge side ten consecutive samples of it. No ratio bound; a stopped
-  `clk_sys` holds the link (and `quiet`) where it is.
-- **SECTOR diagnostics (`LW_DIAG=1`):** FRAMES, TSTAMP_DONE and SUM cross together in one held-data handshake word,
-  so they change on the same `clk_100m` edge. Frames that complete while a word is in flight are all counted by
-  the next one, and SUM then shows the latest data frame's. No ratio bound.
-- **LANE:** frames and replies cross in dual-clock FIFOs with Gray pointers that step one entry per update. No
-  ratio bound. PLAYED and the reply-drop count cross as toggles, at most one per `strobe_gap + 5` and per
-  `strobe_gap + 2` `clk_sys` cycles; each toggle must outlast two `clk_100m` periods, which holds below about
-  250 MHz of `clk_sys`.
-- **OSDBUF:** image stores cross in a dual-clock FIFO with Gray pointers that step one entry per update, into the
-  writer on `clk_sys`, which writes `osd_buffer` on `clk_sys` as the SPI path does. No ratio bound. Nothing of the
-  block reaches a video clock.
+| block | crossing | how | bound on `clk_sys` |
+|---|---|---|---|
+| floor | the HPS reset; GPO bit 31 | each an asynchronously set chain, then a two-flop synchroniser | none |
+| floor | the enable level out and the rest acknowledge back, per linked block (SECTOR, OSDBUF, LANE) | two-flop synchronisers; the acknowledge needs four `clk_sys` cycles of rest and the bridge side ten consecutive samples of it | none; a stopped `clk_sys` holds the link (and `quiet`) where it is |
+| PAD | slots and spinner events to `hps_io` | a held-data handshake, the data held until it is acknowledged | below about 220 MHz: two `clk_sys` periods must exceed the 8 ns net-delay bound plus setup |
+| EVT | the status flag and the 132-bit snapshot | one held-data handshake, landing on `clk_100m`; requests coalesce into the latest | none |
+| EVT | the BLK, INFO and UPLOAD pulses | a second held-data handshake; pulses coalesce into the next | none |
+| EVT | the PEND levels | two-flop synchronisers | none; independent samples |
+| SECTOR | each slot's request (offered, new, rejected with the rejected entry's tag, direction, LBA) | one record per slot in a held-data handshake, round robin; a change during a launch sends the slot again | none |
+| SECTOR | the FIFO | dual-clock, Gray pointers | none |
+| SECTOR | EN, TEST, the status bits | two-flop synchronisers | none; independent samples |
+| SECTOR | FRAMES, TSTAMP_DONE and SUM (`LW_DIAG=1`) | one held-data handshake word, so they change on the same `clk_100m` edge; frames that complete while a word is in flight are all counted by the next, and SUM then shows the latest data frame's | none |
+| OSDBUF | image stores | a dual-clock FIFO, Gray pointers stepping one entry per update, into the writer on `clk_sys`, which writes `osd_buffer` on `clk_sys` as the SPI path does | none |
+| LANE | frames and replies | dual-clock FIFOs, Gray pointers stepping one entry per update | none |
+| LANE | PLAYED and the reply-drop count | toggles, at most one per `strobe_gap + 5` and per `strobe_gap + 2` `clk_sys` cycles; each must outlast two `clk_100m` periods | below about 250 MHz |
+
+No crossing carries a clock-ratio parameter, and every edge is detected in the domain that makes it. Every readable
+bit is a `clk_100m` register or a constant: a read never samples a core-clock net.
+
+**The constraints.** `sys/lw_bridge.sdc`, listed in `sys/sys.qip` after `sys_top.sdc`, cuts the paths into every
+first synchroniser stage, into the asynchronously set reset chains and along the foreign data path of every bundle,
+and bounds the synchroniser and bundle paths instead: 8 ns from the source register into the first stage, 8 ns from
+a bundle's hold register to its capture, and 5 ns of skew across every Gray bus. It names every crossing source
+by the cells' register names, so it holds whatever clock group the core puts `clk_sys` in. Without `MISTER_LW` it
+collects nothing and constrains nothing.
+
+**The clock model.**
+- `clk_100m` comes from the HPS. A core can neither stop nor reconfigure it, and everything the firewall's promise
+  needs is on it: nothing on `clk_100m` needs `clk_sys` state to answer.
+- `clk_sys` may run at any rate up to the bounds in the table, change rate, and stop for any time. Every crossing
+  waits, and an enable link keeps an ENABLE out until its half is back.
+- `clk_sys` may also glitch. A core that reconfigures its `clk_sys` PLL while it runs (one that switches video
+  standard through `pll_cfg`, for example) may see runt pulses that clock some flops and not others. No synchronous
+  design survives that unharmed, stock `hps_io` included. What the framework keeps: a pointer and its Gray copy
+  never disagree for more than a cycle, because each Gray source is recomputed from its pointer in every cycle; a
+  held-data handshake converges from any state, losing or repeating at most one transfer; and every core-clock
+  half reaches rest from any state once its enable level is low, so nothing stuck survives the enable's fall and
+  the next host starts from empty queues. A link's acknowledge is recomputed from its half's own registers in
+  every cycle. An upset in the last few `clk_sys` cycles of a return, or of a rise, can still make a half look at
+  rest, or open, for up to three of its cycles; above about 30 MHz the ten samples the bridge side asks for outlast
+  that, below it they may not, and the cost is then that of an upset at the start of the next enable.
+- **What an upset costs inside the enable it happens in:** PAD, one pad store lost or repeated, repaired by the next
+  store to that level; EVT, one event lost or repeated (PEND still shows what stands; a status transfer is lost or
+  repeated whole, never torn); OSDBUF, up to 255 bytes wrong or lost, repaired by a repaint (`level` and `drops`
+  show that something moved); SECTOR, the open frame wrong or zero-filled, and queued answers lost or rejected,
+  until the host's ABORT or the enable's fall; LANE, **queued frames lost, repeated or played garbled, which is
+  stray link traffic.**
+- **So:** a host leaves the lane empty (PLAYED caught up, nothing stored) across any action that makes the core
+  reconfigure its `clk_sys` PLL. A core that reconfigures that PLL at moments no host can know does not build
+  `MISTER_LW_LANE`, and puts no write-back data on SECTOR's primary slot.
 
 ## `HPS_BUS` with `MISTER_LW`
 
@@ -582,7 +797,8 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 (0 for a tier not built); a from-core bit is driven only by the piece named, when its tier is built. A bit no piece
 drives reads 0. Each piece drives a constant 1 on its presence bit, and the window lists a block only when its tier
 is built and its presence bit reads 1 (SECTOR: `hps_io`'s commit mark and at least one slot's mux; a slot whose
-mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
+mux is absent has flags 0 in its descriptor and an EN bit that cannot be set). LANE and OSDBUF use no `HPS_BUS` bit
+and have no presence bit.
 
 | bits | direction | content |
 |---|---|---|
@@ -601,19 +817,46 @@ mux is absent has flags 0 in its descriptor and an EN bit that cannot be set).
 | `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT`); presence, constant 1: the mark |
 | `[383:382]` | - | reserved: nothing drives them; every reader ignores them |
 
+## What a host must not assume
+
+- that a store has effect without the enable: only the ENABLE store does;
+- that a store to SECTOR, OSDBUF or LANE has effect before that entry's OPEN bit is set;
+- that a store is in effect before its write response has returned;
+- that a burst write does anything: its beats are dropped;
+- that a line is high without the enable and its entry's LINE_EN bit, or that it is an edge: it is a level;
+- that the enable survives an identification or a core reset through GPO, its own or another program's, or an HPS
+  reset;
+- that the enable ends by itself: nothing times it, and a host that dies leaves every block bound until the next
+  program identifies the core, or the SoC is reset;
+- that PAD levels clear when the enable falls: they stay in the core until the next pad store over either path;
+- that the OSD has an atomic flip: a repaint is visible as it lands;
+- that STATUS bits (SECTOR's STATUS, EVT's PEND) are one sample: each bit is its own;
+- that anything keeps a second program out: the look at GPI bit 22 is a rule the fabric cannot enforce;
+- that a block it skips cannot hold the ENABLE gate (`quiet`): OWNED names it;
+- that an entry's index, its PENDING, OWNED and OPEN bits, or its line, are fixed: they move with the core's tier
+  set.
+
 ## Verification
 
-`tb/run.sh` runs the testbench in these arms, among others:
-- `LW_DIAG=1`;
-- `LW_DIAG=0`;
-- `MENU_CORE`, which checks the header rows;
+`tb/run.sh` runs the testbench in arms, one configuration each: the off-state guard (without `MISTER_LW`, `sys/` and
+`Template.sv` read upstream's token stream under every macro set upstream's files test, and every LW file is empty);
+static checks on the preprocessed top level (the GPI terms with both LW instances or neither, the lines, every
+crossing built from the cells of `sys/lw_cdc.sv` with every source register named, `sys/lw_bridge.sdc` covering
+every crossing source, and the wording of the framework's files and of this guide); `sys_top.v` elaborated against
+stand-ins for off and each of the 32 tier sets in three upstream variants; `LW_DIAG=1` and `LW_DIAG=0`;
+`MENU_CORE`; the floor alone; the Template's own configuration; the SECTOR block at its default geometry and on an
+`hps_io` with `WIDE = 0`; the frame lane; each tier macro without `MISTER_LW` and each unservable geometry, which
+must stop the compile naming its guard module; a short run in each of the 32 tier sets and with a core side that
+leaves a piece out; the lane arm at eight `clk_sys` rates from 12 to 150 MHz, three seeds each, with delay and
+aperture models in every crossing cell; a front-end lint; and the HPS-side probe compiled with warnings as errors.
+Among what they cover:
+- `LW_DIAG=1`; `LW_DIAG=0`; `MENU_CORE`, which checks the header rows;
 - no SECTOR block, the Template's own configuration;
 - the SECTOR block at the default geometry (128-word primary, 256-word save slots): a save-slot frame longer
   than the primary's completes, and the primary is served after it;
 - the SECTOR block on an `hps_io` with `WIDE = 0`: a 4,096-word primary on slot 9 lands byte for byte as `hps_io`'s
   own SPI transfer of the block does, a 510-word save slot on slot 12 at its byte addresses, every strobe 5 cycles
   apart and 5 after the ack, and 32-bit save-slot LBAs round-trip and are compared whole;
-- each unservable geometry, which stops the compile naming its guard module;
 - the frame lane: the whole reference run with every decoder behind `lw_link`, then lane frames against the same
   frames sent as link words (status, RTC, timestamp, mount, gamma, FIO, both OSDs), the `vs_wait` and
   `ioctl_wait` holds, a link word raised mid-frame, full-FIFO drops, unended frames, the longest frame, and reply
@@ -636,7 +879,7 @@ slots 2 and 3 (1 KB and 768-byte frames). They cover:
   followed at once by work, the enable ended by GPO bit 31 and an HPS reset in every cycle of the rise, every
   core-clock register scrambled while enabled and during the return, a half that never answers and one that cannot
   return, a dead host's select with frames queued behind it, the causes at an ENABLE, a BEGIN discarded with the
-  enable gone and its request found by the next host's EN, and a slot-0 frame stored in full with the enable ended
+  enable gone and its request found by the next host's EN, and a primary frame stored in full with the enable ended
   at each offset to its last strobe;
 - the lines as levels, compared every cycle with `enable & LINE_EN & cause`: a raise in the cycle of a store-back
   keeps the line high, and a host woken only by the level serves every event across 10,000 random interleavings;
@@ -663,7 +906,19 @@ slots 2 and 3 (1 KB and 768-byte frames). They cover:
   (plain, rotated, the info box and the `MENU_CORE` header rows), the FIFO full with `clk_sys` stopped, and queued
   bytes discarded when the enable falls.
 
-Re-run it after any `sys/` merge.
+**What the testbench cannot prove.** Crossing safety rests on structure and on timing reports, not on simulation:
+every crossing is built from the cells of `sys/lw_cdc.sv`, which the static check holds, and `sys/lw_bridge.sdc`
+bounds each one, which only a fitted design's timing report confirms. The delay models make the simulator resolve
+synchronisers late, skew Gray buses and tear captures, so they reach cases a zero-delay run never does, but they
+sample what a real synchroniser can do; they do not cover it. The off-state guard compares token streams; that an
+off build's bitstream is upstream's is shown only by comparing the two rbfs, built on the same day (the build date
+is part of `CONF_STR`). The timing rule above is checked on each core's own report.
+
+`tb/hps/lw_probe.c` is an HPS-side program that walks this protocol from the look to the end (discovery, the
+directory, the enable, OPEN, each block in turn, and with `--template` the Template's example) and prints every
+step. It runs with no other program on the link, since it identifies the core. The testbench only compiles it.
+
+Re-run the testbench after any `sys/` merge.
 
 ## Revision and validation
 
@@ -671,53 +926,19 @@ Re-run it after any `sys/` merge.
   that revision's own `sys/`; its `hps_io` (FFB, analog triggers) is newer than the one the framework was first
   built on.
 - **Register map:** the blocks' registers are those of a build validated on a DE10-Nano on 2026-10-25, which
-  covered pads, the OSD shadow, SECTOR (CD and save slots) and the status line, except where this document
+  covered pads, the OSD image, SECTOR (CD and save slots) and the status line, except where this document
   states otherwise: CAUSE words clear by write-one and carry no class tag, a store is a single-beat write, PAD is
   version 1.1, which keeps every level latest-wins where that build queued the sticks and paddles with the
   spinners, EVT is version 2.0, which crosses the status whole and adds the BLK, INFO and UPLOAD causes where that
   build had a status block alone, OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a
-  shadow beside it, and SECTOR is version 2.0 at window `0x08000`, which indexes every per-slot register by
-  slot index and raises a CAUSE bit per slot, only with that slot's EN set, where that build raised one bit for any
-  request.
+  second image RAM beside it, and SECTOR is version 2.0 at window `0x08000`, which indexes every per-slot register
+  by slot index and raises a CAUSE bit per slot, only with that slot's EN set, where that build raised one bit for
+  any request.
   The directory is layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
   directory here and stays on SPI.
-- **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and
-  each block's registers, causes and lines. Nothing else about the host is assumed, and a host that never touches
-  the window drives the core over SPI as before.
+- **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, the
+  host enable, and each block's registers, causes and lines. Nothing else about the host is assumed, and a host
+  that never touches the window drives the core over SPI as before.
+- **Not yet measured:** this revision has not been fitted, so every cost above is an estimate and the timing rule
+  has not been checked on it; the off build's rbf has not been compared with upstream's at this revision.
 - **This Template build has not been run on hardware.**
-
-## Cost and fit (Quartus 17.0.2 Lite, this Template, 2026-11-14)
-
-| build | ALMs | registers | block memory bits | RAM blocks | rbf |
-|---|---|---|---|---|---|
-| upstream `e901a9f`, stock | 7,273 | 11,226 | 384,501 | 59 | md5 `0b49f57e…` |
-| this branch, `MISTER_LW` off (upstream core files, this `sys/`) | 7,273 | 11,226 | 384,501 | 59 | md5 `0b49f57e…`, bit-identical |
-| this branch, `MISTER_LW=1`, no SECTOR | 7,768 (+495) | 12,150 (+924) | 450,357 (+65,856) | 68 (+9) | |
-
-The `MISTER_LW=1` row includes the `Template.sv` example. The stock Template leaves `status_in`, `status_set` and
-`joystick_0` unconnected, so Quartus prunes that logic; the example connects them. Of the +924 registers, `hps_io`
-accounts for +261 and `emu` for +132, most of it the example's status and pad logic. A core that already uses those
-ports pays up to about 400 fewer registers than the table shows.
-
-Timing, worst setup slack in ns (hold is positive in every build):
-
-| build | HDMI clock | bridge clock (`h2f_user0_clk`) |
-|---|---|---|
-| stock, seed 1 | +0.514 | +3.461 |
-| `MISTER_LW=1`, seed 1 | **-0.125** | +2.771 |
-| `MISTER_LW=1`, seed 2 | +0.261 | +2.926 |
-| `MISTER_LW=1`, seed 3 | **-0.154** | +2.215 |
-
-- **The HDMI failures are inside the scaler.** Every failing path runs from `ascal` to `ascal` (`o_vcpt_pre3` →
-  `o_fload`, `o_hcpt` → `o_vcpt`); the extra logic moves its placement. The OSD shadow's own path into
-  `osd_pixel` has +0.38 ns.
-- **The bridge clock's worst path** is inside the PAD drain (`arp` → `rr`), with 2.2-2.9 ns to spare.
-- **Seed 2 closes timing on every clock.**
-
-A SECTOR build with two save slots elaborates from the macros (synthesis checked the decoded parameters). Its cost is
-not measured here, because the Template has no block reader to keep the feeder's outputs alive.
-
-The frame lane has not been fitted in this Template. Without reply capture, on a larger core, the lane measured
-165-177 ALMs plus 6-7 for `lw_link`, and 2 M10K. Reply capture adds a 256 x 16 FIFO (one M10K) and its pointers;
-that cost is an estimate, not a measurement. With `MISTER_LW_LANE` absent, `sys_top`'s link front is the stock
-one and the window builds no lane.
