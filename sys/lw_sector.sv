@@ -41,7 +41,11 @@
 // slot's EN, and a reject arrives with the LBA the core asks for now.
 // CAUSE: bit k = slot k; a full-word store clears each bit written as 1, and a raise in the store's cycle wins.
 // Reads change nothing.
-// clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer. An answer
+// clk_sys side: the feeder that re-creates hps_io's ack and write strobes for each slot's consumer: with c_wide
+// (hps_io's io_wide, a constant) two 16-bit strobes per word, low half first, at the halfword index; without it four
+// 8-bit strobes, byte 0 first, at the byte index. Strobes are GAP cycles apart, and the ack leads the first by GAP.
+// A save slot's LBA is kept, crossed and compared on its declared width (XLB0, XLB1): the live LBA's bits above it
+// read 0, so an answer must echo them as 0 (LBA_S shows the LBA so). An answer
 // it cannot serve (EN, direction or LBA not the live request's), and a BEGIN met while a frame streams (which
 // zero-fills that frame), is rejected through its slot's record and dropped with the DATA behind it.
 // The host enable (hen, the window's en_q; it falls at an ID view, a core reset through GPO or an HPS reset)
@@ -71,9 +75,10 @@
 // DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:16], DROPS, COUNTS, RINGS, TSTAMP_*, CYCLES, SUM and TEST:
 // they read 0 and CTRL.TEST/CLR are ignored. Every other register stays.
 
-module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3,
+module lw_sector #(parameter [7:0] SLOT = 1, parameter [12:0] FRAME = 588, parameter [2:0] BLKSZ = 3,
                    parameter AW = 9, parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3,
-                   parameter [9:0] XFRAME0 = 256, parameter [9:0] XFRAME1 = 256)
+                   parameter [12:0] XFRAME0 = 256, parameter [12:0] XFRAME1 = 256, parameter [5:0] XLB0 = 7,
+                   parameter [5:0] XLB1 = 7, parameter [3:0] GAP = 2)
 (
 	input wire        clk,          // clk_100m
 
@@ -100,15 +105,16 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	input wire [31:0] c_lba,
 	input wire        hps_ack,      // the SPI path's ack for this slot
 	input wire        c_commit,     // hps_io's commit mark: the SPI host was shown a request it has not finished
+	input wire        c_wide,       // hps_io's io_wide (a constant): 1 = 16-bit strobes, 0 = 8-bit
 	output reg        en_sys = 0,   // mux state: 1 = this block owns the consumer's ack/write/data
 	output wire       o_ack,
 	output reg        o_wr   = 0,
 	output reg [15:0] o_dat  = 0,
-	output reg  [8:0] o_adr  = 0,   // save-slot strobe address: {word, half}, hps_io's sd_buff_addr order
+	output reg [13:0] o_adr  = 0,   // the strobe's halfword or byte index, hps_io's sd_buff_addr order
 
 	input wire  [1:0] x_rd,         // save slots X0/X1 (clk_sys): read and write requests, LBA, SPI ack
 	input wire  [1:0] x_wr,
-	input wire [13:0] x_lba,        // {X1, X0}, 7 bits each
+	input wire [63:0] x_lba,        // {X1, X0}, 32 bits each
 	input wire  [1:0] x_hps_ack,
 	output reg  [1:0] x_en_sys = 0,
 	output wire [1:0] x_ack
@@ -116,13 +122,10 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 
 localparam [1:0]  T_DATA = 2'd0, T_BEGIN = 2'd1, T_ABORT = 2'd2;
 
-// Servable geometry: frames of 1-1023 words; a save-slot frame of at most 256 words (the 9-bit strobe address).
-// synthesis translate_off
-initial if (FRAME == 0 || XFRAME0 == 0 || XFRAME0 > 256 || XFRAME1 == 0 || XFRAME1 > 256) begin
-	$display("lw_sector: unservable geometry FRAME=%0d XFRAME0=%0d XFRAME1=%0d", FRAME, XFRAME0, XFRAME1);
-	$finish;
-end
-// synthesis translate_on
+// The geometry is checked where it is declared (lw_sys_window.sv): frames of 1-4096 words, a save slot's of at most
+// 2^AW - 2, LBA widths of 1-32 bits, a gap of 2-15 cycles. A save slot's LBA, masked to its declared width:
+localparam [31:0] XM0 = (XLB0 >= 6'd32) ? 32'hFFFFFFFF : (32'd1 << XLB0) - 32'd1;
+localparam [31:0] XM1 = (XLB1 >= 6'd32) ? 32'hFFFFFFFF : (32'd1 << XLB1) - 32'd1;
 
 function automatic [2:0] onehot(input [1:0] k);
 	onehot = (k == 2'd0) ? 3'b001 : (k == 2'd1) ? 3'b010 : (k == 2'd2) ? 3'b100 : 3'b000;
@@ -132,7 +135,7 @@ endfunction
 
 localparam DEPTH = 1 << AW;
 
-(* ramstyle = "M10K" *) reg [43:0] fram [0:DEPTH-1];
+(* ramstyle = "M10K" *) reg [45:0] fram [0:DEPTH-1];   // {type[1:0], index[11:0], data[31:0]}
 
 reg  [AW:0] wptr = 0;
 reg  [AW:0] rptr = 0;
@@ -156,11 +159,12 @@ wire        ffull = used[AW];
 localparam [1:0] F_IDLE = 2'd0, F_ACK = 2'd1, F_STREAM = 2'd2, F_FILL = 2'd3;
 
 reg   [1:0] fs = F_IDLE;
-reg   [9:0] fexp = 0;
-reg         em = 0, qv = 0, tmode = 0;
-reg   [1:0] ph = 0, ackc = 0;
-reg  [15:0] hi = 0;
-reg  [43:0] q;
+reg  [12:0] fexp = 0;
+reg         em = 0, qv = 0, tmode = 0;   // em: a word is being strobed
+reg   [1:0] sn = 0, ackc = 0;   // sn: that word's strobe last issued
+reg   [3:0] gc = 4'd15;         // clk_sys cycles since the last strobe or ack rise, saturating at 15
+reg  [31:0] wv = 0;             // the word being strobed
+reg  [45:0] q;
 reg  [19:0] fsum = 0;
 reg   [3:0] evt = 0;                // {reset_fill, abort, skip, reject} toggles (DIAG)
 reg   [3:0] dcnt = 0, dsent = 0;    // DIAG: done events counted, and the count last launched to clk_100m
@@ -171,15 +175,15 @@ reg  [31:0] rings = 0, tsreq = 0, tsdone = 0, cycles = 0;
 reg         rq_off0 = 0, rq_rd0 = 0;   // the primary's last record: offered, rd, LBA
 reg  [31:0] rq_lba = 0;
 reg   [1:0] rq_xoff = 0, rq_xrd = 0, rq_xwr = 0;   // the save slots' last records: offered, rd, wr, LBA
-reg  [13:0] rq_xlba = 0;
+reg  [63:0] rq_xlba = 0;
 (* preserve *) reg       en_lwx   = 0;   // CTRL[0]
 (* preserve *) reg       test_lwx = 0;   // CTRL[9]
 (* preserve *) reg [1:0] xen_lwx  = 0;   // CTRL[2:1]
 reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the offered request entered the FIFO
 reg   [8:0] btag = 0;               // per slot, 3 bits: the count of its BEGIN/WACK entries, carried in each entry
 reg         abort_pend = 0;         // an ABORT store found the FIFO full: it enters in the first cycle with room
-reg   [9:0] flen_w = FRAME;
-reg   [9:0] exp_w = 0;
+reg  [12:0] flen_w = FRAME;
+reg  [12:0] exp_w = 0;
 reg  [11:0] fdrops = 0;
 reg         bfail = 0;
 reg  [15:0] drops = 0, frames = 0;
@@ -213,7 +217,7 @@ wire  [2:0] rc_tag = rc_q[36:34];
 // RSTAT_S, LBA_S, BEGIN_S, WACK_S); DATA from 0x4000.
 wire        rreg  = rsel & ~raddr[14] & ~|raddr[13:9];
 wire        wreg  = wsel & write & ~waddr[14] & ~|waddr[13:9] & &be;
-wire        wdat  = wsel & write &  waddr[14] & &be & (waddr[13:2] < {2'b00, flen_w});   // the OPEN frame's length
+wire        wdat  = wsel & write &  waddr[14] & &be & ({1'b0, waddr[13:2]} < flen_w);   // the OPEN frame's length
 wire  [6:0] widx  = waddr[8:2];
 wire  [2:0] wk    = waddr[7:5];                   // the slot index of a per-slot word
 wire  [2:0] wj    = waddr[4:2];
@@ -226,7 +230,7 @@ wire        b_x0    = (w_bs | w_wk) && wk == 3'd1;
 wire        b_x1    = (w_bs | w_wk) && wk == 3'd2;
 wire        w_begin = b_p | b_x0 | b_x1;
 wire  [1:0] bsel    = wk[1:0];
-wire  [9:0] blen    = w_wk ? 10'd0 : b_p ? FRAME : b_x0 ? XFRAME0 : XFRAME1;
+wire [12:0] blen    = w_wk ? 13'd0 : b_p ? FRAME : b_x0 ? XFRAME0 : XFRAME1;
 wire        w_abort = w_ctrl & wdata[8];
 wire        clr     = w_ctrl & wdata[10];
 // a store's entry is taken only with room and no ABORT held; the held ABORT takes the first cycle with room
@@ -247,8 +251,8 @@ wire        fire   = |raise;
 wire        w_en  = wdata[0] & wired[0];                                     // the EN bits a store sets
 wire  [1:0] w_xen = wdata[2:1] & wired[2:1];
 wire  [2:0] clr_c = {3{w_cause}} & wdata[2:0];
-wire [43:0] entry = a_go ? {T_ABORT, 42'd0} : w_begin ? {T_BEGIN, 4'd0, etag, w_wk, bsel, wdata} :
-                    w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};   // an index below flen_w
+wire [45:0] entry = a_go ? {T_ABORT, 44'd0} : w_begin ? {T_BEGIN, 6'd0, etag, w_wk, bsel, wdata} :
+                    w_abort ? {T_ABORT, 44'd0} : {T_DATA, waddr[13:2], wdata};   // an index below flen_w
 
 // REQ: the lowest-index slot whose EN is set, whose record shows its request offered, and that is not answered
 wire  [2:0] cand   = {xen_lwx, en_lwx} & {rq_xoff, rq_off0} & ~ans;
@@ -272,8 +276,8 @@ always @(posedge clk) begin
 
 	// the request records, the cycle after each lands; an ENABLE finds every link at rest and nothing offered
 	if (rc_sel[0]) begin rq_off0 <= rc_off; rq_rd0 <= rc_q[32]; rq_lba <= rc_q[31:0]; end
-	if (rc_sel[1]) begin rq_xoff[0] <= rc_off; {rq_xwr[0], rq_xrd[0]} <= rc_q[33:32]; rq_xlba[6:0] <= rc_q[6:0]; end
-	if (rc_sel[2]) begin rq_xoff[1] <= rc_off; {rq_xwr[1], rq_xrd[1]} <= rc_q[33:32]; rq_xlba[13:7] <= rc_q[6:0]; end
+	if (rc_sel[1]) begin rq_xoff[0] <= rc_off; {rq_xwr[0], rq_xrd[0]} <= rc_q[33:32]; rq_xlba[31:0] <= rc_q[31:0]; end
+	if (rc_sel[2]) begin rq_xoff[1] <= rc_off; {rq_xwr[1], rq_xrd[1]} <= rc_q[33:32]; rq_xlba[63:32] <= rc_q[31:0]; end
 	if (take) begin rq_off0 <= 0; rq_xoff <= 0; end
 
 	// CAUSE: a raise beats a concurrent clear; an ENABLE clears the word
@@ -321,7 +325,7 @@ always @(posedge clk) begin
 		bfail  <= ~p_ok;
 		fdrops <= p_ok ? 12'd0 : 12'd1;
 	end
-	else if (wdat && p_ok && waddr[13:2] == {2'b00, exp_w}) exp_w <= exp_w + 10'd1;
+	else if (wdat && p_ok && {1'b0, waddr[13:2]} == exp_w) exp_w <= exp_w + 13'd1;
 
 	if (DIAG) begin
 		frames <= (clr ? 16'd0 : frames) + {12'd0, dn_add};   // a done arriving with CLR counts after it
@@ -358,7 +362,7 @@ always @(*) begin
 		7'h02: rdata = {21'd0, 1'b0, test_lwx, 1'b0, 5'd0, xen_lwx, en_lwx};   // CTRL
 		7'h03: rdata = {DIAG ? frames : 16'd0, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
 		                st_s[2:0]};                        // STATUS
-		7'h04: rdata = {ok, 3'd0, fdrops, 3'd0, 3'd0, exp_w};   // ACCEPT
+		7'h04: rdata = {ok, 3'd0, fdrops, 3'd0, exp_w};    // ACCEPT
 		7'h05: rdata = 32'h33434553;     // "SEC3"
 		7'h06: rdata = DIAG ? {8'd0, hw, drops} : 32'd0;
 		7'h07: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
@@ -370,9 +374,9 @@ always @(*) begin
 		7'h40: rdata = {rq_off0,    ans[0], 14'd0, pst0};   // RSTAT_S[0]
 		7'h41: rdata = rq_lba;                              // LBA_S[0]
 		7'h48: rdata = {rq_xoff[0], ans[1], 14'd0, xst0};
-		7'h49: rdata = {25'd0, rq_xlba[6:0]};
+		7'h49: rdata = rq_xlba[31:0];
 		7'h50: rdata = {rq_xoff[1], ans[2], 14'd0, xst1};
-		7'h51: rdata = {25'd0, rq_xlba[13:7]};
+		7'h51: rdata = rq_xlba[63:32];
 		default: rdata = 32'd0;
 	endcase
 end
@@ -389,29 +393,40 @@ wire [1:0] xen_s = cs1[3:2];
 wire       rempty = (sector_r_lwgray == wg_s);
 wire       fidle  = (fs == F_IDLE);
 wire       dis    = ~hen_s & fidle & ~em & (rptr != g2b(wg_s));   // without the enable: discard, every cycle
-wire       pop    = (~rempty & ~qv & (fs != F_FILL) & (fs != F_ACK) & (~em | ph == 2'd3)) | dis;
-wire [1:0] qt = q[43:42];
-wire [9:0] qi = q[41:32];
+// Strobes: GAP cycles apart, the first GAP after the ack. A word's entry is popped only once its first strobe can
+// issue in the cycle it is valid: GAP - 1 cycles after the previous strobe, or the ack's rise, at the earliest.
+wire [1:0] slast  = c_wide ? 2'd1 : 2'd3;   // the last strobe of a word
+wire       gap_ok = gc >= GAP;              // a strobe may issue at this edge
+wire       nxt_ok = gc >= GAP - 4'd1;       // the next word's entry may be popped
+wire       wend   = em && sn >= slast && nxt_ok;   // the word ends here
+wire       pop    = (~rempty & ~qv & (fs != F_FILL) & (fs != F_ACK) & (~em | wend) & (fs != F_STREAM | nxt_ok)) | dis;
+wire [1:0] qt = q[45:44];
+wire [11:0] qi = q[43:32];
 wire [31:0] qd = q[31:0];
+wire [31:0] xl0 = x_lba[31:0] & XM0, xl1 = x_lba[63:32] & XM1;   // the save slots' LBAs on their declared widths
 
 reg  [1:0] fsel  = 0;               // the slot the open frame serves: 0 primary, 1 X0, 2 X1
 reg        fwack = 0;               // the open frame is a WACK: ack only, no strobes
-wire [9:0] flen  = (fsel == 2'd0) ? FRAME : (fsel == 2'd1) ? XFRAME0 : XFRAME1;
+wire [12:0] flen = (fsel == 2'd0) ? FRAME : (fsel == 2'd1) ? XFRAME0 : XFRAME1;
 wire [1:0] bs    = qi[1:0];
 wire       bwk   = qi[2];
 wire [2:0] btg   = qi[5:3];
 wire       bmatch = (bs == 2'd0) ? (!bwk && en_sys && c_req && qd == c_lba) :
-                    (bs == 2'd1) ? (x_en_sys[0] && (bwk ? x_wr[0] : x_rd[0]) && qd == {25'd0, x_lba[6:0]}) :
-                    (bs == 2'd2) ? (x_en_sys[1] && (bwk ? x_wr[1] : x_rd[1]) && qd == {25'd0, x_lba[13:7]}) : 1'b0;
+                    (bs == 2'd1) ? (x_en_sys[0] && (bwk ? x_wr[0] : x_rd[0]) && qd == xl0) :
+                    (bs == 2'd2) ? (x_en_sys[1] && (bwk ? x_wr[1] : x_rd[1]) && qd == xl1) : 1'b0;
 
 always @(posedge clk_sys) q <= fram[rptr[AW-1:0]];
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
+// strobe j's address: the halfword index 2 x word + j with 16-bit strobes, else the byte index 4 x word + j
+function automatic [13:0] strobe_adr(input [1:0] j);
+	strobe_adr = c_wide ? {fexp[12:0], j[0]} : {fexp[11:0], j};
+endfunction
 reg  [1:0] mt   = 0;                // cycles the FIFO has read empty with EN low, saturating at 2
 reg  [1:0] ml   = 0;                // cycles the FIFO has read empty with the enable level low, saturating at 2
 // the frame in flight will get no more data: the primary's EN fell, or the enable level did (any slot); fill it
 // from its next word
-wire       cut  = (fs == F_STREAM || (fs == F_ACK && !fwack)) && rempty && !qv && !em &&
+wire       cut  = fs == F_STREAM && rempty && !qv && !em &&
                   ((fsel == 2'd0 && !en_s && mt == 2'd2) || (!hen_s && ml == 2'd2));
 
 // An answer taken with the enable and not served: in idle, one whose slot, direction or LBA is not the live
@@ -441,7 +456,7 @@ wire [1:0] rs    = (rlast == 2'd0) ? (dirty[1] ? 2'd1 : dirty[2] ? 2'd2 : 2'd0) 
 wire [2:0] lsel  = {3{rc_go}} & onehot(rs);
 wire [2:0] rtg_s = (rs == 2'd1) ? rtag[5:3] : (rs == 2'd2) ? rtag[8:6] : rtag[2:0];
 wire [1:0] rwr_s = (rs == 2'd1) ? {x_wr[0], x_rd[0]} : (rs == 2'd2) ? {x_wr[1], x_rd[1]} : {1'b0, c_req};
-wire [31:0] rlba = (rs == 2'd1) ? {25'd0, x_lba[6:0]} : (rs == 2'd2) ? {25'd0, x_lba[13:7]} : c_lba;
+wire [31:0] rlba = (rs == 2'd1) ? xl0 : (rs == 2'd2) ? xl1 : c_lba;
 wire [41:0] rec  = {rs, offd[rs], opn[rs], rej[rs], rtg_s, rwr_s, rlba};
 
 lw_xfer #(.W(42)) rec_x(.s_clk(clk_sys), .s_go(rc_go), .s_d(rec), .s_busy(rc_busy),
@@ -487,6 +502,7 @@ always @(posedge clk_sys) begin
 	rearm <= {rearm[4], fack[2] | x_hps_ack[1], rearm[2], fack[1] | x_hps_ack[0], rearm[0], fack[0] | hps_ack};
 
 	qv <= pop;
+	gc <= (gc == 4'd15) ? gc : gc + 4'd1;
 	mt <= (!rempty || en_s) ? 2'd0 : (mt == 2'd2) ? 2'd2 : mt + 2'd1;
 	ml <= (!rempty || hen_s) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
 	if (pop) rptr <= rptr + 1'd1;
@@ -513,13 +529,14 @@ always @(posedge clk_sys) begin
 		end
 	end
 
-	if (fs == F_FILL && !em) begin
+	if (fs == F_FILL && !em && gap_ok) begin
 		o_wr  <= ~tmode;
 		o_dat <= 0;
-		o_adr <= {fexp[7:0], 1'b0};
-		hi    <= 0;
+		o_adr <= strobe_adr(2'd0);
+		wv    <= 0;
 		em    <= 1;
-		ph    <= 1;
+		sn    <= 0;
+		gc    <= 4'd1;
 	end
 
 	if (fidle) fack <= 3'd0;           // idle drives every ack low
@@ -542,8 +559,9 @@ always @(posedge clk_sys) begin
 					fsel  <= bs;
 					fwack <= bwk;
 					fack[bs] <= 1'b1;
+					gc    <= 4'd1;
 					ackc  <= 2;
-					fs    <= F_ACK;
+					fs    <= bwk ? F_ACK : F_STREAM;   // a WACK: an ack pulse of two cycles, no strobes
 				end
 			end
 
@@ -552,13 +570,14 @@ always @(posedge clk_sys) begin
 				fs     <= F_FILL;
 				evt[2] <= ~evt[2];
 			end
-			else if (qi == fexp) begin
+			else if ({1'b0, qi} == fexp) begin   // the pop waited for the gap
 				o_wr  <= ~tmode;
-				o_dat <= qd[15:0];
-				o_adr <= {fexp[7:0], 1'b0};
-				hi    <= qd[31:16];
+				o_dat <= c_wide ? qd[15:0] : {8'd0, qd[7:0]};
+				o_adr <= strobe_adr(2'd0);
+				wv    <= qd;
 				em    <= 1;
-				ph    <= 1;
+				sn    <= 0;
+				gc    <= 4'd1;
 				if (DIAG) fsum <= fsum + qd[31:24] + qd[23:16] + qd[15:8] + qd[7:0];
 			end
 			else evt[1] <= ~evt[1];
@@ -566,17 +585,20 @@ always @(posedge clk_sys) begin
 		default: ;
 	endcase
 
-	if (em) case (ph)
-		2'd1: ph <= 2;
-		2'd2: begin
-			o_wr  <= ~tmode;
-			o_dat <= hi;
-			o_adr <= {fexp[7:0], 1'b1};
-			ph    <= 3;
+	// the word's later strobes, each GAP after the one before; GAP - 1 after its last, the word ends
+	if (em) begin
+		if (sn < slast) begin
+			if (gap_ok) begin
+				o_wr  <= ~tmode;
+				o_dat <= c_wide ? wv[31:16] : {8'd0, wv[{sn + 2'd1, 3'd0} +: 8]};
+				o_adr <= strobe_adr(sn + 2'd1);
+				sn    <= sn + 2'd1;
+				gc    <= 4'd1;
+			end
 		end
-		2'd3: begin
+		else if (nxt_ok) begin
 			em <= 0;
-			ph <= 0;
+			sn <= 0;
 			if (fexp >= flen - 1'd1) begin   // or past it: a frame ends from any count
 				fexp   <= 0;
 				fack[fsel] <= 1'b0;
@@ -588,11 +610,7 @@ always @(posedge clk_sys) begin
 			end
 			else fexp <= fexp + 1'd1;
 		end
-		default: begin
-			em <= 0;
-			ph <= 0;
-		end
-	endcase
+	end
 
 	if (cut) fs <= F_FILL;
 

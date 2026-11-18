@@ -84,15 +84,20 @@ set_global_assignment -name SEED 1
 # LW window diagnostics (SCRATCH, SECTOR counters/timestamps): 0 or absent = shipping, 1 = debug builds
 #set_global_assignment -name VERILOG_MACRO "LW_DIAG=1"
 
-# LW SECTOR block, for a core that reads blocks through hps_io (see docs/LW_BRIDGE.md, "Hooking the SECTOR block")
+# LW SECTOR block, for a core that reads blocks through hps_io (see docs/LW_BRIDGE.md, "Hooking the SECTOR block"):
+# its hps_io slot (0-15), frame in 32-bit words (1-4096), clk_sys cycles between strobes (2-15) and BLKSZ. An
+# unservable geometry stops the build, naming lw_sector_unservable_geometry.
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_GAP=2"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=2"
-# and a save slot (read by BEGIN_S frames, written back from its image in DDR; save slot 1 likewise, SAVE1)
+# and a save slot (read by BEGIN_S frames, written back from its image in DDR; save slot 1 likewise, SAVE1): its
+# hps_io slot declares it; its image base is required; frame 1-510 words; LBA bits kept and compared, 1-32
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_SLOT=2"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_WSRC=32'h30000000"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_EXTENT=32'h00020000"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_FRAME=256"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_LBA_BITS=32"
 
 # LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"
