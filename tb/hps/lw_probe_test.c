@@ -6,6 +6,8 @@
  *   1. The walk: a directory where two known entries share an ordinal, a known and an unknown entry share
  *      another, and a framework entry names one above 15: none of those entries keeps a line; an entry whose
  *      ordinal no other entry names keeps it.
+ *   2. The start's pad levels: with PAD's bitmap taking every level opcode, the probe stores each of the 24
+ *      latest-wins levels once, the six paddles among them, and nothing else (no spinner, which is an event).
  *
  * Output: "-- " headings (the probe's own steps print theirs too), a pass or FAIL line per check, then the count:
  * "lw_probe_test: N checks, F failures". The probe's own FAIL lines count as failures.
@@ -85,9 +87,42 @@ static void case_walk(void)
 	        (unsigned)blk[K_OSD].line);
 }
 
+static void case_pads(void)
+{
+	static const uint32_t ops[8] = { 0x02, 0x03, 0x10, 0x11, 0x12, 0x13, 0x1A, 0x3D };
+	uint32_t i, a, n = 0, want = 0, other = 0, paddles = 0, sticks = 0, pads = 0;
+	step("probe test 2: the start re-stores every pad level, the paddles included, and no spinner");
+	reset_model();
+	blk[K_PAD].present = 1;
+	blk[K_PAD].off = 0x10000u;
+	for (i = 0; i < 8; i++) blk[K_PAD].k[ops[i] >> 5] |= 1u << (ops[i] & 31u);
+	for (a = 0; a < 0x10000u; a += 4) m_win[(0x10000u + a) / 4] = 0xA5A5A5A5u;
+	pad_levels();
+	for (a = 0; a < 0x10000u; a += 4) {
+		uint32_t op = a >> 10, idx = (a >> 2) & 0xFFu;
+		int level = (op != 0x1Au && op != 0x3Du) ? idx == 0 : idx <= 5u || (op == 0x1Au && (idx & 0xFu) == 0xFu &&
+		            idx >> 4 <= 5u);
+		int known = 0;
+		for (i = 0; i < 8; i++) known |= ops[i] == op;
+		if (m_win[(0x10000u + a) / 4] == 0xA5A5A5A5u) { want += known && level; continue; }
+		n++;
+		if (!known || !level) { other++; continue; }
+		if (op == 0x1Au && (idx & 0xFu) == 0xFu) paddles++;
+		else if (op == 0x1Au || op == 0x3Du) sticks++;
+		else pads++;
+	}
+	t_check(n == 24 && !want, "the 24 levels stored, every one (%u stored, %u levels left unstored)", (unsigned)n,
+	        (unsigned)want);
+	t_check(pads == 6 && sticks == 12, "the six digital pads and both sticks of six players (%u, %u)", (unsigned)pads,
+	        (unsigned)sticks);
+	t_check(paddles == 6, "the six paddles, 0x1A at index {p, 15} for p = 0-5 (%u)", (unsigned)paddles);
+	t_check(!other, "no other store: no spinner, no index outside the table (%u)", (unsigned)other);
+}
+
 int main(void)
 {
 	case_walk();
+	case_pads();
 	printf("lw_probe_test: %u checks, %u failures\n", t_checks, t_fails + fails);
 	return t_fails + fails ? 1 : 0;
 }

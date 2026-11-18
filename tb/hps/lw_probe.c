@@ -582,6 +582,8 @@ static void pad_store(uint32_t op, uint32_t idx, uint32_t v)
 	bwr(K_PAD, (op << 10) + (idx << 2), v);
 }
 
+/* every one of PAD's 24 latest-wins levels: the six digital pads, both sticks of each player and each player's
+ * paddle (0x1A at index {p, 15}); never a spinner, whose stores are events */
 static void pad_levels(void)
 {
 	static const uint32_t joy[6] = { 0x02, 0x03, 0x10, 0x11, 0x12, 0x13 };
@@ -590,7 +592,10 @@ static void pad_levels(void)
 	for (i = 0; i < 6; i++)
 		if (pad_takes(joy[i])) pad_store(joy[i], 0, 0);
 	for (i = 0; i < 6; i++) {
-		if (pad_takes(0x1A)) pad_store(0x1A, i, 0);
+		if (pad_takes(0x1A)) {
+			pad_store(0x1A, i, 0);
+			pad_store(0x1A, i << 4 | 0xFu, 0);
+		}
 		if (pad_takes(0x3D)) pad_store(0x3D, i, 0);
 	}
 }
