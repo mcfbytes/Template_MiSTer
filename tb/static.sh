@@ -368,15 +368,13 @@ SYNATTR = 'SYNCHRONIZER_IDENTIFICATION'
 # The stock files' LW text holds no synchroniser: the list is empty
 SYNC_ALLOW = {}
 GRAYBUS = ['sector_w', 'sector_r', 'lane_w', 'lane_r', 'lane_rw', 'lane_rr', 'osd_w', 'osd_r']
-GRAY_ALLOW = {'stflg'}     # the status flag's Gray code, until the status snapshot crosses whole
 # Reads across clocks outside the cells, as (module, register, source): the request LBAs, until requests cross as
-# records; the status snapshot, a quasi-static capture until it crosses whole. Each must still be there.
-XREAD_ALLOW = {('lw_sector', 'lba', 'c_lba'), ('lw_sector', 'xlba', 'x_lba'),
-               ('lw_evt', 'snap', 'status_req')}
+# records. Each must still be there.
+XREAD_ALLOW = {('lw_sector', 'lba', 'c_lba'), ('lw_sector', 'xlba', 'x_lba')}
 # The input and inout ports on a block's second clock. Every other one is on the block's port clk, or on the one clock
 # of a block that has no clk port.
 PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack x_rd x_wr x_lba x_hps_ack'),
-           'lw_evt': ('clk_sys', 'stflg status_req'),
+           'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
            'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw')}
@@ -754,7 +752,7 @@ for n, M in sorted(mods.items()):
 for n, M in sorted(mods.items()):
     for r in sorted(x for x in M['regs'] if x.endswith('_lwgray')):
         bus = r[:-len('_lwgray')]
-        check(bus in GRAYBUS or bus in GRAY_ALLOW, '%s: %s is not one of the Gray buses %s' %
+        check(bus in GRAYBUS, '%s: %s is not one of the Gray buses %s' %
               (n, r, ' '.join(GRAYBUS)))
         asg = [(clk, rhs, unc) for clk, out in M['blocks'] for lhs, rhs, _, unc in out if lhs_names(lhs)[0] == [r]]
         asg += [(None, [], False)] * (r in M['comb'])

@@ -47,7 +47,8 @@
 // link open (its OPEN bit), which it is only once the half has seen the enable, and a store dropped there sets
 // stale too. quiet keeps a half still returning to SPI from taking work under the next enable. OWNED shows each
 // link not yet back at rest. Every other block's OPEN bit is en_q, its OWNED bit 0.
-// At a taken ENABLE each block reloads its CAUSE word: EVT raises STATUS, SECTOR clears its own.
+// At a taken ENABLE each block reloads its CAUSE word: EVT ORs in STATUS and its standing levels, SECTOR clears
+// its own.
 // Lines: each is a register, en_q & the entry's LINE_EN bit & the entry's CAUSE word non-zero, so a line is a
 // level that falls only when one of the three does. LINE_EN reads 0 whenever en_q does. PENDING is not
 // gated. RESETS counts rises of lw_hrst and the state machines the firewall freed, each saturating at 255.
@@ -57,8 +58,9 @@
 // offset inside a block reads 0.
 // The SECTOR block is one primary hps_io read slot plus up to two save slots ("cards"); its kind words declare
 // each card slot, its DDR image base and extent. OSDBUF queues image stores for a clk_sys writer that writes
-// them through each osd instance's own osd_buffer port (lw_osd.sv, osd.v). EVT raises the status back-channel's
-// cause on its own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies.
+// them through each osd instance's own osd_buffer port (lw_osd.sv, osd.v). EVT raises hps_io's core->host flags
+// (status, block request, info, upload) as causes on its own line. LANE replays ordered link frames onto sys_top's
+// link nets and can capture their replies.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored) and lw_sector's diagnostics; LW_DIAG=1
 // (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
@@ -167,9 +169,9 @@ localparam [15:0] OSD_KIND  = 16'd3;
 localparam [31:0] OSD_VER   = 32'h00020000;
 localparam  [7:0] OSD_LINE  = 8'd0;
 localparam [15:0] EVT_KIND  = 16'd4;
-localparam [31:0] EVT_VER   = 32'h00010000;
+localparam [31:0] EVT_VER   = 32'h00020000;
 localparam  [7:0] EVT_LINE  = 8'd2;                        // f2h_irq[9], GIC SPI 49
-localparam [15:0] EVT_BITS  = 16'h0001;                    // STATUS, per capture
+localparam [15:0] EVT_BITS  = 16'h000F;                    // STATUS, BLK, INFO, UPLOAD
 localparam [15:0] LANE_KIND = 16'd5;
 localparam [31:0] LANE_VER  = 32'h00010001;
 localparam  [7:0] LANE_LINE = 8'd0;
@@ -382,6 +384,10 @@ function automatic [31:0] osd_kw(input [4:0] k);
 	endcase
 endfunction
 
+function automatic [31:0] evt_kw(input [4:0] k);
+	evt_kw = (k == 5'd0) ? 32'd4 : 32'd0;                  // K0: the status words
+endfunction
+
 function automatic [31:0] lane_kw(input [4:0] k);
 	case (k)
 		5'd8:    lane_kw = LANE_CAPS;
@@ -408,7 +414,7 @@ always @(*) begin
 	if (OSD_EN && de == e_osd)
 		dir_ent = ent(dew, OSD_KIND, OSD_VER, OSD_OFF, OSD_SIZE, 21'd0, OSD_LINE, 16'd0, osd_kw(dk));
 	if (has_evt && de == e_evt)
-		dir_ent = ent(dew, EVT_KIND, EVT_VER, EVT_OFF, EVT_SIZE, EVT_OFF, EVT_LINE, EVT_BITS, 32'd0);
+		dir_ent = ent(dew, EVT_KIND, EVT_VER, EVT_OFF, EVT_SIZE, EVT_OFF, EVT_LINE, EVT_BITS, evt_kw(dk));
 	if (LANE_EN && de == e_lane)
 		dir_ent = ent(dew, LANE_KIND, LANE_VER, LANE_OFF, LANE_SIZE, 21'd0, LANE_LINE, 16'd0, lane_kw(dk));
 
@@ -493,7 +499,7 @@ if (EVT_EN) begin : evt
 		.waddr(wevt[9:0]), .wsel(w_evt && wevt[11:10] == 2'd0), .write(wr), .wdata(lw_wdata), .be(lw_be),
 		.take(e_take),
 		.irq(evt_irq),
-		.clk_sys(clk_sys), .stflg(hps_lw[243:240]), .status_req(hps_lw[371:244])
+		.clk_sys(clk_sys), .st(hps_lw[371:240]), .ev(hps_lw[239:237]), .lvl(hps_lw[374:372])
 	);
 end
 `else

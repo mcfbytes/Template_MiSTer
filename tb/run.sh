@@ -54,8 +54,7 @@ fi
 # about 60 MHz, until requests and their rejects cross as records. Which reject meets a torn sample, if any, depends
 # on the phase the cases before it leave, so the list names the cases that meet one under today's seeds.
 XFAIL='R62|adjacent rejects of two slots: both requests re-open
-R150|adjacent rejects of two slots: both requests re-open
-R150|core reset during a card load: the stale BEGIN_S is rejected, the request re-opens'
+R150|adjacent rejects of two slots: both requests re-open'
 export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
