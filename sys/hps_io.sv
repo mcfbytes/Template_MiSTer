@@ -40,7 +40,7 @@ module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, 
 (
 	input             clk_sys,
 `ifdef MISTER_LW
-	inout     [313:0] HPS_BUS,
+	inout     [383:0] HPS_BUS,
 `else
 	inout      [45:0] HPS_BUS,
 `endif
@@ -222,16 +222,42 @@ wire [15:0] io_din   = HPS_BUS[31:16];
 reg  [15:0] io_dout;
 
 `ifdef MISTER_LW
-// LW pad stores from sys_top (lw_sys_window.sv), already on clk_sys
+// LW tiers (docs/LW_BRIDGE.md): each piece below drives a constant 1 on its own presence bit of HPS_BUS, so the
+// window lists its block only when the wide bus reaches this instance.
+`ifdef MISTER_LW_PAD
+// LW pad stores from sys_top (lw_pad.sv), already on clk_sys; HPS_BUS[375]: this write arm is present
 wire        lw_we    = HPS_BUS[94];
 wire  [7:0] lw_op    = HPS_BUS[93:86];
 wire  [7:0] lw_idx   = HPS_BUS[85:78];
 wire [31:0] lw_dat   = HPS_BUS[77:46];
+assign HPS_BUS[375] = 1'b1;
+`endif
 
-// The status back-channel's own flag and snapshot (0x29), exported to sys_top's LW SYS block.
+// The status back-channel's own flag and snapshot (0x29), exported to sys_top's LW EVT block (lw_evt.sv);
+// HPS_BUS[376]: the exports are present.
 reg   [3:0] stflg = 0;
 reg [127:0] status_req = 0;
-assign HPS_BUS[313:182] = {stflg, status_req};
+`ifdef MISTER_LW_EVT
+assign HPS_BUS[371:240] = {status_req, stflg};
+assign HPS_BUS[376] = 1'b1;
+`endif
+`else
+// A tier macro without MISTER_LW: the build stops here, naming the guard.
+`ifdef MISTER_LW_PAD
+lw_tier_needs_MISTER_LW pad_guard();
+`endif
+`ifdef MISTER_LW_EVT
+lw_tier_needs_MISTER_LW evt_guard();
+`endif
+`ifdef MISTER_LW_SECTOR_SLOT
+lw_tier_needs_MISTER_LW sector_guard();
+`endif
+`ifdef MISTER_LW_LANE
+lw_tier_needs_MISTER_LW lane_guard();
+`endif
+`ifdef MISTER_LW_OSD
+lw_tier_needs_MISTER_LW osd_guard();
+`endif
 `endif
 
 assign HPS_BUS[37]   = ioctl_wait;
@@ -621,6 +647,7 @@ always@(posedge clk_sys) begin : uio_block
 	end
 
 `ifdef MISTER_LW
+`ifdef MISTER_LW_PAD
 	// LW second write path: the same registers the link writes, one full word per store.
 	if(lw_we) begin
 		case(lw_op)
@@ -662,6 +689,7 @@ always@(posedge clk_sys) begin : uio_block
 				endcase
 		endcase
 	end
+`endif
 `endif
 end
 

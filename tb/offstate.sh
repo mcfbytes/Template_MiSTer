@@ -34,8 +34,8 @@ exec python3 -I - "$UP" "$O" <<'EOF'
 import os, re, subprocess, sys
 UP, O = sys.argv[1], sys.argv[2]
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
-TIER = {'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT',
-        'lw_lane.sv': 'MISTER_LW_LANE'}
+TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
+        'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE'}
 checks = fails = 0
 
 def check(ok, what):

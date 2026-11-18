@@ -22,7 +22,8 @@
 // SECTOR block (LW directory kind 2, minor 1, "SEC2"): one hps_io read slot (the primary) plus two
 // save slots (X0, X1) served over the LW bridge by ONE feeder. A save slot READ is a BEGIN_S frame of
 // XFRAME words with a strobe address; a save slot WRITE is answered by WACK_S (ack, no strobes): the HPS
-// takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1.
+// takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1. A slot's EN bit can be set
+// only while the slot is wired (its mux's presence bit on HPS_BUS reads 1).
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
 // CAUSE: bit 0, raised by each request rise (and each re-open after a reject); a full-word store with bit 0 set
 // clears it, and a raise in the store's cycle wins. Reads change nothing: the request word is REQ's.
@@ -68,6 +69,7 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	output wire       f_open,       // the enable link: stores are taken (OPEN)
 	output wire       f_owned,      // OWNED
 	output wire       f_idle,       // the link lets an ENABLE through
+	input wire  [2:0] wired,        // {X1, X0, primary}: the slot's mux is present; an EN bit is set only if wired
 
 	output wire       doorbell,     // level, high while CAUSE != 0
 
@@ -214,8 +216,10 @@ wire  [2:0] reqs  = {xreq_s, req_s};
 wire        rjlast = (rjtag == ((rjslot == 2'd0) ? btag[0] : (rjslot == 2'd1) ? btag[1] : btag[2]));
 wire  [2:0] unans = ans & rjsel & {3{ev[0] & rjlast}} & ~bent;
 // an EN rise rings for a request that stands unanswered
-wire        en_up = w_ctrl & wdata[0] & ~en_lwx & req_s & ~ans[0];
-wire  [1:0] xen_up = {2{w_ctrl}} & {wdata[4 + XSLOT1], wdata[4 + XSLOT0]} & ~xen_lwx & xreq_s & ~ans[2:1];
+wire        w_en  = wdata[0] & wired[0];                                     // the EN bits a store sets
+wire  [1:0] w_xen = {wdata[4 + XSLOT1], wdata[4 + XSLOT0]} & wired[2:1];
+wire        en_up = w_ctrl & w_en & ~en_lwx & req_s & ~ans[0];
+wire  [1:0] xen_up = {2{w_ctrl}} & w_xen & ~xen_lwx & xreq_s & ~ans[2:1];
 wire        fire  = req_rise | |(xrise & xen_lwx) | |(unans & reqs & {xen_lwx, en_lwx}) | en_up | |xen_up;
 wire        clr_c = w_cause & wdata[0];
 wire        etag  = ~btag[bsel];
@@ -257,8 +261,8 @@ always @(posedge clk) begin
 		test_lwx <= 0;
 	end
 	else if (w_ctrl) begin
-		en_lwx   <= wdata[0];
-		xen_lwx  <= {wdata[4 + XSLOT1], wdata[4 + XSLOT0]};
+		en_lwx   <= w_en;
+		xen_lwx  <= w_xen;
 		test_lwx <= DIAG ? wdata[3] : 1'b0;
 	end
 

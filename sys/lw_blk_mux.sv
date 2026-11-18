@@ -23,10 +23,12 @@
 // or, while sys_top's en_sys is set, by the LW feeder. The consumer's ack/write/data are muxed here, never
 // the shared sd_buff_wr, so an SPI transfer on another slot cannot land in an LW frame. With en_sys set the
 // slot's request is hidden from hps_io, so the slot has one writer. All signals are on hps_io's clk_sys.
+// HPS_BUS bits (docs/LW_BRIDGE.md): to the core [95] en_sys, [96] ack, [97] the shared strobe, [113:98] its data;
+// from the core [166:132] {lba[31:0], req, hps_ack, reset} and [377], this mux's presence bit, a constant 1.
 
 module lw_blk_mux
 (
-	inout wire [313:0] HPS_BUS,
+	inout wire [383:0] HPS_BUS,
 
 	input wire         reset,       // the consumer's reset: zero-fills an open LW frame
 	input wire         core_req,
@@ -41,26 +43,29 @@ module lw_blk_mux
 	input wire  [15:0] hps_data     // <- hps_io sd_buff_dout
 );
 
-wire en = HPS_BUS[113];
+wire en = HPS_BUS[95];
 
-assign HPS_BUS[148:114] = {reset, hps_ack, core_req, core_lba};
+assign HPS_BUS[166:132] = {core_lba, core_req, hps_ack, reset};
+assign HPS_BUS[377]     = 1'b1;
 
 assign hps_req   = core_req & ~en;
-assign core_ack  = en ? HPS_BUS[112]     : hps_ack;
-assign core_wr   = en ? HPS_BUS[111] & HPS_BUS[112] : hps_wr;   // never a card frame's strobe
-assign core_data = en ? HPS_BUS[110:95]  : hps_data;
+assign core_ack  = en ? HPS_BUS[96]     : hps_ack;
+assign core_wr   = en ? HPS_BUS[97] & HPS_BUS[96] : hps_wr;   // never a card frame's strobe
+assign core_data = en ? HPS_BUS[113:98] : hps_data;
 
 endmodule
 
-// emu side of a save slot on the LW SECTOR route: CARD 0 is the slot MISTER_LW_CARD0_SLOT declares
-// (HPS_BUS[169:158]), CARD 1 the MISTER_LW_CARD1_SLOT one ([181:170]); the strobe address [157:149] is shared.
-// While the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's ack/write/addr/data come from
-// the feeder, the write gated by the slot's own ack. The core's buffer read data keeps feeding hps_io's
-// sd_buff_din (the SPI save path). All on hps_io's clk_sys.
+// emu side of a save slot on the LW SECTOR route: CARD 0 is the slot MISTER_LW_CARD0_SLOT declares, CARD 1 the
+// MISTER_LW_CARD1_SLOT one. While the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's
+// ack/write/addr/data come from the feeder, the write gated by the slot's own ack. The core's buffer read data
+// keeps feeding hps_io's sd_buff_din (the SPI save path). All on hps_io's clk_sys.
+// HPS_BUS bits: to the core [128 + 2 CARD] en_sys, [129 + 2 CARD] ack, [97] the shared strobe, [113:98] its data,
+// [127:114] its address; from the core [201:167] (CARD 0) or [236:202] (CARD 1) {lba[31:0], rd, wr, hps_ack},
+// and [378 + CARD], this mux's presence bit, a constant 1.
 
 module lw_card_mux #(parameter CARD = 0)
 (
-	inout wire [313:0] HPS_BUS,
+	inout wire [383:0] HPS_BUS,
 
 	input wire         core_rd,
 	input wire         core_wr,
@@ -78,19 +83,20 @@ module lw_card_mux #(parameter CARD = 0)
 	input wire  [15:0] hps_data     // <- hps_io sd_buff_dout
 );
 
-localparam B = CARD ? 170 : 158;
+localparam U = CARD ? 202 : 167;
 
-wire en  = HPS_BUS[B];
-wire ack = HPS_BUS[B + 1];
+wire en  = HPS_BUS[128 + 2 * CARD];
+wire ack = HPS_BUS[129 + 2 * CARD];
 
-assign HPS_BUS[B + 11:B + 2] = {hps_ack, core_wr, core_rd, core_lba};
+assign HPS_BUS[U + 34:U]     = {25'd0, core_lba, core_rd, core_wr, hps_ack};
+assign HPS_BUS[378 + CARD]   = 1'b1;
 
 assign hps_rd     = core_rd & ~en;
 assign hps_wr     = core_wr & ~en;
 assign core_ack   = en ? ack                  : hps_ack;
-assign core_write = en ? HPS_BUS[111] & ack   : hps_write;
-assign core_addr  = en ? HPS_BUS[157:149]     : hps_addr;
-assign core_data  = en ? HPS_BUS[110:95]      : hps_data;
+assign core_write = en ? HPS_BUS[97] & ack    : hps_write;
+assign core_addr  = en ? HPS_BUS[122:114]     : hps_addr;
+assign core_data  = en ? HPS_BUS[113:98]      : hps_data;
 
 endmodule
 

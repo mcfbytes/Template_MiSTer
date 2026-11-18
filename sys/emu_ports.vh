@@ -19,7 +19,7 @@ input         RESET,
 
 //Must be passed to hps_io module
 `ifdef MISTER_LW
-inout [313:0] HPS_BUS,
+inout [383:0] HPS_BUS,
 `else
 inout  [45:0] HPS_BUS,
 `endif

@@ -1,6 +1,13 @@
 // A simple OSD implementation. Can be hooked up between a cores
 // VGA output and the physical VGA pins
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_OSD
+// LW_OSD_W: the OSDBUF tier (MISTER_LW_OSD, with MISTER_LW) adds the LW shadow as a second write source.
+`define LW_OSD_W
+`endif
+`endif
+
 module osd
 (
 	input         clk_sys,
@@ -19,7 +26,7 @@ module osd
 	output reg    hs_out,
 
 	output reg    osd_status
-`ifdef MISTER_LW
+`ifdef LW_OSD_W
 	,
 	// OSDBUF (lw_sys_window.sv): a shadow of osd_buffer stored over the LW bridge.
 	// lw_ctrl = {LWSEL & HR, LWSEL}, registers on clk_lw: video reads the shadow; highres for the shadow.
@@ -57,7 +64,7 @@ reg [21:0] osd_w;
 
 reg  [1:0] rot = 0;
 
-`ifdef MISTER_LW
+`ifdef LW_OSD_W
 // The shadow: four 1024x8 byte lanes written 32 bits wide on clk_lw, read on clk_video beside osd_buffer.
 (* ramstyle="no_rw_check" *) reg  [7:0] lw_buf0[1024];
 (* ramstyle="no_rw_check" *) reg  [7:0] lw_buf1[1024];
@@ -86,7 +93,7 @@ always@(posedge clk_sys) begin
 	reg        old_strobe;
 	reg        highres = 0;
 
-`ifdef MISTER_LW
+`ifdef LW_OSD_W
 	reg        hr;
 
 	{lwhr_s1, lwhr_s0} <= {lwhr_s0, lw_ctrl[1]};
@@ -214,13 +221,13 @@ always @(posedge clk_video) begin
 	reg [21:0] osd_hcnt2;
 	reg        osd_de1,osd_de2;
 	reg  [1:0] osd_en;
-`ifdef MISTER_LW
+`ifdef LW_OSD_W
 	reg        f1 = 0;
 `else
 	reg        f1;
 `endif
 	reg        half;
-`ifdef MISTER_LW
+`ifdef LW_OSD_W
 	reg [12:0] ra;
 	reg  [7:0] lw_q0, lw_q1, lw_q2, lw_q3;
 	reg  [1:0] lw_lane;
@@ -310,7 +317,7 @@ always @(posedge clk_video) begin
 			end
 		end
 
-`ifdef MISTER_LW
+`ifdef LW_OSD_W
 		ra = rot[0] ? {1'b0, {osd_hcnt2[6:3], osd_vcnt[7:0]} ^ { {4{~rot[1]}}, {8{rot[1]}} }} : {osd_vcnt[7:3], osd_hcnt[7:0]};
 		osd_byte  <= osd_buffer[ra];
 		lw_q0     <= lw_buf0[ra[11:2]];
@@ -359,3 +366,7 @@ always @(posedge clk_video) begin
 end
 
 endmodule
+
+`ifdef LW_OSD_W
+`undef LW_OSD_W
+`endif

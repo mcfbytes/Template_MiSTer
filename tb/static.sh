@@ -2,8 +2,9 @@
 # Static checks on the preprocessed top level, arm N of tb/run.sh, and the net lists arm E checks.
 #   tb/static.sh            the checks below, for every configuration of --configs; "-- " headings, a FAIL line
 #                           per failed check, then PASSED/FAILED with the counts (tb/run.sh's verdict)
-#   tb/static.sh --configs  one "name|macros" line per configuration arm E elaborates: off and each LW tier
-#                           set, each with no upstream macro, with MISTER_DEBUG_NOHDMI and with MISTER_DUAL_SDRAM
+#   tb/static.sh --configs  one "name|macros" line per configuration arm E elaborates: off and each of the 32 LW
+#                           tier sets of {PAD, EVT, SECTOR, LANE, OSD}, each with no upstream macro, with
+#                           MISTER_DEBUG_NOHDMI and with MISTER_DUAL_SDRAM (99 configurations)
 #   tb/static.sh --nets FILE MACRO...
 #                           FILE gets one Verilog check call per LW net of that configuration, for tb/top_tb.sv
 # An LW net is a net sys_top.v declares in this configuration whose declaration the off configuration of the
@@ -40,8 +41,8 @@
 #   8. Every entry is one ent() call whose kind and LINE word are the localparams <B>_KIND and <B>_LINE of one
 #      block B, each localparam in one call. The LINE words name each non-zero ordinal once, a framework kind's
 #      ordinal (kind below 0x8000) in 1-15 and a private kind's in 16-31. line_d is one OR of terms
-#      {3{<b>_lvl & line_en[E_<B>]}} & line_bit(<B>_LINE), one per non-zero ordinal, and line_bit(k) is bit k-1;
-#      PENDING's terms put the same <b>_lvl on its entry's bit E_<B>. The lines and the host enable are registers:
+#      {3{<b>_lvl & line_en[e_<b>]}} & line_bit(<B>_LINE), one per non-zero ordinal, and line_bit(k) is bit k-1;
+#      PENDING's terms put the same <b>_lvl on its entry's bit e_<b>. The lines and the host enable are registers:
 #      lines is line_q alone, line_q is assigned once, on posedge clk, as {3{en_q}} & line_d, and held is
 #      en_q alone, a register assigned only on posedge clk.
 # Needs Icarus Verilog (for its preprocessor) and python3.
@@ -52,9 +53,12 @@ exec python3 -I - "$O" "$@" <<'EOF'
 import os, re, subprocess, sys
 O, args = sys.argv[1], sys.argv[2:]
 
-TIERS = [('off', []), ('lw', ['MISTER_LW']), ('lw-sec', ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=1']),
-         ('lw-lane', ['MISTER_LW', 'MISTER_LW_LANE']),
-         ('lw-sec-lane', ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE'])]
+# off, then each of the 32 tier sets (the floor MISTER_LW alone first, every tier last)
+TIER_MACROS = [('pad', 'MISTER_LW_PAD'), ('evt', 'MISTER_LW_EVT'), ('sec', 'MISTER_LW_SECTOR_SLOT=1'),
+               ('lane', 'MISTER_LW_LANE'), ('osd', 'MISTER_LW_OSD')]
+TIERS = [('off', [])] + [('-'.join(['lw'] + [n for k, (n, _) in enumerate(TIER_MACROS) if m >> k & 1]),
+                          ['MISTER_LW'] + [d for k, (_, d) in enumerate(TIER_MACROS) if m >> k & 1])
+                         for m in range(32)]
 VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI']), ('.dual', ['MISTER_DUAL_SDRAM'])]
 UPSTREAM = {'MISTER_DEBUG_NOHDMI', 'MISTER_DUAL_SDRAM'}
 CONFIGS = [(t + v, td + vd) for v, vd in VARIANTS for t, td in TIERS]
@@ -69,15 +73,19 @@ if args[:1] == ['--configs']:
         print('%s|%s' % (n, ' '.join('-D' + x for x in d)))
     sys.exit(0)
 
-open(os.path.join(O, 'build_id.v'), 'w').write('`define BUILD_DATE "000000"\n')
+_b = os.path.join(O, 'build_id.%d.v' % os.getpid())
+open(_b, 'w').write('`define BUILD_DATE "000000"\n')
+os.replace(_b, os.path.join(O, 'build_id.v'))   # whole, for the runs beside this one
 
 def pp(path, defs):
-    out = os.path.join(O, 'pp.v')
+    out = os.path.join(O, 'pp.%d.v' % os.getpid())   # one file per process: arm E runs several at once
     r = subprocess.run(['iverilog', '-E', '-I', 'sys', '-I', O, '-o', out] + ['-D' + d for d in defs] + [path],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if r.returncode:
         sys.exit('tb/static.sh: cannot preprocess %s with %s: %s' % (path, ' '.join(defs), r.stdout.strip()))
-    return open(out, errors='replace').read()
+    t = open(out, errors='replace').read()
+    os.remove(out)
+    return t
 
 TOK = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|[A-Za-z_$][\w$]*|\d+\s*\'\s*[sS]?[bodhBODH]\s*[\w?]+|'
                  r'\d[\w\'.]*|\'[sS]?[bodhBODH]\w*|\S', re.S)
@@ -350,7 +358,8 @@ for name, defs in CONFIGS:
     write_nets(os.path.join(O, name + '.nets.vh'), nets, lwports)
 
 # ---- The crossing structure: every crossing register in sys/lw_cdc.sv's cells, every source named ----
-LWALL = ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE', 'LW_DIAG=1']
+LWALL = ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE', 'MISTER_LW_OSD',
+         'LW_DIAG=1']
 CDC = 'sys/lw_cdc.sv'
 CELLREG = ('lws0_', 'lws1_', 'lwa0_', 'lwa1_', 'lwq_', 'lwsrc_', 'lwtg_')
 CELLSYNC = {'lws0_q', 'lws1_q', 'lwa0_q', 'lwa1_q'}
@@ -363,13 +372,13 @@ GRAY_ALLOW = {'stflg'}     # the status flag's Gray code, until the status snaps
 # Reads across clocks outside the cells, as (module, register, source): the request LBAs, until requests cross as
 # records; the status snapshot, a quasi-static capture until it crosses whole. Each must still be there.
 XREAD_ALLOW = {('lw_sector', 'lba', 'c_lba'), ('lw_sector', 'xlba', 'x_lba'),
-               ('lw_sys_status', 'snap', 'status_req')}
+               ('lw_evt', 'snap', 'status_req')}
 # The input ports on a block's second clock. Every other input is on the block's port clk, or on the one clock
 # of a block that has no clk port.
 PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack x_rd x_wr x_lba x_hps_ack'),
-           'lw_sys_status': ('clk_sys', 'stflg status_req'),
+           'lw_evt': ('clk_sys', 'stflg status_req'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
-           'lw_sys_window': ('clk_sys', 'blk_up card_up st_up lane_busy lane_wait lane_dout')}
+           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout')}
 
 TOK2 = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|[A-Za-z_$][\w$]*|\d+\s*\'\s*[sS]?[bodhBODH]\s*[\w?]+|'
                   r'\d[\w\'.]*|\'[sS]?[bodhBODH]\w*|===|!==|<<<|>>>|<=|>=|==|!=|<<|>>|&&|\|\||\S', re.S)
@@ -801,7 +810,7 @@ def lp(suffix, width):
 KINDS, ORDS = lp('KIND', 16), lp('LINE', 8)
 check(KINDS and set(KINDS) == set(ORDS), 'lw_sys_window: the blocks with a kind (%s) and with a LINE localparam (%s) '
       'differ' % (' '.join(sorted(KINDS)), ' '.join(sorted(ORDS))))
-calls = re.findall(r'\bent \( w , (\w+)_KIND , [^;]*?, (\w+)_LINE ,', wtxt)
+calls = re.findall(r'\bent \( \w+ , (\w+)_KIND , [^;]*?, (\w+)_LINE ,', wtxt)
 check(len(calls) == len(KINDS) and all(a == b for a, b in calls) and sorted(a for a, _ in calls) == sorted(KINDS),
       'lw_sys_window: the entries are not one ent() call per block with its own _KIND and _LINE: %s' % calls)
 nz = sorted(ORDS[b] for b in ORDS if ORDS[b])
@@ -811,14 +820,14 @@ for b, o in sorted(ORDS.items()):
         lo, hi = (1, 15) if KINDS.get(b, 0) < 0x8000 else (16, 31)
         check(lo <= o <= hi, 'lw_sys_window: %s_LINE = %d, outside %d-%d for kind %s' % (b, o, lo, hi, KINDS.get(b)))
 m = re.search(r'wire \[ 2 : 0 \] line_d = (.*?) ;', wtxt)
-LT = r"\( \{ 3 \{ (\w+)_lvl & line_en \[ E_(\w+) \] \} \} & line_bit \( (\w+)_LINE \) \)"
+LT = r"\( \{ 3 \{ (\w+)_lvl & line_en \[ e_(\w+) \] \} \} & line_bit \( (\w+)_LINE \) \)"
 terms3 = re.findall(LT, m.group(1)) if m else []
 terms = [(l, b) for l, e, b in terms3]
 rest = re.sub(LT, '', m.group(1)).replace('|', '').strip() if m else 'none'
 check(m is not None and not rest and len(terms) == len(set(t for _, t in terms)) and
-      all(l.upper() == e == b for l, e, b in terms3) and
+      all(l.upper() == e.upper() == b for l, e, b in terms3) and
       sorted(b for _, b in terms) == sorted(b for b in ORDS if ORDS[b]),
-      'lw_sys_window: line_d is not one term {3{<b>_lvl & line_en[E_<B>]}} & line_bit(<B>_LINE) per non-zero '
+      'lw_sys_window: line_d is not one term {3{<b>_lvl & line_en[e_<b>]}} & line_bit(<B>_LINE) per non-zero '
       'ordinal: %s %s' % (terms3, rest))
 WM = modules_of('sys/lw_sys_window.sv', LWALL)['lw_sys_window']
 def asg(M, r):
@@ -836,8 +845,9 @@ check(lq and all(c == 'clk' for c, _ in lq) and 'en_q' in WM['regs'] and 'en_q' 
 check(re.search(r"line_bit = \( ord >= 8'd1 && ord <= 8'd3 \) \? \( 3'd1 << \( ord - 8'd1 \) \) : 3'd0 ;",
                 wtxt) is not None, 'lw_sys_window: line_bit(k) is not bit k-1 of the 3 lines')
 pm = re.search(r'wire \[ 31 : 0 \] pending = (.*?) ;', wtxt)
-pt = re.findall(r"\( \{ 31'd0 , (\w+)_lvl \} << E_(\w+) \)", pm.group(1)) if pm else []
-check(pm is not None and sorted(l.upper() for l, _ in pt) == sorted(b for _, b in pt) == sorted(b for _, b in terms),
+pt = re.findall(r"\( \{ 31'd0 , (\w+)_lvl \} << e_(\w+) \)", pm.group(1)) if pm else []
+check(pm is not None and
+      sorted(l.upper() for l, _ in pt) == sorted(b.upper() for _, b in pt) == sorted(b for _, b in terms),
       'lw_sys_window: PENDING does not put each line\'s level on its own entry\'s bit: %s' % pt)
 print('directory lines: %s' % ', '.join('%s ordinal %d' % (b, ORDS[b]) for b in sorted(ORDS) if ORDS[b]))
 

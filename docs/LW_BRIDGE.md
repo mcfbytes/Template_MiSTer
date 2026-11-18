@@ -23,10 +23,14 @@ validation" at the end.
 
 ## Adopting it in a core
 
-1. **The define.** In the core's `.qsf` (in `Template.qsf` the line is already there, commented out):
+1. **The defines.** In the core's `.qsf` (in `Template.qsf` the lines are already there, commented out): the
+   floor, then each tier the core wants. Every tier is opt-in, and a tier macro without `MISTER_LW` stops the
+   build with an error naming `lw_tier_needs_MISTER_LW`.
 
    ```
    set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
+   set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
+   set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
    ```
 
 2. **The declaration.** Put `` `SYS_LW_CAPS `` in field 1 of `CONF_STR`, with no comma after it (the macro
@@ -41,8 +45,8 @@ validation" at the end.
    With `MISTER_LW` it expands to `"AXI:40000:80000:LW,",` whatever blocks are built: the directory lists the
    blocks and declares their lines. Without it, it expands to nothing.
 
-3. **Nothing else for pads, the OSD shadow and the status back-channel.** A core that uses `hps_io` gets all
-   three. `Template.sv` shows the status back-channel: the first pad button cycles an option and writes the new
+3. **Nothing else for pads, the OSD shadow and the status back-channel**, each with its tier macro
+   (`MISTER_LW_PAD`, `MISTER_LW_OSD`, `MISTER_LW_EVT`). A core that passes `HPS_BUS` to `hps_io` gets them. `Template.sv` shows the status back-channel: the first pad button cycles an option and writes the new
    status word back with `status_in`/`status_set`.
 
 4. **Optional: the SECTOR block**, for a core that reads blocks through an `hps_io` slot ("Hooking the SECTOR block",
@@ -50,14 +54,18 @@ validation" at the end.
 
 5. **Optional: the frame lane** (`MISTER_LW_LANE`). It needs nothing in the core either: it lives in `sys_top`.
 
-A core that instantiates its own modules on `HPS_BUS` must widen those ports to `[313:0]` under `MISTER_LW`; bits
-45:0 keep their stock meaning.
+A core that instantiates its own modules on `HPS_BUS` must widen those ports to `[383:0]` under `MISTER_LW`; bits
+45:0 keep their stock meaning. A port left at `[45:0]` truncates the bus with only a width warning: the pieces
+beyond it then show no presence bit, and their blocks are not listed in the directory.
 
 ### Macros
 
 | macro | default | effect |
 |---|---|---|
-| `MISTER_LW` | off | builds the bridge, the window, the `hps_io` LW path, the OSD shadow and GPI bits 25, 24 and 22 |
+| `MISTER_LW` | off | the floor: the bridge, the window, its directory, the host enable and GPI bits 25, 24 and 22 |
+| `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
+| `MISTER_LW_EVT` | absent | with `MISTER_LW`: the status back-channel (`lw_evt.sv`), `hps_io`'s exports and its line |
+| `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block and the shadow in each `osd` |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH, the analog-drop count and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
@@ -511,16 +519,25 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 
 ## `HPS_BUS` with `MISTER_LW`
 
+384 bits whatever the tiers. `lw_sys_window` owns bits `[383:46]` through one port and drives every to-core bit
+(0 for a tier not built); a from-core bit is driven only by the piece named, when its tier is built. A bit no piece
+drives reads 0. Each piece drives a constant 1 on its presence bit, and the window lists a block only when its tier
+is built and its presence bit reads 1 (SECTOR: at least one slot's mux; a slot whose mux is absent has flags 0 in
+its descriptor and an EN bit that cannot be set).
+
 | bits | direction | content |
 |---|---|---|
 | `[45:0]` | both | stock |
 | `[94:46]` | to core | PAD store `{we, op[7:0], idx[7:0], data[31:0]}` (`hps_io`) |
-| `[113:95]` | to core | SECTOR primary `{en_sys, ack, wr, data[15:0]}` (`lw_blk_mux`) |
-| `[148:114]` | from core | SECTOR primary `{reset, hps_ack, req, lba[31:0]}` |
-| `[157:149]` | to core | card strobe address `{word, half}` |
-| `[159:158]`, `[171:170]` | to core | card 0, card 1 `{ack, en_sys}` |
-| `[169:160]`, `[181:172]` | from core | card 0, card 1 `{hps_ack, wr, rd, lba[6:0]}` |
-| `[313:182]` | from core | `{stflg[3:0], status_req[127:0]}` (`hps_io`) |
+| `[95]`, `[96]` | to core | SECTOR primary `en_sys`, `ack` (`lw_blk_mux`) |
+| `[97]`, `[113:98]`, `[127:114]` | to core | the shared strobe, its data `[15:0]` and address (`[122:114]` used) |
+| `[128]`, `[129]` / `[130]`, `[131]` | to core | save slot 0 / 1 `en_sys`, `ack` (`lw_card_mux`) |
+| `[166:132]` | from core | SECTOR primary `{lba[31:0], req, hps_ack, reset}` (bit 132 = reset) |
+| `[201:167]`, `[236:202]` | from core | save slot 0, 1 `{lba[31:0], rd, wr, hps_ack}` (low bit = hps_ack; `lba[6:0]` used) |
+| `[243:240]`, `[371:244]` | from core | `stflg[3:0]`, `status_req[127:0]` (`hps_io`, with `MISTER_LW_EVT`) |
+| `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
+| `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
+| `[239:237]`, `[374:372]`, `[383:380]` | - | reserved: nothing drives them; every reader ignores them |
 
 ## Verification
 

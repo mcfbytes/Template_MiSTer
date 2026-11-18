@@ -1,5 +1,5 @@
 //============================================================================
-//  lw_sys_status.sv -- part of the LW bridge framework (docs/LW_BRIDGE.md)
+//  lw_evt.sv -- part of the LW bridge framework (docs/LW_BRIDGE.md)
 //
 //  This program is free software; you can redistribute it and/or modify it
 //  under the terms of the GNU General Public License as published by the Free
@@ -16,11 +16,13 @@
 //============================================================================
 
 `ifdef MISTER_LW
+`ifdef MISTER_LW_EVT
 `default_nettype none
 
-// SYS block (LW directory kind 4, "STS1"): the core->host status back-channel (hps_io's 0x29) as a
-// cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG, the four
-// STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
+// EVT block (LW directory kind 4, "STS1"; the L2 tier, MISTER_LW_EVT): the core->host status back-channel
+// (hps_io's 0x29) as a cause bit, its own f2h_irq line, and a seqlock-style snapshot of status_req: read STFLG,
+// the four STATUS words, then STFLG again; equal STFLG words mean the words between them are one snapshot.
+// The window lists the block only while hps_io's event exports show their presence bit on HPS_BUS.
 // CAUSE [15:0] are event bits, STATUS (bit 0) raised by every capture; [31:16] read 0. A full-word store clears
 // each bit written as 1, and a raise in the store's cycle wins. Reads change nothing. A taken ENABLE raises STATUS,
 // so a new host reads the status once whatever its predecessor cleared, and keeps what the word had.
@@ -31,7 +33,7 @@
 // Bridge side has no reset and answers every address in fixed cycles (no back-pressure).
 // Clock-ratio bound of the crossing: docs/LW_BRIDGE.md.
 
-module lw_sys_status
+module lw_evt
 (
 	input wire         clk,          // clk_100m
 
@@ -107,4 +109,5 @@ end
 endmodule
 
 `default_nettype wire
+`endif
 `endif
