@@ -19,16 +19,21 @@
 `ifdef MISTER_LW_PAD
 `default_nettype none
 
-// PAD block (LW directory kind 1, the L1 tier, MISTER_LW_PAD): one full-word store at PAD + (opcode << 10) +
-// (index << 2) is one link set-command for hps_io's LW write arm. The window gates every store (the host enable)
-// and lists the block only while hps_io's LW write arm shows its presence bit on HPS_BUS.
-// Digital stores (ops 0x02, 0x03, 0x10-0x13, index 0) park in per-op latest-wins slots; both analog ops (0x1A,
-// 0x3D) go to a 16-deep FIFO, dropped and counted when full. Both live in one M10K, and a held-data handshake
-// (lw_xfer, lw_cdc.sv) drains them round-robin to clk_sys.
-// Reads: the analog-drop count at the 0x1A page's first word with DIAG=1; every other word reads 0.
+// PAD block (LW directory kind 1, version 1.1, ID "PAD1"; the L1 tier, MISTER_LW_PAD): one full-word store at
+// PAD + (opcode << 10) + (index << 2) is one link set-command for hps_io's LW write arm. The window gates every
+// store (the host enable) and lists the block only while hps_io's LW write arm shows its presence bit on HPS_BUS.
+// Every level is a keyed latest-wins slot with a dirty bit, so nothing absolute is ever dropped: the six digital
+// pads (ops 0x02, 0x03, 0x10-0x13, index 0), the left and right sticks (0x1A and 0x3D, index 0-5) and the
+// paddles (0x1A, index {p, 4'hF}, p = 0-5). Spinners (0x1A, index {p, 4'hF}, p = 8-13) are events (hps_io toggles
+// bit 8 per store), so they queue in a 16-deep FIFO; a store to a full FIFO is dropped and counted, in every
+// build. Any other store is ignored. Slots and FIFO share one M10K, and a held-data handshake (lw_xfer,
+// lw_cdc.sv) drains them to clk_sys: a scan pointer visits one source per cycle while the handshake is idle.
+// Reads: PAD + 0x0 STAT {16'd0, spinner drops}, PAD + 0x4 ID; every other word reads 0.
+// No enable link: everything here is clk_100m state, a store taken under the enable is delivered whenever clk_sys
+// runs, and the levels stay as stored when the enable falls (hps_io keeps the last word whichever path wrote it).
 // Bridge side runs on clk_100m with no reset and answers every address in fixed cycles.
 
-module lw_pad #(parameter DIAG = 0)
+module lw_pad
 (
 	input wire         clk,          // clk_100m
 
@@ -44,24 +49,18 @@ module lw_pad #(parameter DIAG = 0)
 	output wire [48:0] q             // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys: HPS_BUS[94:46]
 );
 
-reg [31:0] adrop = 0;               // analog stores dropped on a full FIFO
+// A source is {group, player}: group 0 digital, 1 left stick, 2 right stick, 3 paddle; a level's RAM word is its
+// source. FIFO is the spinner FIFO's source; the codes with player 6 or 7 are no source.
+localparam [4:0] FIFO = 5'd30;
 
-assign rdata = (DIAG && raddr == {8'h1A, 10'd0}) ? adrop : 32'd0;
+reg [15:0] sdrop = 0;               // spinner stores dropped on a full FIFO, free-running
 
-function automatic [2:0] slot_of(input [7:0] op);
-	case (op)
-		8'h02: slot_of = 3'd0;
-		8'h03: slot_of = 3'd1;
-		8'h10: slot_of = 3'd2;
-		8'h11: slot_of = 3'd3;
-		8'h12: slot_of = 3'd4;
-		8'h13: slot_of = 3'd5;
-		default: slot_of = 3'd7;
-	endcase
-endfunction
+assign rdata = (raddr[17:2] == 16'd0) ? {16'd0, sdrop} :
+               (raddr[17:2] == 16'd1) ? 32'h31444150 :   // "PAD1"
+               32'd0;
 
-function automatic [7:0] op_of(input [2:0] slot);
-	case (slot)
+function automatic [7:0] op_of(input [2:0] p);
+	case (p)
 		3'd0: op_of = 8'h02;
 		3'd1: op_of = 8'h03;
 		3'd2: op_of = 8'h10;
@@ -71,62 +70,74 @@ function automatic [7:0] op_of(input [2:0] slot);
 	endcase
 endfunction
 
-// one M10K: digital masks at 0..5, the analog FIFO {right, idx, data[15:0]} at 16..31
-(* ramstyle = "M10K" *) reg [31:0] pram [0:31];
+// the store's key: a level's source, or a spinner event
+wire       st   = write && wsel && &be;
+wire [7:0] wop  = waddr[17:10];
+wire [7:0] widx = waddr[9:2];
+wire       ixp  = widx[7:3] == 5'd0 && widx[2:0] < 3'd6;   // index 0-5
+wire       ixd  = widx[3:0] == 4'hF && !widx[7] && widx[6:4] < 3'd6;   // {p, 4'hF}, p = 0-5
+wire       ixs  = widx[3:0] == 4'hF &&  widx[7] && widx[6:4] < 3'd6;   // {p, 4'hF}, p = 8-13
+reg  [4:0] wkey;
+reg        wlvl, wspn;
+always @(*) begin
+	wkey = 5'd0; wlvl = 0; wspn = 0;
+	case (wop)
+		8'h02: begin wkey = 5'd0; wlvl = widx == 8'd0; end
+		8'h03: begin wkey = 5'd1; wlvl = widx == 8'd0; end
+		8'h10: begin wkey = 5'd2; wlvl = widx == 8'd0; end
+		8'h11: begin wkey = 5'd3; wlvl = widx == 8'd0; end
+		8'h12: begin wkey = 5'd4; wlvl = widx == 8'd0; end
+		8'h13: begin wkey = 5'd5; wlvl = widx == 8'd0; end
+		8'h1A: begin
+			wkey = ixd ? {2'd3, widx[6:4]} : {2'd1, widx[2:0]};
+			wlvl = ixp || ixd;
+			wspn = ixs;
+		end
+		8'h3D: begin wkey = {2'd2, widx[2:0]}; wlvl = ixp; end
+		default: ;
+	endcase
+end
+wire       st_l = st && wlvl;
+wire       st_s = st && wspn;
+
+// one M10K: the level slots at their source (0-29), the spinner FIFO {index, data[7:0]} at 32-47
+(* ramstyle = "M10K" *) reg [31:0] pram [0:63];
 reg [31:0] pq;
-reg  [5:0] dirty = 0;
+reg [31:0] dirty = 0;               // by source; only the 24 level sources are ever set
 
 reg  [4:0] awp = 0, arp = 0;
 wire       aempty = (awp == arp);
 wire       afull  = (awp - arp) == 5'd16;
 
-wire       st   = write && wsel && &be;
-wire [7:0] wop  = waddr[17:10];
-wire [7:0] widx = waddr[9:2];
-wire [2:0] wsl  = slot_of(wop);
-wire       st_d = st && wsl != 3'd7 && widx == 8'd0;
-wire       st_a = st && (wop == 8'h1A || wop == 8'h3D) && !st_d;
+wire        busy;
+wire [31:0] ready = dirty | ({31'd0, ~aempty} << FIFO);
+reg   [4:0] sp = 0;                 // the scan pointer
+reg   [1:0] ds = 0;                 // drain: 0 scan, 1 read, 2 launch
+reg   [4:0] psel = 0;
 
-wire       busy;
+// the next source: player 0-5 of each group, then FIFO, then the first again
+wire  [4:0] sp_n = (sp == FIFO) ? 5'd0 : (sp == 5'd29) ? FIFO : (sp[2:0] == 3'd5) ? {sp[4:3] + 2'd1, 3'd0} :
+                   sp + 5'd1;
 
-wire [6:0] ready = {~aempty, dirty};
-reg  [2:0] rr = 0;
-reg  [2:0] pick;
-reg        pick_v;
-reg  [1:0] ds = 0;                     // drain: 0 pick, 1 read, 2 launch
-reg  [2:0] psel = 0;
-integer    i, k;
-
-always @(*) begin
-	pick_v = 0;
-	pick   = 0;
-	for (i = 0; i < 7; i = i + 1) begin
-		k = rr + i;
-		if (k >= 7) k = k - 7;
-		if (!pick_v && ready[k]) begin
-			pick_v = 1;
-			pick   = k[2:0];
-		end
-	end
-end
-
-wire [4:0] pra = (psel == 3'd6) ? {1'b1, arp[3:0]} : {2'b00, psel};
+wire  [5:0] pra = (psel == FIFO) ? {2'b10, arp[3:0]} : {1'b0, psel};
 
 always @(posedge clk) begin
-	if (st_d) pram[{2'b00, wsl}] <= wdata;
-	else if (st_a && !afull) pram[{1'b1, awp[3:0]}] <= {7'd0, wop == 8'h3D, widx, wdata[15:0]};
+	if (st_l) pram[{1'b0, wkey}] <= wdata;
+	else if (st_s && !afull) pram[{2'b10, awp[3:0]}] <= {16'd0, widx, wdata[7:0]};
 	pq <= pram[pra];
 end
 
 always @(posedge clk) begin
 	case (ds)
-		2'd0: if (!busy && pick_v) begin
-			psel <= pick;
-			rr   <= (pick == 3'd6) ? 3'd0 : pick + 3'd1;
-			ds   <= 2'd1;
+		2'd0: if (!busy) begin
+			sp <= sp_n;
+			if (ready[sp]) begin
+				psel <= sp;
+				ds   <= 2'd1;
+			end
 		end
 		2'd1: begin
-			if (psel == 3'd6) arp <= arp + 5'd1;
+			if (psel == FIFO) arp <= arp + 5'd1;
 			else dirty[psel] <= 0;
 			ds <= 2'd2;
 		end
@@ -134,17 +145,23 @@ always @(posedge clk) begin
 	endcase
 
 	// after the drain, so a store landing in the read cycle stays dirty (its RAM read returned the old word)
-	if (st_d) dirty[wsl] <= 1;
-	else if (st_a) begin
-		if (afull) begin
-			if (DIAG) adrop <= adrop + 32'd1;
-		end
+	if (st_l) dirty[wkey] <= 1;
+	if (st_s) begin
+		if (afull) sdrop <= sdrop + 16'd1;
 		else awp <= awp + 5'd1;
 	end
 end
 
 // to clk_sys: the store's word, and its strobe the cycle after the capture
-wire [47:0] pad_w = (psel == 3'd6) ? {pq[24] ? 8'h3D : 8'h1A, pq[23:16], 16'd0, pq[15:0]} : {op_of(psel), 8'd0, pq};
+reg [47:0] pad_w;
+always @(*) begin
+	case (psel[4:3])
+		2'd0:    pad_w = {op_of(psel[2:0]), 8'd0, pq};
+		2'd1:    pad_w = {8'h1A, 5'd0, psel[2:0], pq};
+		2'd2:    pad_w = {8'h3D, 5'd0, psel[2:0], pq};
+		default: pad_w = (psel == FIFO) ? {8'h1A, pq[15:8], 24'd0, pq[7:0]} : {8'h1A, 1'b0, psel[2:0], 4'hF, pq};
+	endcase
+end
 
 lw_xfer #(.W(48)) pad_x
 (

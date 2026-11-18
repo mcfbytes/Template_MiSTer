@@ -474,9 +474,12 @@ end
 
 localparam CONF_STR = {"CORE;", `SYS_LW_CAPS "SS3E000000:400000;", "V,v1;"};
 
-wire [31:0] joy0, joy1, joy2, joy3;
-wire [15:0] ana0, ana3, rana0, rana3;
-wire  [7:0] pdl1;
+wire [31:0] joy0, joy1, joy2, joy3, joy4, joy5;
+wire [95:0] lstk, rstk;                 // joystick_l_analog_0-5, joystick_r_analog_0-5, 16 bits each
+wire [47:0] pdl;                        // paddle_0-5
+wire [53:0] spn;                        // spinner_0-5, {toggle, data}
+wire [15:0] ana0 = lstk[15:0], ana3 = lstk[63:48], rana0 = rstk[15:0], rana3 = rstk[63:48];
+wire  [7:0] pdl1 = pdl[15:8];
 reg         cd_reset = 0;
 reg         cd_req = 0;
 reg  [31:0] cd_lba = 32'hFFFFFFFF;
@@ -540,9 +543,15 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 	.img_size(img_sz), .gamma_bus(gbus), .sdram_sz(sdsz), .uart_mode(umode), .uart_speed(uspeed), .EXT_BUS(ebus),
 `endif
 	.status_in(st_in), .status_set(st_set),
-	.joystick_0(joy0), .joystick_1(joy1), .joystick_2(joy2), .joystick_3(joy3),
-	.joystick_l_analog_0(ana0), .joystick_l_analog_3(ana3),
-	.joystick_r_analog_0(rana0), .joystick_r_analog_3(rana3), .paddle_1(pdl1),
+	.joystick_0(joy0), .joystick_1(joy1), .joystick_2(joy2), .joystick_3(joy3), .joystick_4(joy4), .joystick_5(joy5),
+	.joystick_l_analog_0(lstk[15:0]), .joystick_l_analog_1(lstk[31:16]), .joystick_l_analog_2(lstk[47:32]),
+	.joystick_l_analog_3(lstk[63:48]), .joystick_l_analog_4(lstk[79:64]), .joystick_l_analog_5(lstk[95:80]),
+	.joystick_r_analog_0(rstk[15:0]), .joystick_r_analog_1(rstk[31:16]), .joystick_r_analog_2(rstk[47:32]),
+	.joystick_r_analog_3(rstk[63:48]), .joystick_r_analog_4(rstk[79:64]), .joystick_r_analog_5(rstk[95:80]),
+	.paddle_0(pdl[7:0]), .paddle_1(pdl[15:8]), .paddle_2(pdl[23:16]), .paddle_3(pdl[31:24]), .paddle_4(pdl[39:32]),
+	.paddle_5(pdl[47:40]),
+	.spinner_0(spn[8:0]), .spinner_1(spn[17:9]), .spinner_2(spn[26:18]), .spinner_3(spn[35:27]),
+	.spinner_4(spn[44:36]), .spinner_5(spn[53:45]),
 	.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
 	.sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .sd_buff_addr(sd_buff_addr)
 );
@@ -656,7 +665,7 @@ end
 // Reads have no side effect: the state a read could move, by hierarchical reference. With clk_sys stopped nothing
 // else moves it, so it must be identical before and after any reads.
 function [511:0] pure_win;
-	reg [63:0] p;
+	reg [95:0] p;
 	reg [167:0] e;
 	reg [33:0] o;
 	begin
@@ -665,13 +674,13 @@ function [511:0] pure_win;
 		o = {win.osd.osd.wptr, win.osd.osd.osd_w_lwgray, win.osd.osd.drops};
 `endif
 `ifdef MISTER_LW_PAD
-		p = {win.pad.pad.adrop, win.pad.pad.dirty, win.pad.pad.awp, win.pad.pad.arp, win.pad.pad.ds, win.pad.pad.psel,
-		     win.pad.pad.rr};
+		// (not the scan pointer: it moves in every cycle the handshake is idle)
+		p = {win.pad.pad.sdrop, win.pad.pad.dirty, win.pad.pad.awp, win.pad.pad.arp, win.pad.pad.ds, win.pad.pad.psel};
 `endif
 `ifdef MISTER_LW_EVT
 		e = {win.evt.evt.flg, win.evt.evt.seq, win.evt.evt.snap, win.evt.evt.cause};
 `endif
-		pure_win = {212'd0, win.scratch, o, doorbell, sys_irq, p, e};
+		pure_win = {180'd0, win.scratch, o, doorbell, sys_irq, p, e};
 	end
 endfunction
 function [511:0] pure_sec;
@@ -1063,6 +1072,7 @@ task race_store_read(input [20:0] wa, input [31:0] wd, input [20:0] ra, input in
 	end
 endtask
 
+localparam [20:0] PADB = 21'h80000;              // the PAD block: STAT, then ID
 function [20:0] pad_addr(input [7:0] op, input [7:0] idx);
 	pad_addr = 21'h40000 + 21'h40000 + {op, 10'd0} + {idx, 2'b00};
 endfunction
@@ -1075,6 +1085,90 @@ task rd(input string what, input [20:0] a, input [31:0] exp);
 endtask
 
 task settle; repeat (slow(100)) @(negedge clk); endtask
+
+`ifdef MISTER_LW_PAD
+// T-PAD1: hps_io's spinner registers have no initial value (the FPGA's is 0), so a toggle would stay x; spinner_2's
+// toggles are counted.
+integer n_spn2 = 0;
+initial begin
+	hps_io.spinner_0 = 0; hps_io.spinner_1 = 0; hps_io.spinner_2 = 0;
+	hps_io.spinner_3 = 0; hps_io.spinner_4 = 0; hps_io.spinner_5 = 0;
+end
+always @(spn[26]) if ($realtime > 0) n_spn2 = n_spn2 + 1;
+
+// A level store's word, for group g (0 digital, 1 left stick, 2 right stick, 3 paddle), player k, round r: every
+// register's last word differs from its previous one and from every other register's in the bits it takes.
+function [31:0] pv(input [1:0] g, input [2:0] k, input integer r);
+	reg [15:0] lo;
+	begin lo = r + 41 * k + 67 * g; pv = {4'hA, 2'd0, g, 5'd0, k, lo}; end
+endfunction
+
+function [7:0] dop(input [2:0] k);
+	dop = (k < 2) ? 8'h02 + k : 8'h0E + k;               // 0x02, 0x03, 0x10-0x13
+endfunction
+
+// The value of each level register: g, k as above.
+function [31:0] pad_reg(input [1:0] g, input [2:0] k);
+	case (g)
+		2'd0: pad_reg = (k == 0) ? joy0 : (k == 1) ? joy1 : (k == 2) ? joy2 : (k == 3) ? joy3 : (k == 4) ? joy4 : joy5;
+		2'd1: pad_reg = {16'd0, lstk[16 * k +: 16]};
+		2'd2: pad_reg = {16'd0, rstk[16 * k +: 16]};
+		default: pad_reg = {24'd0, pdl[8 * k +: 8]};
+	endcase
+endfunction
+
+function [31:0] pad_exp(input [1:0] g, input [31:0] v);
+	pad_exp = (g == 0) ? v : (g == 3) ? {24'd0, v[7:0]} : {16'd0, v[15:0]};
+endfunction
+
+// T-PAD1 (SPEC 9): with clk_sys stopped, 1,000 stores to each of the 24 level slots (the six pads, both sticks
+// and the paddle of each player) and 20 to one spinner. After the restart every register holds its last store,
+// each slot crosses once (one more word: the first store, launched before the stop), and the spinner takes its
+// 16 queued events while the 4 past the FIFO are dropped and counted in STAT, in every build.
+task pad_hold_cases;
+	reg  [31:0] s0, s1, v, d0, dl0;
+	reg [767:0] r0;
+	integer r, g, k, n, t0, t, nb, bad;
+	begin
+		$display("-- T-PAD1: 1,000 stores to every level and 20 to a spinner with clk_sys stopped");
+		axi_read(PADB, 0, s0, dl0, nb);
+		sys_run = 0; repeat (20) @(negedge clk);
+		r0 = {joy0, joy1, joy2, joy3, joy4, joy5, lstk, rstk, pdl, spn};
+		n = n_padwe; t0 = n_spn2;
+		for (r = 0; r < 1000; r = r + 1)
+			for (k = 0; k < 6; k = k + 1) begin
+				axi_write(pad_addr(dop(k), 8'd0), pv(0, k, r), 4'hF);
+				axi_write(pad_addr(8'h1A, k), pv(1, k, r), 4'hF);
+				axi_write(pad_addr(8'h3D, k), pv(2, k, r), 4'hF);
+				axi_write(pad_addr(8'h1A, {1'b0, k[2:0], 4'hF}), pv(3, k, r), 4'hF);
+			end
+		for (r = 0; r < 20; r = r + 1) axi_write(pad_addr(8'h1A, 8'hAF), 32'h00000040 + r, 4'hF);   // spinner_2
+		axi_read(PADB, 0, s1, dl0, nb);
+		check("T-PAD1: STAT counts the 4 spinner stores past the FIFO", s1, s0 + 32'd4);
+		check("T-PAD1: no register moves while clk_sys is stopped",
+		      {joy0, joy1, joy2, joy3, joy4, joy5, lstk, rstk, pdl, spn} === r0, 1);
+		sys_run = 1;
+		t = 0;
+		while (n_padwe - n < 41 && t < slow(20000)) begin @(negedge clk); t = t + 1; end
+		settle;
+		check("T-PAD1: words crossed: one in flight, 24 slots once each, 16 spinner events", n_padwe - n, 41);
+		bad = 0;
+		for (g = 0; g < 4; g = g + 1)
+			for (k = 0; k < 6; k = k + 1)
+				if (pad_reg(g, k) !== pad_exp(g, pv(g, k, 999))) begin
+					if (bad < 4) $display("     group %0d player %0d: %08h, expected %08h", g, k, pad_reg(g, k),
+					                      pad_exp(g, pv(g, k, 999)));
+					bad = bad + 1;
+				end
+		check("T-PAD1: every pad, stick and paddle holds its last store", bad, 0);
+		check("T-PAD1: spinner_2 holds the 16th store", {24'd0, spn[25:18]}, 32'h0000004F);
+		check("T-PAD1: spinner_2 toggled once per queued store", n_spn2 - t0, 16);
+		check("T-PAD1: the other spinners unchanged", {spn[53:27], spn[17:0]} === {r0[53:27], r0[17:0]}, 1);
+		axi_read(PADB, 0, v, dl0, nb);
+		check("T-PAD1: STAT holds its count after the restart", v, s0 + 32'd4);
+	end
+endtask
+`endif
 
 // The host's first two drain steps on a CAUSE word: read it, store the value back (write-one-to-clear).
 task cause_drain(input [20:0] a);
@@ -2288,8 +2382,9 @@ task dm_build;
 		for (i = 0; i < 1024; i = i + 1) dm[i] = 0;
 		e = 0;
 		if (TB_PAD) begin
-			dm_entry(e, 1, 32'h00010000, 32'h40000, 32'h40000, 0, 0, 0);           // PAD
+			dm_entry(e, 1, 32'h00010001, 32'h40000, 32'h40000, 0, 0, 0);           // PAD 1.1
 			dm[16 + 32 * e + 8] = 32'h040F000C; dm[16 + 32 * e + 9] = 32'h20000000;   // K0-K7: the opcode bitmap
+			dm[16 + 32 * e + 16] = 32'h00100018;                                       // K8 {spinner FIFO, slots}
 			e = e + 1;
 		end
 		if (TB_SEC) begin
@@ -2628,6 +2723,7 @@ task decode_sweep;
 		if (TB_EVT) rd("SYS's ID at its offset", SYSB + 21'h1C, 32'h31535453);
 		if (TB_OSD) rd("OSDBUF's ID at its offset", OSD + 21'h1804, 32'h3244534F);
 		if (TB_LANE) rd("LANE's ID at its offset", 21'h46018, 32'h314E414C);
+		if (TB_PAD) rd("PAD's ID at its offset", PADB + 21'h4, 32'h31444150);
 		if (TB_PAD) rd("PAD reads 0", pad_addr(8'h02, 0), 32'd0);
 		rd("the directory page past the entries reads 0", DIRB + 21'h40 + 21'h80 * em_n, 32'd0);
 		rd("the directory page's last word reads 0", DIRB + 21'hFFC, 32'd0);
@@ -4310,6 +4406,28 @@ initial begin
 	check("back-to-back joystick_3", joy3, 32'h0000D0D0);
 	rd("pad block read", pad_addr(8'h02, 0), 32'd0);
 	rd("pad block unhonoured read", pad_addr(8'h05, 3), 32'd0);
+	rd("PAD ID", PADB + 21'h4, 32'h31444150);
+	axi_read(PADB, 0, d, dl, beats);
+	check("PAD STAT[31:16] reads 0", d[31:16], 0);
+	begin : pad_keys
+	integer n;
+	reg v;
+	n = n_padwe;
+	axi_write(pad_addr(8'h1A, 8'h10), 32'h00005A5A, 4'hF);   // a stick index with a high nibble
+	axi_write(pad_addr(8'h3D, 8'h06), 32'h00005A5A, 4'hF);   // stick 6
+	axi_write(pad_addr(8'h1A, 8'h6F), 32'h00005A5A, 4'hF);   // paddle 6
+	axi_write(pad_addr(8'h1A, 8'hEF), 32'h00005A5A, 4'hF);   // spinner 14 - 8
+	axi_write(pad_addr(8'h1A, 8'h1E), 32'h00005A5A, 4'hF);   // index {1, 14}
+	settle;
+	check("stores at no key are ignored: nothing crosses", n_padwe - n, 0);
+	check("stores at no key: left analog_0 unchanged", {16'd0, ana0}, 32'h0000817F);
+	v = spn[8];
+	axi_write(pad_addr(8'h1A, 8'h8F), 32'h00000077, 4'hF); settle;
+	check("spinner_0 (idx {8, 15}): data", {24'd0, spn[7:0]}, 32'h00000077);
+	check("spinner_0: one store toggles bit 8", spn[8] ^ v, 1);
+	axi_write(pad_addr(8'h1A, 8'hDF), 32'h00000099, 4'hF); settle;
+	check("spinner_5 (idx {13, 15}): data", {24'd0, spn[52:45]}, 32'h00000099);
+	end
 
 `endif
 	$display("-- default responder");
@@ -4462,14 +4580,15 @@ initial begin
 	rd("undecoded, clk_sys stopped", 21'h1FFFFC, 32'hDEADBEEF);
 `ifdef MISTER_LW_PAD
 	check("joystick_0 unchanged while stopped", joy0, 32'h0000A0A0);
-	rd("analog drops (16 queued of 20, a pad store in flight)", pad_addr(8'h1A, 0), dg(32'd4));
+	check("left analog_0 unchanged while stopped", {16'd0, ana0}, 32'h0000817F);
 `endif
 	sys_run = 1; repeat (slow(300)) @(negedge clk);
 `ifdef MISTER_LW_PAD
 	check("joystick_0 last of 5 lands on restart", joy0, 32'h00000005);
 	check("joystick_1 release (last) lands on restart", joy1, 32'h00000000);
-	check("analog_0 last left queued lands on restart", {16'd0, ana0}, 32'h0000000A);
-	check("right analog_0 last queued lands on restart", {16'd0, rana0}, 32'h00000010);
+	check("left analog_0: the last of 10 lands on restart", {16'd0, ana0}, 32'h0000000A);
+	check("right analog_0: the last of 10 lands on restart", {16'd0, rana0}, 32'h00000014);
+	pad_hold_cases;
 `endif
 
 `ifndef MISTER_LW_SECTOR_SLOT
@@ -5812,7 +5931,6 @@ initial begin
 	if (!DIAG) begin
 		$display("-- LW_DIAG=0: the removed registers read 0");
 		rd("lean SCRATCH", SCR, 32'd0);
-		if (TB_PAD) rd("lean analog drops", pad_addr(8'h1A, 0), 32'd0);
 		if (TB_SEC) begin
 			axi_read(SEC + 21'h14, 0, d, dl, beats);
 			check("lean STATUS[31:4]", d[31:4], 0);

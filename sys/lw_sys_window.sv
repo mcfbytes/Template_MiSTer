@@ -59,8 +59,8 @@
 // each card slot, its DDR image base and extent. OSDBUF queues image stores for a clk_sys writer that writes
 // them through each osd instance's own osd_buffer port (lw_osd.sv, osd.v). EVT raises the status back-channel's
 // cause on its own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies.
-// LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), PAD's analog-drop count (reads 0)
-// and lw_sector's diagnostics; LW_DIAG=1 (debug builds) keeps them.
+// LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored) and lw_sector's diagnostics; LW_DIAG=1
+// (debug builds) keeps them.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
 
 module lw_sys_window #(
@@ -157,7 +157,7 @@ localparam [15:0] STRIDE   = 16'h0080;
 
 // Kinds, versions and lines. Ordinal 0 = no line; framework kinds use 1-15, each ordinal at most once.
 localparam [15:0] PAD_KIND  = 16'd1;
-localparam [31:0] PAD_VER   = 32'h00010000;
+localparam [31:0] PAD_VER   = 32'h00010001;
 localparam  [7:0] PAD_LINE  = 8'd0;
 localparam [15:0] SEC_KIND  = 16'd2;
 localparam [31:0] SEC_VER   = 32'h00010001;
@@ -196,7 +196,7 @@ localparam [255:0] LANE_OPS = (256'd1 << 8'h01) | (256'd1 << 8'h1C) | (256'd1 <<
                               (256'd1 << 8'h33) | (256'd1 << 8'h3B);
 localparam [31:0] LANE_CAPS = 32'h0000_0003;
 
-// PAD kind words K0-K7: the honoured-opcode bitmap.
+// PAD kind words K0-K7: the honoured-opcode bitmap; K8 {spinner FIFO depth, keyed slots}.
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
                              (256'd1 << 8'h12) | (256'd1 << 8'h13) |
@@ -356,7 +356,7 @@ endfunction
 
 // The kind words, K0 first.
 function automatic [31:0] pad_kw(input [4:0] k);
-	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : 32'd0;    // the honoured-opcode bitmap
+	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : (k == 5'd8) ? {16'd16, 16'd24} : 32'd0;
 endfunction
 
 // A card's descriptor carries its flags only while its mux is wired (wd: {card 1, card 0}).
@@ -463,7 +463,7 @@ assign hps_lw[131:128] = {sec_xack[1], sec_xen[1], sec_xack[0], sec_xen[0]};   /
 generate
 `ifdef MISTER_LW_PAD
 if (PAD_EN) begin : pad
-	lw_pad #(.DIAG(DIAG)) pad
+	lw_pad pad
 	(
 		.clk(clk),
 		.raddr(rpad), .rdata(pad_rdata),

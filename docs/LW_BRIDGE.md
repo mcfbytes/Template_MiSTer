@@ -66,7 +66,7 @@ beyond it then show no presence bit, and their blocks are not listed in the dire
 | `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the status back-channel (`lw_evt.sv`), `hps_io`'s exports and its line |
 | `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
-| `LW_DIAG` | 0 | 1 = debug build: SCRATCH, the analog-drop count and the SECTOR counters/timestamps read back |
+| `LW_DIAG` | 0 | 1 = debug build: SCRATCH and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-1023 (128 = one 512-byte block) |
 | `MISTER_LW_BLKSZ` | 2 | the core's `hps_io` `BLKSZ`, reported in the GET_SDSTAT words |
@@ -115,7 +115,7 @@ bridge-only reset holds its channel until the next HPS reset or core load. Addre
 `0xDEADBEEF`, and writes there are dropped.
 
 Nothing back-pressures. A store is accepted in fixed cycles. Where a FIFO is full, the store is dropped and counted,
-and the protocol detects the loss (PAD analog drops, SECTOR `ACCEPT`).
+and the protocol detects the loss (PAD spinner drops, SECTOR `ACCEPT`).
 
 **A store is a single-beat write** (`AWLEN` 0). The beats of a burst write are accepted, answered OKAY and dropped,
 so a `memcpy` into the window, or a write-combined or cached mapping that merges stores into bursts, loses them.
@@ -182,7 +182,7 @@ bitstream builds, so an entry's index (and its PENDING bit) depends on the core'
 
 | kind | block | version | offset / size | CAUSE | LINE | CAUSE_BITS | kind words |
 |---|---|---|---|---|---|---|---|
-| 1 | PAD | `0x00010000` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap |
+| 1 | PAD | `0x00010001` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap; K8 `{spinner FIFO, keyed slots}` = `0x00100018` |
 | 2 | SECTOR | `0x00010001` | `0x01000` / `0x02000` | `0x01000` | 1 | `0x1` | see SECTOR |
 | 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000` |
 | 4 | SYS | `0x00010000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0x1` | none |
@@ -300,13 +300,19 @@ One store **is** one SPI set-command: a full 32-bit word (all four byte enables)
 | `0x1A` | `{p, 15}` | `index[7:4]` = *p*: `paddle_<p>` (0-5) or `spinner_<p-8>` (8-13) ← `data[7:0]` |
 | `0x3D` | 0-5 | `joystick_r_analog_<index>` ← `data[15:0]` |
 
-- **Digital pads** keep one latest-wins slot per opcode, so a burst of stores delivers the last.
-- **Analog stores** queue in a 16-deep FIFO. A store to a full FIFO is dropped (with `LW_DIAG=1`, the count reads at
-  `PAD + (0x1A << 10)`).
-- **Ignored:** a store to an opcode outside the bitmap, a digital store at index ≠ 0, and a partial-width store.
-- **Reads** return 0.
-- **Delivery:** a toggle handshake drains the slots round-robin to `clk_sys`. `hps_io` then writes the same registers
-  its SPI arms write. Analog triggers (`0x46`) and every other opcode stay on SPI.
+- **Every level is latest-wins:** each of the 24 levels (the six digital pads, both sticks and the paddle of each
+  player) keeps one slot, so a burst of stores delivers the last and nothing absolute is ever dropped, even while
+  `clk_sys` is stopped.
+- **Spinners** are events (`hps_io` toggles bit 8 per store), so their stores queue in a 16-deep FIFO. A store to a
+  full FIFO is dropped and counted in STAT, in every build.
+- **Ignored:** a store to an opcode outside the bitmap, a digital store at index ≠ 0, a `0x1A` or `0x3D` store at
+  an index the table does not list (a stick index above 5 or with a high nibble, a paddle or spinner player outside
+  0-5 and 8-13), and a partial-width store.
+- **Reads:** `PAD + 0x0` STAT `{16'd0, spinner drops}` (a free-running 16-bit count); `PAD + 0x4` ID `0x31444150`
+  ("PAD1"); every other word reads 0.
+- **Delivery:** a toggle handshake drains the slots to `clk_sys`, a scan visiting one slot or the FIFO per cycle.
+  `hps_io` then writes the same registers its SPI arms write. Analog triggers (`0x46`) and every other opcode stay
+  on SPI.
 
 ### OSDBUF block (kind 3)
 
@@ -604,9 +610,10 @@ Re-run it after any `sys/` merge.
   built on.
 - **Register map:** the blocks' registers are those of a build validated on a DE10-Nano on 2026-10-25, which
   covered pads, the OSD shadow, SECTOR (CD and save slots) and the SYS status line, except where this document
-  states otherwise: CAUSE words clear by write-one and carry no class tag, a store is a single-beat write, and
-  OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a shadow beside it. The directory is
-  layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
+  states otherwise: CAUSE words clear by write-one and carry no class tag, a store is a single-beat write, PAD is
+  version 1.1, which keeps every level latest-wins where that build queued the sticks and paddles with the
+  spinners, and OSDBUF is version 2.0, which writes `osd_buffer` itself where that build kept a shadow beside it.
+  The directory is layout 2, which that build did not have: a host written for its layout (magic `SYS1`) finds no
   directory here and stays on SPI.
 - **The host side** is whatever HPS program speaks the protocol in this document: discovery, the directory, and
   each block's registers, causes and lines. Nothing else about the host is assumed, and a host that never touches
