@@ -88,6 +88,11 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=2"
+# and a save slot (read by BEGIN_S frames, written back from its image in DDR; save slot 1 likewise, SAVE1)
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_SLOT=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_WSRC=32'h30000000"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_EXTENT=32'h00020000"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_FRAME=256"
 
 # LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"

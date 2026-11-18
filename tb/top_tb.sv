@@ -471,7 +471,7 @@ initial begin
 	check("COUNT: PAD, EVT, OSDBUF and LANE as built", d, TB_PAD + TB_EVT + TB_OSD + TB_LANE);
 	lw_read(21'h80000, d); check("the PAD block's first word", d, TB_PAD ? 32'd0 : 32'hDEADBEEF);
 	lw_read(21'h4301C, d); check("the EVT block's ID word", d, TB_EVT ? 32'h32545645 : 32'hDEADBEEF);
-	lw_read(21'h41000, d); check("the SECTOR block's first word", d, 32'hDEADBEEF);
+	lw_read(21'h48000, d); check("the SECTOR block's first word", d, 32'hDEADBEEF);
 
 	$display("-- the host enable: GPI[22] is the window's enable register; GPO[31] low clears it");
 	check("no enable: gp_in[22]", dut.h2f_gp.gp_in[22], 1'b0);

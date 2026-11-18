@@ -46,6 +46,10 @@
 #      PENDING's terms put the same <b>_lvl on its entry's bit e_<b>. The lines and the host enable are registers:
 #      lines is line_q alone, line_q is assigned once, on posedge clk, as {3{en_q}} & line_d, and held is
 #      en_q alone, a register assigned only on posedge clk.
+# Then, once, the wording:
+#   9. No line of an LW-only file, of a file under tb/, or of the LW text of a stock file (a branch that a MISTER_LW*
+#      or LW_* macro opens) names a device of the reference core the framework was cut from (the words are listed
+#      in the check, in pieces): the framework's names are its own ("slot", "save slot", "image").
 # Needs Icarus Verilog (for its preprocessor) and python3.
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}/static; mkdir -p "$O" || exit 2
@@ -860,6 +864,33 @@ check(pm is not None and
       sorted(l.upper() for l, _ in pt) == sorted(b.upper() for _, b in pt) == sorted(b for _, b in terms),
       'lw_sys_window: PENDING does not put each line\'s level on its own entry\'s bit: %s' % pt)
 print('directory lines: %s' % ', '.join('%s ordinal %d' % (b, ORDS[b]) for b in sorted(ORDS) if ORDS[b]))
+
+# ---- The wording: no word of the reference core's own devices in the framework's text ----
+print('-- wording: no reference-core device word in the LW files, the LW text of the stock files, or tb/')
+# (spelled in pieces, so this file passes its own check)
+RCW = re.compile(r'(?i)mem' + r'ca' + r'rd|(?<![a-z])c' + r'ard|ps' + r'x|play' + r'station')
+def lw_lines(path):
+    """(line number, text) of each line inside a branch that MISTER_LW* or LW_* opens."""
+    out, stack = [], []
+    for n, l in enumerate(open(path, errors='replace').read().split('\n'), 1):
+        m = re.match(r'\s*`(ifdef|ifndef|elsif|else|endif)\b\s*(\w*)', l)
+        if m:
+            d, mac = m.groups()
+            lw = mac.startswith('MISTER_LW') or mac.startswith('LW_')
+            if d in ('ifdef', 'ifndef'): stack.append([d == 'ifdef' and lw, lw])
+            elif d == 'elsif' and stack: stack[-1] = [lw, stack[-1][1] or lw]
+            elif d == 'else' and stack: stack[-1][0] = stack[-1][1] and not stack[-1][0]
+            elif d == 'endif' and stack: stack.pop()
+            continue
+        if any(b for b, _ in stack): out.append((n, l))
+    return out
+wfiles = [(p, None) for p in lwfiles] + [(p, 'lw') for p in stock + ['sys/emu_ports.vh']]
+wfiles += [('tb/' + x, None) for x in sorted(os.listdir('tb')) if re.search(r'\.(s?v|sh|c|h)$', x)]
+for p, how in wfiles:
+    txt = lw_lines(p) if how else list(enumerate(open(p, errors='replace').read().split('\n'), 1))
+    bad = [(n, l) for n, l in txt if RCW.search(l)]
+    for n, l in bad[:8]: print('     %s:%d: %s' % (p, n, l.strip()[:100]))
+    check(not bad, '%s: %d lines with a reference-core device word' % (p, len(bad)))
 
 print('%s: %d checks, %d failures' % ('FAILED' if fails else 'PASSED', checks, fails))
 sys.exit(1 if fails else 0)
