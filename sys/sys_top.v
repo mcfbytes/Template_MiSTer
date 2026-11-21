@@ -229,21 +229,57 @@ end
 
 /////////////////////////  HPS I/O  /////////////////////////////////////
 
+// MISTER_LW_LANE (with MISTER_LW): the link nets below come from lw_link (LW BRIDGE), the link's own or the
+// LW frame lane's while it plays a frame. Without it the link front is the stock one.
+// MISTER_LW_OSD (with MISTER_LW): each osd takes the LW OSDBUF writer's bytes through its own write port.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_LANE
+`define LW_LANE_LINK
+`endif
+`ifdef MISTER_LW_OSD
+`define LW_OSD_PORTS
+`endif
+`endif
+
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
+`ifdef MISTER_LW
+// gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it)
+// gp_in[24]     - the firewall holds no transaction (its idle register)
+// gp_in[22]     - the LW host enable is set (lw_sys_window's enable register)
+wire        lw_present, lw_idle, lw_held;
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 7'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`endif
 wire [31:0] gp_out;
 
 wire  [1:0] io_ver = 1; // 0 - obsolete. 1 - optimized HPS I/O. 2,3 - reserved for future.
 wire        io_wait;
 wire        io_wide;
 wire [15:0] io_dout;
+`ifdef LW_LANE_LINK
+wire [15:0] io_din;
+`else
 wire [15:0] io_din = gp_outr[15:0];
+`endif
 wire        io_clk = gp_outr[17];
 wire        io_ss0 = gp_outr[18];
 wire        io_ss1 = gp_outr[19];
 wire        io_ss2 = gp_outr[20];
 
+`ifdef LW_LANE_LINK
+wire  [3:0] io_sel;     // {osd_vga, osd_hdmi, fpga, uio}
+wire        io_strobe;
+wire        io_ack;
+
+`ifndef MISTER_DEBUG_NOHDMI
+	wire io_osd_hdmi = io_sel[2];
+`endif
+
+wire io_fpga     = io_sel[1];
+wire io_uio      = io_sel[0];
+`else
 `ifndef MISTER_DEBUG_NOHDMI
 	wire io_osd_hdmi = io_ss1 & ~io_ss0;
 `endif
@@ -261,6 +297,7 @@ always @(posedge clk_sys) begin
 		io_ack <= rack;
 	end
 end
+`endif
 
 reg [31:0] gp_outr;
 always @(posedge clk_sys) begin
@@ -298,7 +335,11 @@ reg        cfg_set      = 0;
 
 wire       audio_96k    = cfg[6];
 wire       csync_en     = cfg[3];
+`ifdef LW_LANE_LINK
+wire       io_osd_vga   = io_sel[3];
+`else
 wire       io_osd_vga   = io_ss1 & ~io_ss2;
+`endif
 `ifndef MISTER_DUAL_SDRAM
 	wire forced_scandoubler = cfg[4];
 	wire ypbpr_en           = cfg[5];
@@ -570,7 +611,21 @@ cyclonev_hps_interface_peripheral_uart uart
 	.txd(uart_txd)
 );
 
+`ifdef MISTER_LW
+// LW lines and OSDBUF stores (lw_sys_window.sv).
+// f2h_irq[7+k] = LW line ordinal k (GIC SPI 47+k), level-high: the entry whose LINE word is k (the LW directory).
+wire  [2:0] lw_lines;
+
+`ifdef LW_OSD_PORTS
+// The OSDBUF writer's bytes (lw_sys_window, on clk_sys) to every osd's osd_buffer.
+wire        lw_osd_we;
+wire [12:0] lw_osd_addr;
+wire  [7:0] lw_osd_byte;
+`endif
+wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
+`else
 wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
+`endif
 cyclonev_hps_interface_interrupts interrupts
 (
 	.irq(f2h_irq)
@@ -600,9 +655,15 @@ end
 
 wire reset;
 wire clk_100m;
+`ifdef MISTER_LW
+wire lw_hps_rst_n;     // the HPS's fabric reset, to the LW firewall
+`endif
 
 sysmem_lite sysmem
 (
+`ifdef MISTER_LW
+	.hps_rst_n(lw_hps_rst_n),
+`endif
 	//Reset/Clock
 	.reset_core_req(reset_req),
 	.reset_out(reset),
@@ -1198,6 +1259,12 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
 		.de_out(hdmi_de_osd)
+`ifdef LW_OSD_PORTS
+		,
+		.lw_we(lw_osd_we),
+		.lw_addr(lw_osd_addr),
+		.lw_byte(lw_osd_byte)
+`endif
 	);
 
 	wire hdmi_cs_osd;
@@ -1419,6 +1486,12 @@ osd vga_osd
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
 	.de_out(vga_de_osd)
+`ifdef LW_OSD_PORTS
+	,
+	.lw_we(lw_osd_we),
+	.lw_addr(lw_osd_addr),
+	.lw_byte(lw_osd_byte)
+`endif
 );
 
 wire vga_cs_osd;
@@ -1762,14 +1835,258 @@ wire [13:0] fb_stride;
 	assign fb_stride = 0;
 `endif
 
+////////////////////  LW BRIDGE  ///////////////////////////////////
+// MISTER_LW: lwhps2fpga (0xFF200000, 2 MB) answers every offset (0xDEADBEEF default); the `SYS_LW_CAPS
+// window holds the directory, and each tier the core builds adds its block: PAD with MISTER_LW_PAD, EVT with
+// MISTER_LW_EVT, SECTOR when the core declares it (MISTER_LW_SECTOR_SLOT), the OSDBUF with MISTER_LW_OSD and
+// the frame lane with MISTER_LW_LANE. Without MISTER_LW none of this is built.
+// HPS_BUS[383:46] is one vector, lw_bus, whatever the tiers; lw_sys_window owns its bit map.
+// Register map and bit map: docs/LW_BRIDGE.md.
+`ifdef MISTER_LW
+wire [20:0] lw_raddr, lw_waddr;
+wire        lw_write;
+wire [31:0] lw_rdata, lw_wdata;
+wire  [3:0] lw_be;
+wire [383:46] lw_bus;
+wire        lw_wburst, lw_hrst, lw_idv;
+wire  [1:0] lw_freed;
+
+// GPO[31] = 0, the ID view or the core reset through GPO, as a clk_100m level: it clears the LW host enable and refuses it
+lw_arst lw_idv_arst
+(
+	.clk(clk_100m),
+	.rst_n(gp_out[31]),
+	.q(lw_idv)
+);
+
+// The tiers the core builds (its .qsf macros).
+`ifdef MISTER_LW_PAD
+localparam        LW_PAD_EN    = 1;
+`else
+localparam        LW_PAD_EN    = 0;
+`endif
+`ifdef MISTER_LW_EVT
+localparam        LW_EVT_EN    = 1;
+`else
+localparam        LW_EVT_EN    = 0;
+`endif
+`ifdef LW_OSD_PORTS
+localparam        LW_OSD_EN    = 1;
+`else
+localparam        LW_OSD_EN    = 0;
+`endif
+
+// The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
+// macro and needs its _WSRC; lw_sys_window stops the build on an unservable geometry.
+`ifdef MISTER_LW_SECTOR_SLOT
+localparam        LW_SEC_EN    = 1;
+localparam [31:0] LW_SEC_SLOT  = `MISTER_LW_SECTOR_SLOT;
+`else
+localparam        LW_SEC_EN    = 0;
+localparam [31:0] LW_SEC_SLOT  = 32'd1;
+`endif
+`ifdef MISTER_LW_SECTOR_FRAME
+localparam [31:0] LW_SEC_FRAME = `MISTER_LW_SECTOR_FRAME;
+`else
+localparam [31:0] LW_SEC_FRAME = 32'd128;
+`endif
+`ifdef MISTER_LW_SECTOR_GAP
+localparam [31:0] LW_SEC_GAP   = `MISTER_LW_SECTOR_GAP;
+`else
+localparam [31:0] LW_SEC_GAP   = 32'd2;
+`endif
+`ifdef MISTER_LW_BLKSZ
+localparam  [2:0] LW_BLKSZ     = `MISTER_LW_BLKSZ;
+`else
+localparam  [2:0] LW_BLKSZ     = 3'd2;
+`endif
+`ifdef MISTER_LW_SAVE0_SLOT
+localparam        LW_SAVE0_EN    = 1;
+localparam [31:0] LW_SAVE0_SLOT  = `MISTER_LW_SAVE0_SLOT;
+`else
+localparam        LW_SAVE0_EN    = 0;
+localparam [31:0] LW_SAVE0_SLOT  = 32'hE;
+`endif
+`ifdef MISTER_LW_SAVE0_WSRC
+localparam [31:0] LW_SAVE0_WSRC  = `MISTER_LW_SAVE0_WSRC;
+`else
+localparam [31:0] LW_SAVE0_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_EXTENT
+localparam [31:0] LW_SAVE0_EXT   = `MISTER_LW_SAVE0_EXTENT;
+`else
+localparam [31:0] LW_SAVE0_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_FRAME
+localparam [31:0] LW_SAVE0_FRAME = `MISTER_LW_SAVE0_FRAME;
+`else
+localparam [31:0] LW_SAVE0_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE0_LBA_BITS
+localparam [31:0] LW_SAVE0_LBAB  = `MISTER_LW_SAVE0_LBA_BITS;
+`else
+localparam [31:0] LW_SAVE0_LBAB  = 32'd32;
+`endif
+`ifdef MISTER_LW_SAVE1_SLOT
+localparam        LW_SAVE1_EN    = 1;
+localparam [31:0] LW_SAVE1_SLOT  = `MISTER_LW_SAVE1_SLOT;
+`else
+localparam        LW_SAVE1_EN    = 0;
+localparam [31:0] LW_SAVE1_SLOT  = 32'hF;
+`endif
+`ifdef MISTER_LW_SAVE1_WSRC
+localparam [31:0] LW_SAVE1_WSRC  = `MISTER_LW_SAVE1_WSRC;
+`else
+localparam [31:0] LW_SAVE1_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_EXTENT
+localparam [31:0] LW_SAVE1_EXT   = `MISTER_LW_SAVE1_EXTENT;
+`else
+localparam [31:0] LW_SAVE1_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_FRAME
+localparam [31:0] LW_SAVE1_FRAME = `MISTER_LW_SAVE1_FRAME;
+`else
+localparam [31:0] LW_SAVE1_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE1_LBA_BITS
+localparam [31:0] LW_SAVE1_LBAB  = `MISTER_LW_SAVE1_LBA_BITS;
+`else
+localparam [31:0] LW_SAVE1_LBAB  = 32'd32;
+`endif
+
+`ifdef LW_LANE_LINK
+localparam        LW_LANE_EN   = 1;
+wire        lane_own, lane_hold, lane_strobe;
+wire  [3:0] lane_sel;
+wire [15:0] lane_din;
+wire  [3:0] link_sel = {io_ss1 & ~io_ss2, io_ss1 & ~io_ss0, ~io_ss1 & io_ss0, ~io_ss1 & io_ss2};
+
+lw_link lw_link
+(
+	.clk_sys(clk_sys),
+	.l_sel(link_sel),
+	.l_clk(io_clk),
+	.l_din(gp_outr[15:0]),
+	.l_wait(io_wait | vs_wait),
+	.p_own(lane_own),
+	.p_hold(lane_hold),
+	.p_sel(lane_sel),
+	.p_strobe(lane_strobe),
+	.p_din(lane_din),
+	.io_sel(io_sel),
+	.io_strobe(io_strobe),
+	.io_din(io_din),
+	.io_ack(io_ack)
+);
+`else
+localparam        LW_LANE_EN   = 0;
+`endif
+
+hps_lw_bridge hps_lw_bridge
+(
+	.clk(clk_100m),
+	.hps_rst_n(lw_hps_rst_n),
+	.lw_hrst(lw_hrst),
+	.lw_freed(lw_freed),
+	.present(lw_present),
+	.idle(lw_idle),
+	.lw_raddr(lw_raddr),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be),
+	.lw_wburst(lw_wburst)
+);
+
+lw_sys_window #(
+	.PAD_EN(LW_PAD_EN), .EVT_EN(LW_EVT_EN), .OSD_EN(LW_OSD_EN),
+	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .SEC_GAP(LW_SEC_GAP), .BLKSZ(LW_BLKSZ),
+	.SAVE0_EN(LW_SAVE0_EN), .SAVE0_SLOT(LW_SAVE0_SLOT), .SAVE0_WSRC(LW_SAVE0_WSRC), .SAVE0_EXT(LW_SAVE0_EXT),
+	.SAVE0_FRAME(LW_SAVE0_FRAME), .SAVE0_LBA_BITS(LW_SAVE0_LBAB),
+	.SAVE1_EN(LW_SAVE1_EN), .SAVE1_SLOT(LW_SAVE1_SLOT), .SAVE1_WSRC(LW_SAVE1_WSRC), .SAVE1_EXT(LW_SAVE1_EXT),
+	.SAVE1_FRAME(LW_SAVE1_FRAME), .SAVE1_LBA_BITS(LW_SAVE1_LBAB),
+	.LANE_EN(LW_LANE_EN)
+) lw_sys_window
+(
+	.clk(clk_100m),
+	.lw_raddr(lw_raddr),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be),
+	.lw_wburst(lw_wburst),
+	.lw_hrst(lw_hrst),
+	.lw_freed(lw_freed),
+	.lw_idv(lw_idv),
+	.held(lw_held),
+	.lines(lw_lines),
+	.clk_sys(clk_sys),
+	.hps_lw(lw_bus),
+	.io_wide(io_wide),
+`ifdef LW_OSD_PORTS
+`ifdef MISTER_DEBUG_NOHDMI
+	.osd_sel({io_osd_vga, 1'b0}),            // no HDMI osd
+`else
+	.osd_sel({io_osd_vga, io_osd_hdmi}),
+`endif
+	.osd_view(gp_outr[31]),
+	.osd_we(lw_osd_we),
+	.osd_addr(lw_osd_addr),
+	.osd_byte(lw_osd_byte),
+`else
+	.osd_sel(2'b00),
+	.osd_view(1'b0),
+	.osd_we(),
+	.osd_addr(),
+	.osd_byte(),
+`endif
+`ifdef LW_LANE_LINK
+	.lane_busy(|link_sel | ~gp_outr[31]),   // a select, or the ID view: no lane frame starts
+	.lane_wait(io_wait | vs_wait),
+	.lane_dout(io_dout | io_dout_sys),
+	.lane_own(lane_own),
+	.lane_hold(lane_hold),
+	.lane_sel(lane_sel),
+	.lane_strobe(lane_strobe),
+	.lane_din(lane_din)
+`else
+	.lane_busy(1'b0),
+	.lane_wait(1'b0),
+	.lane_dout(16'd0),
+	.lane_own(),
+	.lane_hold(),
+	.lane_sel(),
+	.lane_strobe(),
+	.lane_din()
+`endif
+);
+`ifdef LW_LANE_LINK
+`undef LW_LANE_LINK
+`endif
+`ifdef LW_OSD_PORTS
+`undef LW_OSD_PORTS
+`endif
+`endif
+
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
+`ifdef MISTER_LW
+	// HPS_BUS[383:46]: the LW window's clk_sys lines (lw_sys_window's hps_lw; bit map: docs/LW_BRIDGE.md)
+	.HPS_BUS({lw_bus, f1, HDMI_TX_VS, 
+				 clk_100m, clk_ihdmi,
+				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
+				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
+`else
 	.HPS_BUS({f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
+`endif
 
 	.VGA_R(r_out),
 	.VGA_G(g_out),

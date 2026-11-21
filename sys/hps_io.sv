@@ -35,11 +35,22 @@
 //  0 - not used, Main never polls it (default)
 //  1 - core drives joystick_N_ffb, read by Main with UIO_GET_FFB
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_EVT
+// LW_EVT_X: the events tier (MISTER_LW_EVT, with MISTER_LW) exports uio_block's core->host flags.
+`define LW_EVT_X
+`endif
+`endif
+
 //
 module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, BLKSZ=2, PS2WE=0, STRLEN=$size(CONF_STR)>>3, F12KEYMOD=0, FFB=0)
 (
 	input             clk_sys,
+`ifdef MISTER_LW
+	inout     [383:0] HPS_BUS,
+`else
 	inout      [45:0] HPS_BUS,
+`endif
 
 	// buttons up to 32
 	output reg [31:0] joystick_0,
@@ -217,6 +228,61 @@ wire        io_wide  = (WIDE) ? 1'b1 : 1'b0;
 wire [15:0] io_din   = HPS_BUS[31:16];
 reg  [15:0] io_dout;
 
+`ifdef MISTER_LW
+// LW tiers (docs/LW_BRIDGE.md): each piece below, and SECTOR's commit mark before uio_block, drives a constant 1
+// on its own presence bit of HPS_BUS, so the window lists its block only when the wide bus reaches this instance.
+`ifdef MISTER_LW_PAD
+// LW pad stores from sys_top (lw_pad.sv), already on clk_sys; HPS_BUS[375]: this write arm is present
+wire        lw_we    = HPS_BUS[94];
+wire  [7:0] lw_op    = HPS_BUS[93:86];
+wire  [7:0] lw_idx   = HPS_BUS[85:78];
+wire [31:0] lw_dat   = HPS_BUS[77:46];
+assign HPS_BUS[375] = 1'b1;
+`endif
+
+`ifdef LW_EVT_X
+// The core->host flags, exported to sys_top's LW EVT block (lw_evt.sv): HPS_BUS[239:237] one-cycle pulses
+// {upload, info, blk} from the edges uio_block uses, [371:240] the 0x29 flag and snapshot {status_req, stflg},
+// [374:372] the levels {upload pending, info pending, a block request stands}, [376] the exports are present.
+// uio_block's own registers, declared here so the exports can read them:
+reg   [3:0] stflg = 0;
+reg [127:0] status_req = 0;
+reg         old_upload_req = 0;
+reg         upload_req = 0;
+reg         old_info = 0;
+reg   [7:0] info_n = 0;
+// blk: a rise of a slot's request, or a fall of its SPI ack that leaves the request raised
+wire [VD:0] ev_rq = sd_rd | sd_wr;
+reg  [VD:0] ev_rq_d = 0, ev_ack_d = 0;
+always @(posedge clk_sys) begin
+	ev_rq_d  <= ev_rq;
+	ev_ack_d <= sd_ack;
+end
+assign HPS_BUS[239:237] = {~old_upload_req & ioctl_upload_req, ~old_info & info_req,
+                           |((ev_rq & ~ev_rq_d) | (ev_ack_d & ~sd_ack & ev_rq))};
+assign HPS_BUS[371:240] = {status_req, stflg};
+assign HPS_BUS[374:372] = {upload_req, info_n != 8'd0, |ev_rq};
+assign HPS_BUS[376] = 1'b1;
+`endif
+`else
+// A tier macro without MISTER_LW: the build stops here, naming the guard.
+`ifdef MISTER_LW_PAD
+lw_tier_needs_MISTER_LW pad_guard();
+`endif
+`ifdef MISTER_LW_EVT
+lw_tier_needs_MISTER_LW evt_guard();
+`endif
+`ifdef MISTER_LW_SECTOR_SLOT
+lw_tier_needs_MISTER_LW sector_guard();
+`endif
+`ifdef MISTER_LW_LANE
+lw_tier_needs_MISTER_LW lane_guard();
+`endif
+`ifdef MISTER_LW_OSD
+lw_tier_needs_MISTER_LW osd_guard();
+`endif
+`endif
+
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;
 assign HPS_BUS[32]   = io_wide;
@@ -292,6 +358,25 @@ reg [MAX_W:0] byte_cnt;
 reg   [3:0] sdn_ack;
 wire [15:0] disk = 16'd1 << io_din[11:8];
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+// The commit mark for sys_top's LW SECTOR block (lw_sector.sv): "the SPI host has been shown a block request and
+// has not finished it". A GET_SDSTAT answer sets it if it shows a request and clears it if it shows none; the end
+// of a block transfer command (the fall of sd_ack) clears it. HPS_BUS[380] is the mark with the answer cycle ORed
+// in, so the cycle that shows a request already reads 1; while it reads 1 no slot's mux moves to the LW side.
+// HPS_BUS[381]: the mark is present. uio_block is unchanged: the mark only watches the commands.
+reg  sd_commit = 0;
+wire sd_answer = io_enable & io_strobe & ~|byte_cnt & (io_din == 16'h0016);
+wire sd_shown  = sd_rd[sdn] | sd_wr[sdn];
+always @(posedge clk_sys) begin
+	if (sd_answer) sd_commit <= sd_shown;
+	else if (~io_enable & |sd_ack) sd_commit <= 0;
+end
+assign HPS_BUS[380] = sd_commit | (sd_answer & sd_shown);
+assign HPS_BUS[381] = 1'b1;
+`endif
+`endif
+
 always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;
 	reg  [2:0] b_wr;
@@ -299,14 +384,20 @@ always@(posedge clk_sys) begin : uio_block
 	reg  [7:0] atrig_idx;
 	reg  [3:0] pdsp_idx;
 	reg        ps2skip = 0;
+`ifndef LW_EVT_X
 	reg  [3:0] stflg = 0;
 	reg[127:0] status_req;
+`endif
 	reg        old_status_set = 0;
+`ifndef LW_EVT_X
 	reg        old_upload_req = 0;
+`endif
 	reg [47:0] ffb_data;
+`ifndef LW_EVT_X
 	reg        upload_req = 0;
 	reg        old_info = 0;
 	reg  [7:0] info_n = 0;
+`endif
 	reg [15:0] tmp1;
 	reg  [7:0] tmp2;
 	reg  [3:0] sdn_r;
@@ -600,6 +691,52 @@ always@(posedge clk_sys) begin : uio_block
 			endcase
 		end
 	end
+
+`ifdef MISTER_LW
+`ifdef MISTER_LW_PAD
+	// LW second write path: the same registers the link writes, one full word per store.
+	if(lw_we) begin
+		case(lw_op)
+			'h02: if(!lw_idx) joystick_0 <= lw_dat;
+			'h03: if(!lw_idx) joystick_1 <= lw_dat;
+			'h10: if(!lw_idx) joystick_2 <= lw_dat;
+			'h11: if(!lw_idx) joystick_3 <= lw_dat;
+			'h12: if(!lw_idx) joystick_4 <= lw_dat;
+			'h13: if(!lw_idx) joystick_5 <= lw_dat;
+			'h1a: case(lw_idx[3:0])
+					 0: joystick_l_analog_0 <= lw_dat[15:0];
+					 1: joystick_l_analog_1 <= lw_dat[15:0];
+					 2: joystick_l_analog_2 <= lw_dat[15:0];
+					 3: joystick_l_analog_3 <= lw_dat[15:0];
+					 4: joystick_l_analog_4 <= lw_dat[15:0];
+					 5: joystick_l_analog_5 <= lw_dat[15:0];
+					15: case(lw_idx[7:4])
+							 0: paddle_0 <= lw_dat[7:0];
+							 1: paddle_1 <= lw_dat[7:0];
+							 2: paddle_2 <= lw_dat[7:0];
+							 3: paddle_3 <= lw_dat[7:0];
+							 4: paddle_4 <= lw_dat[7:0];
+							 5: paddle_5 <= lw_dat[7:0];
+							 8: spinner_0 <= {~spinner_0[8],lw_dat[7:0]};
+							 9: spinner_1 <= {~spinner_1[8],lw_dat[7:0]};
+							10: spinner_2 <= {~spinner_2[8],lw_dat[7:0]};
+							11: spinner_3 <= {~spinner_3[8],lw_dat[7:0]};
+							12: spinner_4 <= {~spinner_4[8],lw_dat[7:0]};
+							13: spinner_5 <= {~spinner_5[8],lw_dat[7:0]};
+						endcase
+				endcase
+			'h3d: case(lw_idx[3:0])
+					 0: joystick_r_analog_0 <= lw_dat[15:0];
+					 1: joystick_r_analog_1 <= lw_dat[15:0];
+					 2: joystick_r_analog_2 <= lw_dat[15:0];
+					 3: joystick_r_analog_3 <= lw_dat[15:0];
+					 4: joystick_r_analog_4 <= lw_dat[15:0];
+					 5: joystick_r_analog_5 <= lw_dat[15:0];
+				endcase
+		endcase
+	end
+`endif
+`endif
 end
 
 
@@ -761,6 +898,10 @@ always@(posedge clk_sys) begin : fio_block
 end
 
 endmodule
+
+`ifdef LW_EVT_X
+`undef LW_EVT_X
+`endif
 
 //////////////////////////////////////////////////////////////////////////////////
 
