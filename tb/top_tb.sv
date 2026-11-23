@@ -91,6 +91,12 @@ sys_top dut
 `endif
 );
 
+`ifdef MISTER_OCRAM
+localparam [6:0] GPI_OCRAM = 7'b0100000;   // gp_in[26], the OCRAM floor's present bit
+`else
+localparam [6:0] GPI_OCRAM = 7'b0000000;
+`endif
+
 `ifdef MISTER_LW
 localparam BUSW = 384;
 `else
@@ -345,7 +351,7 @@ initial begin
 	check("ID view gp_in[25:24] and gp_in[22]", {dut.h2f_gp.gp_in[25:24], dut.h2f_gp.gp_in[22]}, 3'b000);
 	gp_out = 32'h8000_0000; #20;
 `ifdef MISTER_LW
-	check("I/O view gp_in[27:21], the firewall idle", dut.h2f_gp.gp_in[27:21], 7'b0011000);
+	check("I/O view gp_in[27:21], the firewall idle", dut.h2f_gp.gp_in[27:21], 7'b0011000 | GPI_OCRAM);
 	@(negedge clk_100m);
 	force dut.hps_lw_bridge.adapter.idle_q = 1'b0; #1;
 	check("the firewall's idle register forced 0: gp_in[25:24]", dut.h2f_gp.gp_in[25:24], 2'b10);
@@ -359,7 +365,12 @@ initial begin
 	@(negedge clk_100m);
 	gpi_on = 1;
 `else
+`ifdef MISTER_OCRAM
+	check("I/O view gp_in[27:21], the OCRAM present bit", dut.h2f_gp.gp_in[27:21], 7'b0100000);
+	check("GPI[26] is the OCRAM master's present", dut.h2f_gp.gp_in[26], dut.ocram_master.present);
+`else
 	check("I/O view gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0000000);
+`endif
 `endif
 
 	$display("-- HPS_BUS width at emu and at hps_io");
@@ -420,8 +431,14 @@ initial begin
 	end
 	release dut.lw_sys_window.lines;
 `else
+`ifdef MISTER_OCRAM
+	$display("-- f2h_irq: the OCRAM EVT line only");
+	check("f2h_irq[11] is the master's line", dut.interrupts.irq[11], dut.ocram_master.line);
+	check("f2h_irq[63:12] and f2h_irq[10:2]", {dut.interrupts.irq[63:12], dut.interrupts.irq[10:2]}, 62'd0);
+`else
 	$display("-- f2h_irq: no LW line");
 	check("f2h_irq[63:2]", {dut.interrupts.irq & IRQ_LW}, 64'd0);
+`endif
 `endif
 
 `ifdef MISTER_LW_OSD
@@ -511,9 +528,9 @@ initial begin
 	gpi_on = 0;
 	@(negedge clk_100m);
 	force dut.lw_sys_window.held = 1'b0; #1;
-	check("the window's held output forced 0: gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0011000);
+	check("the window's held output forced 0: gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0011000 | GPI_OCRAM);
 	release dut.lw_sys_window.held; #1;
-	check("released: gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0011010);
+	check("released: gp_in[27:21]", dut.h2f_gp.gp_in[27:21], 7'b0011010 | GPI_OCRAM);
 	check("no GPO[31] low seen yet: lw_idv", dut.lw_idv, 1'b0);
 	gp_out[31] = 1'b0;
 	repeat (8) @(negedge clk_100m);

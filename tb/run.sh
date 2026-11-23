@@ -46,14 +46,17 @@
 #      run on the build host: tb/hps/lw_probe_test.c includes the probe against a model of the window (its cases
 #      in its header), compiled the same way and run once. It all runs before any container starts (the image
 #      has no C compiler). Without a C compiler the arm reports SKIPPED and does not fail.
-# LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F and 0. LW_TB_JOBS (8) runs at a time in
-# arms E, T and B. Needs Icarus Verilog >= 12
+#   O  the OCRAM floor's bench (tb/ocram_tb.sv) under Icarus, every seed of LW_TB_SEEDS once plain and once with
+#      the crossing cells' delay models (LW_TB_CDC); and verilator --lint-only -Wall on hps_ocram_master.sv with
+#      lw_cdc.sv, both OCRAM macros, which must be warning-free
+# LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
+# in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
 # that has it; the tree is mounted at /w.
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
-[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V}
+[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O}
 O=${LW_TB_OUT:-tb/out}
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
@@ -128,6 +131,49 @@ lint() {
     done
   done
   return $st
+}
+
+# ocram LOG: arm O. The floor's bench compiles once plain and once with the crossing cells' delay models, runs
+# under every seed of LW_TB_SEEDS, then verilator lints hps_ocram_master.sv with lw_cdc.sv (both OCRAM macros),
+# warnings as errors.
+ocram() {
+  : > "$1"; n=0; f=0
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/lw_cdc.sv"
+  OCD="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10"
+  for m in plain cdc; do
+    d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+    echo "-- the bench compiles ($m)" >> "$1"
+    if iverilog -g2012 $OCD $d -I sys -o "$O/ocramO_$m.vvp" $OCB > "$O/ocramO_$m.err" 2>&1; then
+      echo "pass bench: compiles ($m)" >> "$1"; n=$((n + 1))
+    else
+      f=$((f + 1)); echo "FAIL bench: does not compile ($m)" >> "$1"
+      head -20 "$O/ocramO_$m.err" | sed 's/^/   /' >> "$1"
+    fi
+  done
+  for s in ${LW_TB_SEEDS:-1 2 3}; do
+    for m in plain cdc; do
+      [ -f "$O/ocramO_$m.vvp" ] || continue
+      echo "== seed $s $m" >> "$1"
+      vvp -n "$O/ocramO_$m.vvp" +lw_seed=$s > "$O/ocramO_$m.$s.log" 2>&1
+      cat "$O/ocramO_$m.$s.log" >> "$1"
+      grep -Eq '^(PASSED|FAILED): [0-9]' "$O/ocramO_$m.$s.log" ||
+        echo "FAIL bench $s $m: gave no result" >> "$1"
+    done
+  done
+  echo "-- verilator --lint-only -Wall on hps_ocram_master.sv and lw_cdc.sv, which must be silent" >> "$1"
+  if command -v verilator >/dev/null 2>&1; then
+    if verilator --lint-only -Wall -DMISTER_OCRAM -DMISTER_OCRAM_DIAG --top-module hps_ocram_master \
+         -Isys sys/hps_ocram_master.sv sys/lw_cdc.sv > "$O/ocramV.log" 2>&1 && [ ! -s "$O/ocramV.log" ]; then
+      echo "pass verilator: no warning" >> "$1"; n=$((n + 1))
+    else
+      f=$((f + 1)); echo "FAIL verilator: a warning or an error" >> "$1"
+      head -20 "$O/ocramV.log" | sed 's/^/   /' >> "$1"
+    fi
+  else
+    echo "SKIPPED verilator: not on PATH" >> "$1"
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
 
 # elab LOG: arm E, one elaboration and simulation of tb/top_tb.sv per configuration; the log ends with one
@@ -379,6 +425,15 @@ for g in $ARMS; do
     sh tb/offstate.sh > "$O/lw_offS.log" 2>&1
     grep -v "^pass " "$O/lw_offS.log"
     V=$(verdict S "$O/lw_offS.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = O ]; then
+    echo "== arm O: tb/ocram_tb.sv, every seed, plain and with the CDC models; verilator lint"
+    ocram "$O/ocram_tbO.log"
+    grep -v "^pass " "$O/ocram_tbO.log"
+    V=$(verdict O "$O/ocram_tbO.log") || rc=1
     R="$R$V
 "
     continue
