@@ -29,8 +29,8 @@
 //  * One transaction at a time, single beat, full 32-bit words. Write: AWVALID and WVALID together, each held
 //    with its payload until its ready, then BREADY while the response is awaited. Read: ARVALID held until
 //    ARREADY, then RREADY while the response is awaited.
-//  * The run latch (§2.6): it sets on a fall of GPO bit 28 (RUN) seen while GPO bit 31 is 1 and no HPS reset is
-//    seen; it clears on RUN high, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
+//  * The run latch (§2.6): it sets on a rising edge of GPO bit 28 (RUN) seen while GPO bit 31 is 1 and no HPS
+//    reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
 //    and hps_rst_n enters through an lw_arst cell, never raw.
 //  * On a stop: the transaction in flight completes, a record being written is abandoned (its head is not
 //    stored), then one terminal store C_HELLO = 0x51540000. An HPS reset ends a run with no terminal store.
@@ -324,7 +324,7 @@ localparam [POLL-1:0] POLL_ONE = 1;
 reg  [POLL-1:0] poll_t = {POLL{1'b0}}; // free-running; its period is 2^POLL cycles
 wire poll_tick = (poll_t == POLL_T0);
 
-always @(posedge clk) poll_t <= poll_t + POLL_ONE;
+always @(posedge clk) poll_t <= run_set ? POLL_T0 : poll_t + POLL_ONE;   // a run's polls count from its start
 
 // C_STATE: [7:0] hellos taken, [11] the EVT ring stopped on a fault this session, [19] the previous session
 // ended with an EVT record part-written; every other bit 0. cnt is the hello count the word reports: the
@@ -410,7 +410,7 @@ wire mark_ok = (phase == P_SESSION) && ring_room && !rec_act && (run_flood || ma
 // hello's stores, a state store, then the EVT record's words.
 always @(*) begin
 	t_go = 1'b0; t_we = 1'b0; t_off = H_HELLO; t_wdata = 32'd0; t_counted = 1'b1;
-	if (engine_idle && !hrst_q && !run_fall) begin
+	if (engine_idle && !hrst_q && !run_fall && !run_set) begin
 		if (term_pend) begin
 			t_go = 1'b1; t_we = 1'b1; t_off = C_HELLO; t_wdata = C_HELLO_STOP; t_counted = 1'b0;
 		end
@@ -558,7 +558,6 @@ always @(posedge clk) begin
 		boot_first <= 1'b1;
 		poll_pend  <= 1'b0;
 		poll_step  <= 3'd0;
-		poll_t     <= POLL_T0;
 		fault_pend <= 1'b0;
 		sto_pend   <= 1'b0;
 		hj_act     <= 1'b0;
