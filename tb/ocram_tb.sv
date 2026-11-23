@@ -618,6 +618,14 @@ reg [31:0] w_data_q = 0;
 integer    w_t0 = 0, r_t0 = 0;
 
 integer txn_starts = 0, txn_done = 0;
+// Case 27's bound: the design note's "at most one transaction for each requester above". A step-4 EVT tail
+// re-read launched while a consumer waits is a transaction that consumer sits behind; line_yield_q lets at most
+// one of those through between two consumer grants. A no-consumer-request cycle clears the yield (and is no
+// delay to anyone), so the counter lapses there too. line_rr_all proves the re-reads did happen.
+integer rr_wait_since = 0;   // such re-reads since the last grant, in a run of continuously waiting consumers
+integer rr_wait_max = 0;     // the longest such run between two consumer grants
+integer grants_all = 0;      // the consumer grants seen (either port)
+integer line_rr_all = 0;     // every step-4 EVT tail re-read
 reg     first_arm = 0, first_seen = 0;
 integer first_off = 0;
 reg     first_we = 0;
@@ -910,6 +918,19 @@ always @(posedge clk) begin
 		end
 	end
 
+	// the line's back-to-back tail re-read and the consumers' turns: between two consumer grants at most one
+	// step-4 re-read is launched (line_yield_q), so a consumer waits at most one transaction for the line
+	if (arvalid && !arv_d && (araddr[15:0] === H_IDX3) && (dut.poll_step == 3'd4)) begin
+		line_rr_all = line_rr_all + 1;
+		if (dut.consumer_req) rr_wait_since = rr_wait_since + 1;
+	end
+	if (dut.c0_go || dut.c1_go) begin
+		if (grants_all > 0 && rr_wait_since > rr_wait_max) rr_wait_max = rr_wait_since;
+		rr_wait_since = 0;
+		grants_all = grants_all + 1;
+	end
+	else if (!dut.consumer_req) rr_wait_since = 0;
+
 	// the edge detectors, for the next cycle's rise and stability checks
 	awv_d = awvalid; awr_d = awready; wv_d = wvalid; wr_d = wready;
 	arv_d = arvalid; arr_d = arready; bv_d = bvalid; rv_d = rvalid;
@@ -1050,6 +1071,33 @@ task wait_ts_drain(input integer us, output integer ok);
 				evt_take(got);                   // the host keeps its EVT ring drained
 				@(posedge clk); t = t + 1;
 			end
+		end
+	end
+endtask
+
+// Case 27's host leaves the EVT ring undrained: these wait on the torture ring only.
+task ts_wait_room_nd(input integer need);
+	integer t;
+	reg [31:0] v;
+	begin
+		t = 0;
+		peek(C_IDX4, v);
+		while ((((ts_head - v[15:0]) & 16'hFFFF) > (TS_WORDS - need)) && t < 2000000) begin
+			@(posedge clk); t = t + 1;
+			peek(C_IDX4, v);
+		end
+	end
+endtask
+
+task wait_ts_drain_nd(input integer us, output integer ok);
+	integer t;
+	reg [31:0] v;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 100) begin
+			peek(C_IDX4, v);
+			if (v[15:0] == (ts_head & 16'hFFFF)) ok = 1;
+			else begin @(posedge clk); t = t + 1; end
 		end
 	end
 endtask
@@ -2014,6 +2062,62 @@ task case25;
 endtask
 `endif
 
+// 27. the line held high with the EVT ring undrained
+`ifdef MISTER_OCRAM_DIAG
+task case27;
+	integer r, jj, l;
+	begin
+		$display("-- the line held high, EVT undrained: 8 OSD rows and 200 torture records still land, one re-read per turn");
+		reset_floor;
+		fast_lat = 1;
+		osd_clear;
+		ts_reset;
+		start_session(0, 0, 8, 16'h0D01, ok);       // H_LINE bit 3; the host never stores the EVT tail
+		osd_bind_now(16'h0D01, ok);
+		ok = 0; i = 0;
+		while (!ok && i < 200000) begin @(posedge clk); i = i + 1; if (line_out === 1'b1) ok = 1; end
+		check("the line is high before the traffic", ok, 1);
+		// the bound is between consumer grants, so the counters start with the traffic
+		rr_wait_since = 0; rr_wait_max = 0; grants_all = 0;
+		// a torture backlog first, so the sink keeps a request pending through the OSD rows
+		for (r = 0; r < 200; r = r + 1) begin
+			jj = ($random(seed) & 32'h7FFF_FFFF);
+			l = 1 + (jj % 200);
+			ts_wait_room_nd(1 + l);
+			ts_record(l, -1, 32'd0, 0);
+		end
+		// then the 8 rows through the OCRAM writer, their twins over SPI, in one head store
+		osd_head = 0;
+		for (r = 0; r < 8; r = r + 1) begin
+			make_row(r);
+			spi_row(r);
+			osd_publish_row(r);
+		end
+		osd_publish;
+		osd_wait_tail(8*65, 20000, ok);
+		check("every row lands while the line is high", ok, 1);
+		wait_ts_drain_nd(20000, ok);
+		check("the sink drains its ring while the line is high", ok, 1);
+		check("the line is still high when the traffic ends", line_out, 1);
+		osd_compare(bad);
+		check("every row is byte-equal to osd A", bad, 0);
+		// the host drains now: the verdict with both counters, then the arbitration bound
+		wait_verdict(200, 8, 20000, ok);
+		check("a VERDICT with 200 records and 8 rows is posted", ok, 1);
+		check("VERDICT: records", vd_last[0], 200);
+		check("VERDICT: words", vd_last[1], ts_words_exp);
+		check("VERDICT: errors", vd_last[2], 0);
+		check("VERDICT: sum", vd_last[5], ts_sum_exp);
+		check("VERDICT: the OSD row count", vd_last[7][31:16], 8);
+		$display("   %0d tail re-reads; the longest a waiting consumer sat behind between two grants: %0d",
+		         line_rr_all, rr_wait_max);
+		check("at most one EVT tail re-read a waiting consumer sits behind, between two grants", rr_wait_max <= 1, 1);
+		check("the consumers were granted repeatedly", grants_all > 2000, 1);
+		check("re-reads occurred during the traffic", line_rr_all > 100, 1);
+	end
+endtask
+`endif
+
 // 26. an HPS reset in the middle of a row
 task case26;
 	begin
@@ -2110,6 +2214,7 @@ initial begin
 	case23;
 	case24;
 	case25;
+	case27;
 `endif
 	case26;
 

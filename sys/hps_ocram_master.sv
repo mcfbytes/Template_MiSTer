@@ -488,35 +488,11 @@ wire hello_hit = t_done && (rd_act == R_HELLO) && t_ok && (phase == P_ARMED) &&
                  (rdata[31:16] == HELLO_MAGIC) && (rdata[15:0] != 16'd0);
 wire diag_clr = hello_start;
 
-// The read the poll (or the boot, or the line) wants next.
+// The read the poll (or the boot, or the line) wants next, after the consumers' declarations below: a step-4
+// read is the line's back-to-back tail re-read and yields to a requesting consumer (line_yield_q). Steps 1-3 and
+// the periodic H_HELLO poll are unchanged.
 reg  poll_sel;
 reg  [2:0] poll_rd_kind;
-
-always @(*) begin
-	poll_sel = 1'b0; poll_rd_kind = R_NONE;
-	if (phase == P_START) begin
-		if (boot_pend && (boot_first || poll_pend)) begin
-			poll_sel = 1'b1; poll_rd_kind = R_HELLO;
-		end
-	end
-	else if (phase == P_ARMED || phase == P_WAIT) begin
-		if (poll_pend) begin poll_sel = 1'b1; poll_rd_kind = R_HELLO; end
-	end
-	else if (phase == P_SESSION) begin
-		if (poll_pend) begin
-			poll_sel = 1'b1; poll_rd_kind = R_HELLO;
-		end
-		else if (poll_step == 3'd1) begin
-			poll_sel = 1'b1; poll_rd_kind = R_BIND;
-		end
-		else if (poll_step == 3'd2) begin
-			poll_sel = 1'b1; poll_rd_kind = R_LINE;
-		end
-		else if (poll_step == 3'd3 || poll_step == 3'd4) begin
-			poll_sel = 1'b1; poll_rd_kind = R_IDX;
-		end
-	end
-end
 
 //////////////////////////////  the consumers  //////////////////////////////
 
@@ -544,6 +520,38 @@ assign c1_mid = 1'b0;
 reg  c_last = 1'b0;                    // the consumer port granted last: 0 or 1
 wire c0_sel = (phase == P_SESSION) && c0_req_v && (!c1_req_v || c_last);
 wire c1_sel = (phase == P_SESSION) && c1_req_v && (!c0_req_v || !c_last);
+
+wire consumer_req = c0_req_v | c1_req_v;   // a consumer is waiting: the line's re-read gives it a turn
+reg  line_yield_q = 1'b0;                  // a step-4 re-read ran and the consumers have not had their turn
+
+always @(*) begin
+	poll_sel = 1'b0; poll_rd_kind = R_NONE;
+	if (phase == P_START) begin
+		if (boot_pend && (boot_first || poll_pend)) begin
+			poll_sel = 1'b1; poll_rd_kind = R_HELLO;
+		end
+	end
+	else if (phase == P_ARMED || phase == P_WAIT) begin
+		if (poll_pend) begin poll_sel = 1'b1; poll_rd_kind = R_HELLO; end
+	end
+	else if (phase == P_SESSION) begin
+		if (poll_pend) begin
+			poll_sel = 1'b1; poll_rd_kind = R_HELLO;
+		end
+		else if (poll_step == 3'd1) begin
+			poll_sel = 1'b1; poll_rd_kind = R_BIND;
+		end
+		else if (poll_step == 3'd2) begin
+			poll_sel = 1'b1; poll_rd_kind = R_LINE;
+		end
+		else if (poll_step == 3'd3) begin
+			poll_sel = 1'b1; poll_rd_kind = R_IDX;
+		end
+		else if (poll_step == 3'd4 && !(line_yield_q && consumer_req)) begin
+			poll_sel = 1'b1; poll_rd_kind = R_IDX;      // at most one re-read between two consumer grants
+		end
+	end
+end
 
 reg  c_act_v = 1'b0;                   // a consumer transaction is in flight
 reg  c_act_port = 1'b0;
@@ -735,6 +743,13 @@ always @(posedge clk) begin
 	// poll bookkeeping: a launched poll read clears the pending period; a new one sets it
 	if (t_go && !t_we && poll_sel && (poll_rd_kind == R_HELLO)) poll_pend <= 1'b0;
 	else if (poll_tick && run && !hrst_q) poll_pend <= 1'b1;
+
+	// the line's back-to-back tail re-read yields one turn to the consumers after each of its own reads, and
+	// takes it back once a consumer is granted or none is waiting
+	if ((t_job == J_POLL) && (poll_step == 3'd4) && (poll_rd_kind == R_IDX))
+		line_yield_q <= 1'b1;
+	else if ((t_job == J_C0) || (t_job == J_C1) || !consumer_req)
+		line_yield_q <= 1'b0;
 
 	// a consumer fault: the ring's bit and the C_STATE store it owes (a fault in the store's own cycle is kept)
 	if (OSD_EN != 0 && c0_fault) osd_stopped_q <= 1'b1;

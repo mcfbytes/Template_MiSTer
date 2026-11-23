@@ -78,7 +78,8 @@ counted, and every counter clears at each hello.
 
 Two GPO bits are test knobs, sampled at the run latch's set. **GPO 27 = 1 sets `AxPROT[1]` (non-secure) for that
 run.** **GPO 26 = 1 sets flood, so MARK records are posted back to back.** Neither is a protocol bit, and a
-shipping build (`MISTER_OCRAM` without `MISTER_OCRAM_DIAG`) ignores both.
+shipping build (`MISTER_OCRAM` without `MISTER_OCRAM_DIAG`) ignores both. Flood starves the consumers by design:
+a back-to-back MARK stream keeps the arbiter's EVT-record slot busy, so a consumer waits behind it.
 
 The same build carries the host-to-fabric torture sink: consumer port 1 walks the SECTOR span as a ring (r = 4,
 base `0x7000`, 8,192 words) in every session, with no bind, and checks each TSEQ record's payload word `g`
