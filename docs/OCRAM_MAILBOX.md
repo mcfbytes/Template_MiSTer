@@ -272,9 +272,10 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   commit mark, so a set bit that has not taken effect costs slow blocks, never a stall. Before setting the bit,
   serve over SPI what the last GET_SDSTAT showed.
 - **Changing what the slot holds** (a mount, a disc change): clear H_SECTOR's bit. A frame already playing
-  finishes, every frame behind it is discarded, and the mux returns to SPI at the slot's next idle point. Serve SPI,
-  change the mount once C_BIND shows 0, then set the bit again. No stale frame survives and no request is left
-  unanswered.
+  finishes, every frame behind it is discarded, and the mux returns to SPI at the slot's next idle point. A request
+  that stood on the mailbox then shows in the SPI poll, and its REQUEST record, read with C_BIND's bit at 0, is
+  void. Serve SPI, change the mount once C_BIND shows 0, then set the bit again. No stale frame survives and no
+  request is left unanswered.
 - **Save slots are not carried.** A save slot's read must reach the core whole or not at all, which the SECTOR
   block keeps by holding the frame in its FIFO; a consumer with no FIFO cannot withdraw a frame that the session's
   end cuts short. Save slots stay on SPI, or on the SECTOR block of `docs/LW_BRIDGE.md` where that is built.
