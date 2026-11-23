@@ -1,10 +1,18 @@
 // A simple OSD implementation. Can be hooked up between a cores
 // VGA output and the physical VGA pins
 
+// LW_OSD_W: an OSDBUF tier (MISTER_LW_OSD with MISTER_LW, or MISTER_OCRAM_OSD with MISTER_OCRAM) writes
+// osd_buffer through this block's own write port.
 `ifdef MISTER_LW
 `ifdef MISTER_LW_OSD
-// LW_OSD_W: the OSDBUF tier (MISTER_LW_OSD, with MISTER_LW) writes osd_buffer through this block's own write port.
 `define LW_OSD_W
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`ifndef LW_OSD_W
+`define LW_OSD_W
+`endif
 `endif
 `endif
 
@@ -28,8 +36,9 @@ module osd
 	output reg    osd_status
 `ifdef LW_OSD_W
 	,
-	// OSDBUF (lw_osd.sv), on clk_sys: one byte of osd_buffer, row lw_addr[12:8], column lw_addr[7:0]. It comes only
-	// while io_osd is low, so the one write statement below takes the SPI byte if both come.
+	// The OSDBUF writer's byte (lw_osd.sv or hps_ocram_osd.sv), on clk_sys: one byte of osd_buffer, row
+	// lw_addr[12:8], column lw_addr[7:0]. It comes only while io_osd is low, so the one write statement below
+	// takes the SPI byte if both come.
 	input         lw_we,
 	input  [12:0] lw_addr,
 	input   [7:0] lw_byte

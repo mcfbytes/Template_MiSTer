@@ -111,7 +111,10 @@ set_global_assignment -name SEED 1
 # OCRAM mailbox floor (docs/OCRAM_MAILBOX.md): the HPS on-chip-RAM AXI master, its hello, its EVT ring and line.
 # Off by default, and it needs no other macro.
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM=1"
-# Test-core diagnostics: MARK records, the latency counters and the GPO 27/26 knobs (test cores only).
+# OSD rows from the OSD ring into every osd's osd_buffer (needs MISTER_OCRAM).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_OSD=1"
+# Test-core diagnostics: MARK records, the latency counters, the GPO 27/26 knobs and the host-to-fabric torture
+# sink (test cores only).
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_DIAG=1"
 # Idle poll period as a power of two clk_100m cycles (default 12: 41 us).
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_POLL=12"
