@@ -5,9 +5,12 @@ A proposed third path between the HPS and a core, beside the GPO/GPI ("SPI") lin
 **on-chip RAM** (OCRAM, physical `0xFFFF0000`), and the core fetches them as an AXI master on the Cyclone V
 **FPGA-to-HPS bridge**, whose atom `sys/` already instantiates with no port connected.
 
-**Status: a design, not a build.** Nothing in `sys/` implements this document, no macro below exists yet, no figure in
-it is measured, and several facts it rests on are unverified ("What is not verified", at the end). It is published
-with the LW framework so that core and host authors can read both paths side by side and say which they would build.
+**Status: the floor is built, for test cores only.** `MISTER_OCRAM` builds the bridge master, the run latch, the
+poller, the hello, the EVT ring's writer and its line; `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the
+latency counters and the GPO 27/26 test knobs (below). Nothing else in this document is built: no OSD, SECTOR,
+EVT, LANE or PAD tier, no consumer, no consumer handshake. No figure below is measured, and several facts the
+floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
+core and host authors can read both paths side by side and say which they would build.
 
 - **The core sees nothing new.** OSD rows land in the same `osd_buffer`, blocks arrive as the same
   `sd_ack`/`sd_buff_wr`/`sd_buff_dout` strobes, exactly as with the LW tiers.
@@ -52,6 +55,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM_CONFSTR` | the configuration string as one record after the hello | `MISTER_OCRAM_EVT` | 30-50 ALMs |
 | `MISTER_OCRAM_BELL` | an LW register whose store starts a poll at once (only if the poll proves too slow) | both floors | 10-20 ALMs |
 | `MISTER_OCRAM_POLL` | the idle poll period, as a power of two of `clk_100m` cycles (default 12: 41 us) | the floor | - |
+| `MISTER_OCRAM_DIAG` | test-core diagnostics: MARK records with the latency counters (below), and the GPO 27/26 knobs | the floor | test cores only |
 
 **Three set menus** a `.qsf` could carry as commented blocks:
 
@@ -60,6 +64,19 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | LW pads, OCRAM bulk | `MISTER_LW`, `MISTER_LW_PAD`, `MISTER_LW_EVT`, `MISTER_OCRAM`, `MISTER_OCRAM_OSD`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT` and keeps its save slots on SPI | a core with a disc, or two bulk functions: pads keep the path proven on hardware, the blocks that cost block memory move |
 | lean, no LW bridge | `MISTER_OCRAM`, `MISTER_OCRAM_OSD`, `MISTER_OCRAM_EVT`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT`; pads stay on SPI or take `MISTER_OCRAM_PAD` | a core short of logic or block memory, or one that wants no bridge the HPS must be answered on |
 | LW only | the tiers of `docs/LW_BRIDGE.md` | a cartridge core; any core until the mailbox is proven |
+
+## Test-core diagnostics
+
+`MISTER_OCRAM_DIAG` is a test-core build only: it posts a MARK record (`kind 0x23`, `arg` 3, 40 payload words) on
+the EVT ring in a session whenever the ring has room and either flood is set or the MARK period
+(`MISTER_OCRAM_MARK`, a power of two of `clk_100m` cycles) has passed. Word 0 carries the ring's deepest fill,
+the two knobs and the hello count; words 1-7 the read and write counts, max/min latency, latency sums and error
+counts; words 8-39 the two 16-bin latency histograms. The MARK record's own header and payload stores are not
+counted, and every counter clears at each hello.
+
+Two GPO bits are test knobs, sampled at the run latch's set. **GPO 27 = 1 sets `AxPROT[1]` (non-secure) for that
+run.** **GPO 26 = 1 sets flood, so MARK records are posted back to back.** Neither is a protocol bit, and a
+shipping build (`MISTER_OCRAM` without `MISTER_OCRAM_DIAG`) ignores both.
 
 ## How it works
 
