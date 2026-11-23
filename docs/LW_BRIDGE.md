@@ -151,7 +151,8 @@ are built the proposal is:
 | pads | the PAD block here | one store per change, proven on hardware; a mailbox pad arrives one poll period late |
 | status and `hps_io`'s flags | the EVT block here | no block memory already; the mailbox version exists for a core with no LW bridge |
 | the OSD image | the mailbox | OSDBUF's FIFO is two block memories; a mailbox row is 65 memory stores and publishes whole |
-| block reads and save blocks | the mailbox | SECTOR's FIFO is block memory; a mailbox frame is whole by construction, and blocks may be queued ahead of the core's requests |
+| block reads | the mailbox | SECTOR's FIFO is block memory; a mailbox frame is whole by construction, and blocks may be queued ahead of the core's requests |
+| save-block writes | the DDR-image rule, on either path | the block's bytes stay in the image the core keeps; only the request and the ack cross, as records on the mailbox |
 | link frames | either | the LANE block's FIFOs are block memory; the mailbox keeps the same player |
 
 The mailbox adds a second floor in logic, so it is not the smaller choice for a core whose only bulk function is the

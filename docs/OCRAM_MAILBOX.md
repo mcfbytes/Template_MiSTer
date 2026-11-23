@@ -49,6 +49,8 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
+| `MISTER_OCRAM_CONFSTR` | the configuration string as one record after the hello | `MISTER_OCRAM_EVT` | 30-50 ALMs |
+| `MISTER_OCRAM_BELL` | an LW register whose store starts a poll at once (only if the poll proves too slow) | both floors | 10-20 ALMs |
 | `MISTER_OCRAM_POLL` | the idle poll period, as a power of two of `clk_100m` cycles (default 12: 41 us) | the floor | - |
 
 **Three set menus** a `.qsf` could carry as commented blocks:
@@ -73,12 +75,14 @@ drives it.
   Inside the RAM every address is a constant base plus an index masked to its ring's size, and the sum is below
   `0xF000` for every ring. Both bounds are structural and checked statically, never a matter of register values.
 - **One transaction at a time,** single-beat, full 32-bit words, secure and non-cacheable.
-- **It is gated.** It starts a transaction only while the host has set a run bit (proposed: GPO bit 28), the link is
-  in its I/O view (`gp_out[31]` = 1) and no HPS reset is seen. A host that does not know the mailbox never sets the
-  run bit (the stock Main writes GPO bits 16 and 21-28 as zeros), so under such a host the master issues nothing at
-  all and the core is a stock core.
-- **When the run bit or `gp_out[31]` falls** it completes the transaction in flight, stores C_HELLO = 0 as its one
-  last transaction, and issues nothing more until both are 1 again.
+- **It is gated by a run latch.** The latch sets on a rising edge of the host's run bit (proposed: GPO bit 28) seen
+  while the link is in its I/O view (`gp_out[31]` = 1) and no HPS reset is seen. It clears when the run bit falls,
+  when `gp_out[31]` falls or on an HPS reset, and the return of `gp_out[31]` does not set it. The master starts a
+  transaction only while the latch is set. A host that does not know the mailbox never sets the run bit (the stock
+  Main writes GPO bits 16 and 21-28 as zeros), so under such a host the master issues nothing at all and the core is
+  a stock core.
+- **When the run bit or `gp_out[31]` clears the latch** it completes the transaction in flight, stores C_HELLO =
+  `0x51540000` as its one last transaction, and issues nothing more until the next rising edge of the run bit.
 - **One arbiter, fixed order:** that last store; an interrupt line's tail re-read and the poll when due; the
   core-to-host ring's words; then the consumers, round robin.
 
@@ -91,23 +95,24 @@ the RAM is the queue, and the consumer's own pace sets the fetch rate.
 Offsets are from `0xFFFF0000`. The fabric declares this geometry in the control page and a host reads it there, so a
 later layout needs no host change.
 
-| offset | size | ring | direction | carries |
-|---|---|---|---|---|
-| `0x0000` | `0x0100` | control page | both | the hello, binds, every index, the fabric's descriptors |
-| `0x0400` | `0x0400` | PAD | host to core | pad stores |
-| `0x1000` | `0x1000` | LANE | host to core | link frames |
-| `0x2000` | `0x2000` | OSD | host to core | image rows, 65 words each |
-| `0x4000` | `0x2000` | EVT | core to host | status, block requests, replies |
-| `0x7000` | `0x8000` | SECTOR | host to core | block read frames: thirteen of 2,352 bytes |
-| `0xF000` | `0x1000` | never touched | - | the boot ROM's workspace |
+| offset | size | ring | *r* | direction | carries |
+|---|---|---|---|---|---|
+| `0x0000` | `0x0100` | control page | - | both | the hello, binds, every index, the fabric's descriptors |
+| `0x0400` | `0x0400` | PAD | 0 | host to core | pad stores |
+| `0x1000` | `0x1000` | LANE | 1 | host to core | link frames |
+| `0x2000` | `0x2000` | OSD | 2 | host to core | image rows, 65 words each |
+| `0x4000` | `0x2000` | EVT | 3 | core to host | status, block requests, replies |
+| `0x7000` | `0x8000` | SECTOR | 4 | host to core | block read frames: thirteen of 2,352 bytes |
+| `0xF000` | `0x1000` | never touched | - | - | the boot ROM's workspace |
 
-A ring whose tier is not built has no descriptor, and its span is never read or written.
+*r* is the ring's fixed number in every per-ring word of the control page. A ring whose tier is not built has no
+descriptor, and its span is never read or written.
 
 ### Rings and records
 
 - **A ring** is a power-of-two count of 32-bit words with two indices, each a free-running word count modulo 65,536
   and each a full word in the control page. **Each index is written by one side only:** the producer's head, the
-  consumer's tail. `head - tail` words are waiting.
+  consumer's tail. `(head - tail) & 0xFFFF` words are waiting, and the ring is full when that equals its size.
 - **A record** is one header word, `{kind[31:24], arg[23:16], len[15:0]}`, then `len` payload words. It may wrap
   the end of its ring.
 - **Publishing is one store.** The producer stores every word of the record, then its head. The consumer acts only on
@@ -120,7 +125,8 @@ A ring whose tier is not built has no descriptor, and its span is never read or 
 
 ### The control page
 
-Each word has one writer. A host stores the fabric's half only to zero it, and only while the run bit is 0.
+Each word has one writer. A host stores the fabric's half only to zero it, and only while the master is stopped
+("The rule that replaces the firewall").
 
 | offset | word | written by | content |
 |---|---|---|---|
@@ -128,13 +134,21 @@ Each word has one writer. A host stores the fabric's half only to zero it, and o
 | `0x04` | H_BIND | host | the functions the host takes from SPI: SECTOR slots `[2:0]`, EVT `[8]`, LANE `[9]`, PAD `[10]`, OSD `[11]` |
 | `0x08` | H_LINE | host | bit *r*: ring *r*'s interrupt line may rise |
 | `0x10` + 4*r* | H_IDX[*r*] | host | its head of a host-to-core ring, its tail of a core-to-host ring |
-| `0x80` | C_HELLO | fabric | 0: the master is quiet. `0x4F430000`: it is polling, armed, in no session. Otherwise the echo of H_HELLO, stored last |
+| `0x80` | C_HELLO | fabric | the master's state, below; in a session, the echo of H_HELLO, stored last |
 | `0x84` | C_VERSION | fabric | `{major, minor}` of the layout |
-| `0x88` | C_CAPS | fabric | bit *r*: ring *r* is built |
-| `0x8C` | C_STATE | fabric | hellos taken; per-ring fault and at-rest bits |
+| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; the rest 0 |
+| `0x8C` | C_STATE | fabric | `[7:0]` hellos taken since configuration; `[12:8]` ring *r* is stopped on a fault; `[20:16]` ring *r* ended the session before this one mid-record |
 | `0x90` + 4*r* | C_IDX[*r*] | fabric | its tail of a host-to-core ring, its head of a core-to-host ring |
-| `0xB0` + 4*r* | C_RING[*r*] | fabric | `{kind[31:27], line ordinal[26:22], log2 words[21:18], 0[17:14], offset in words[13:0]}`; 0 = absent |
+| `0xB0` + 4*r* | C_RING[*r*] | fabric | `{kind[31:27], line ordinal[26:22], log2 words[21:18], 0[17:14], offset in words[13:0]}`; kind is *r* + 1; 0 = absent |
 | `0xD0`... | C_K[*n*] | fabric | per-kind constants: SECTOR slots and frame lengths, OSD rows |
+
+| C_HELLO | the master is | stored by |
+|---|---|---|
+| 0 | unknown: no master has stored since the host's zero | the host, before every rising edge of the run bit |
+| `0x4F430000` | running, armed, in no session | the master, on reading H_HELLO = 0 |
+| `0x57540000` | running, waiting for H_HELLO = 0 | the master, on reading any other H_HELLO it has not echoed |
+| `{0x4F43, nonce}` | in the session of that hello | the master, last of the hello's stores |
+| `0x51540000` | stopped | the master, as the last store of a run |
 
 ## The host's side
 
@@ -152,7 +166,9 @@ on a warm reset (the system manager's `romcodegrp.warmramgrp.enable`, `0xFFD080E
 overwrites the image. **So a host stores 0 to that register before its first store to the on-chip RAM**; a warm
 reset then takes the boot ROM's path through the boot medium, as a cold boot does. Whether that path boots a given
 board after a warm reset is not verified here. A host that skips the store risks a machine that does not come back
-from a warm reset; a host that makes it must know how its board behaves.
+from a warm reset; a host that makes it must know how its board behaves. If that path proves unusable, the map
+moves above the preloader's image and the register is left alone; a project then builds every core and every host
+for that one map, because nothing a host reads before its first store tells two maps apart.
 
 ### Discovery and the hello
 
@@ -160,38 +176,51 @@ Reading the on-chip RAM can never hang, so nothing here needs a firewall. What a
 master in *this* bitstream is on the other side: the RAM outlives every core load and still holds the last core's
 words.
 
-1. **GPI bit 26 = 1** (proposed; in the I/O view, with `gp_out[31] = 1`): the master is in this bitstream. Stock
-   bitstreams read 0, and a host that sees 0 touches nothing: not the RAM, not the register above, not the run bit.
-2. With the run bit still 0, so the master is silent: store 0 to `warmramgrp.enable` and zero the whole control page
-   with full-word stores. Then set the run bit.
-3. The master starts polling. **It arms only on reading H_HELLO = 0,** and says so by storing C_HELLO =
-   `0x4F430000`. A page that an earlier session left holding a plausible hello therefore starts nothing. Read that
-   value within 1 ms: a live master is polling.
+1. **GPI bit 26 = 1** (proposed), **sampled only in the I/O view** (`gp_out[31] = 1`): the master is in this
+   bitstream. In the ID view the bit belongs to the core magic and reads 1 on every bitstream. Stock bitstreams read
+   0 in the I/O view, and a host that sees 0 touches nothing: not the RAM, not the register above, not the run bit.
+2. With the master stopped (proven by the rule below, or not yet started on this bitstream): store 0 to
+   `warmramgrp.enable` and zero the whole control page with full-word stores. Then make a rising edge on the run
+   bit: store it as 0, then as 1.
+3. The edge starts the master, and its first transaction reads H_HELLO. **It arms only on reading H_HELLO = 0,** and
+   says so by storing C_HELLO = `0x4F430000`; on any other value it stores `0x57540000` and polls on. A page that
+   an earlier session left holding a plausible hello therefore starts nothing. Read the armed value within 1 ms of
+   the edge: the run bit reached the fabric and a live master is polling.
 4. Store H_HELLO with a non-zero nonce. The armed master waits until every consumer's `clk_sys` half is at rest,
-   starts every index at 0, stores its version, capabilities, descriptors and constants, then C_HELLO = H_HELLO.
-5. Read C_HELLO until it equals H_HELLO, for at most 1 ms. No echo: no mailbox this session; clear the run bit and
-   use the LW window or SPI. An echo: read the descriptors and bind each function once.
+   starts every index at 0, stores its version, capabilities, state, descriptors and constants, then C_HELLO =
+   H_HELLO.
+5. Read C_HELLO until it equals H_HELLO, for at most 1 ms. No armed value or no echo: no mailbox this session; clear
+   the run bit, take the stopped read of the rule below, and use the LW window or SPI. An echo: read the descriptors
+   and bind each function once.
 
-**The session ends** when the run bit falls, when `gp_out[31]` falls (the ID view, or the core reset through GPO),
-when the fabric sees an HPS reset, or when H_HELLO changes. Every bind and line drops, each function returns to SPI,
-and records still queued are abandoned unplayed: a queued OSD row never draws into the next program's OSD, and a
-block frame in flight is zero-filled from the first word not fetched, so the core is never left waiting. The master
-is then disarmed and needs H_HELLO = 0 again. A host that stops leaves the run bit set and the master polling a page
-nobody changes, which is harmless; the next program's start ends it, because its first GPO store carries the run bit
-as 0.
+**The session ends** when the master stops (the run bit falls, `gp_out[31]` falls for the ID view or the core reset
+through GPO, or the fabric sees an HPS reset), or when it reads an H_HELLO that is not the one it echoed: a 0 arms it
+again, any other value leaves it waiting for a 0. Every bind and line drops, each function returns to SPI, and
+records still queued are abandoned unplayed: a queued OSD row never draws into the next program's OSD, and a block
+frame in flight is zero-filled from the first word not fetched, so the core is never left waiting. After its own
+core reset or ID view a host starts again from step 2. A host that stops leaves the run bit set and the master
+polling a page nobody changes, which is harmless; the next program's first GPO store carries the run bit as 0, which
+stops the master.
 
-**One program has the link,** as with the LW window. A program that starts reads the GPO register itself: the run
-bit set means a mailbox host was here. Stores carry no identity, so a second host that stores into a live session
-corrupts its rings.
+**One program has the link,** as with the LW window. Stores carry no identity, so a second host that stores into a
+live session corrupts its rings. A program's start stops the master its predecessor left running; two programs live
+at once are as undetected here as they are on the SPI link.
 
 ### The rule that replaces the firewall
 
 The mirrored danger is **a fabric transaction in flight while the bridge is reset or the FPGA is programmed.**
 
-- **Set the run bit only while the FPGA-to-HPS bridge is out of reset.**
-- **Before resetting a bridge or programming the FPGA: clear the run bit or `gp_out[31]`, then read C_HELLO until it
-  is 0.** That zero is the master's last store, so it proves the master is quiet. The wait is a few bus cycles.
-- The store that drops `gp_out[31]` for a core reset drops the run bit with it.
+- **Raise the run bit only while the FPGA-to-HPS bridge is out of reset,** and hold it until the armed read.
+- **Before resetting a bridge, programming the FPGA or zeroing the control page: clear the run bit or `gp_out[31]`,
+  then read C_HELLO until it is `0x51540000`.** The host stored 0 there before the edge, and nothing the master
+  stores there while it runs is 0 or that value, so the value is the last store of this run and nothing older: a
+  transition, not a level. The wait is a few bus cycles; bound it at 1 ms.
+- **If the value never comes,** the master is absent, was never started or cannot finish a transaction. A host
+  cannot repair any of those: it notes the fault, makes no rising edge again on this bitstream, and goes on.
+- **Before the first rising edge on a bitstream** there is no run to prove stopped: the latch is clear from
+  configuration. A program that starts on a bitstream it did not load relies on its own first GPO store, which
+  carried the run bit as 0, and zeroes the page no sooner than 1 ms after it.
+- The store that drops `gp_out[31]` for a core reset carries the run bit as 0.
 
 ### Doorbells
 
@@ -208,14 +237,16 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 
 | ring | kind | payload | meaning |
 |---|---|---|---|
-| OSD | ROW, `arg` = row | 64 words: the row's 256 bytes | written into `osd_buffer` as the LW OSDBUF writer does, under the same guard |
-| SECTOR | FRAME, `arg` = slot index | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
-| SECTOR | ACK, `arg` = slot index | the LBA | answers a save slot's write with an ack pulse, after the host has copied the block |
-| EVT | STATUS | four words | a status transfer landed, whole |
-| EVT | REQUEST, `arg` = slot index and direction | the LBA | a bound slot's request opened and no queued frame answers it |
-| EVT | REPLY | reply words | the frame lane's captured replies |
-| LANE | FRAME, `arg` = select and capture | the opcode word, then data words | one link transaction, as the LW frame lane plays it |
-| PAD | STORE | opcode and index, then data | one pad set-command |
+| OSD | `0x01` ROW, `arg` = row | 64 words: the row's 256 bytes | written into `osd_buffer` as the LW OSDBUF writer does, under the same guard |
+| SECTOR | `0x10` FRAME, `arg` = slot index | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
+| SECTOR | `0x11` ACK, `arg` = slot index | the LBA | answers a save slot's write with an ack pulse, after the host has copied the block |
+| EVT | `0x20` STATUS | four words | a status transfer landed, whole |
+| EVT | `0x21` REQUEST, `arg` = slot index, bit 7 = a write | the LBA | a bound slot's request opened and no queued frame answers it |
+| EVT | `0x22` REPLY | reply words | the frame lane's captured replies |
+| EVT | `0x23` MARK, `arg` = ring | its deepest fill | a ring's high-water mark, for sizing |
+| EVT | `0x24` CONFSTR | the string, four bytes a word | the configuration string, once after the hello |
+| LANE | `0x30` LFRAME, `arg` = select and capture | the opcode word, then data words | one link transaction, as the LW frame lane plays it |
+| PAD | `0x40` STORE, `arg` = pad | two words | one pad set-command |
 
 - **OSD.** A byte in rows 8-15 sets highres, as an LW or SPI write does, so a host sends an SPI OSD control word
   only when the OSD ring is drained (`C_IDX` equals its head), and binds the OSD before its first row. There is no
@@ -223,8 +254,10 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 - **Block frames** carry their slot and LBA. While no request stands, the frame at the ring's tail waits. When one
   stands, the fabric plays the tail frame if it answers it and discards it if it does not, and posts a REQUEST when
   the ring holds no answer. A frame for a slot that is not bound is discarded. So a host may queue blocks ahead of
-  the core's requests, and a wrong guess costs only the stores. A host that changes what a slot holds drops the
-  slot's bind, sees the ring drain, and binds again.
+  the core's requests, and a wrong guess costs only the stores. **A slot that is not bound is an SPI slot:** its
+  request shows in the SPI poll and the host answers it there, and a bind dropped while a frame plays zero-fills
+  that frame. So a host that changes what a slot holds drops the slot's bind, serves the slot over SPI while the
+  ring drains, and binds again; no request is left unanswered.
 - **Save-slot writes** keep the rule of `docs/LW_BRIDGE.md`: the core keeps the image in DDR, the host copies the
   block for the request it was shown, then publishes the ACK.
 
@@ -233,7 +266,9 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 - that the mailbox exists because the RAM holds a plausible control page: only GPI bit 26, the armed value and the
   echo of its own nonce say so;
 - that a record is seen before its head is stored, or that a head may be stored before its record;
-- that a store has any effect without the run bit;
+- that a store has any effect without the run bit, or that the run bit's level starts anything: only its rising
+  edge does;
+- that a zero in C_HELLO means the master is stopped: only `0x51540000` after the host's own zero does;
 - that the run bit may stay set across a bridge reset or a core load;
 - that a warm reset is safe before `warmramgrp.enable` is cleared, or that it boots after;
 - that the top 4 KB (`0xF000`-`0xFFFF`) is the mailbox's: it is never read or written;
