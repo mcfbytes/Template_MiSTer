@@ -152,7 +152,7 @@ are built the proposal is:
 | status and `hps_io`'s flags | the EVT block here | no block memory already; the mailbox version exists for a core with no LW bridge |
 | the OSD image | the mailbox | OSDBUF's FIFO is two block memories; a mailbox row is 65 memory stores and publishes whole |
 | block reads | the mailbox | SECTOR's FIFO is block memory; a mailbox frame is whole by construction, and blocks may be queued ahead of the core's requests |
-| save-block writes | the DDR-image rule, on either path | the block's bytes stay in the image the core keeps; only the request and the ack cross, as records on the mailbox |
+| save slots | the SECTOR block here, or SPI | a save block must reach the core whole or not at all, which needs the block's FIFO; the mailbox has none |
 | link frames | either | the LANE block's FIFOs are block memory; the mailbox keeps the same player |
 
 The mailbox adds a second floor in logic, so it is not the smaller choice for a core whose only bulk function is the
