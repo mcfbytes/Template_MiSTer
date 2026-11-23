@@ -338,16 +338,16 @@ function [31:0] state_word(input [7:0] cnt, input fault, input mid);
 endfunction
 
 // The hello's stores, in their fixed order.
-function [31:0] hello_data(input [2:0] k);
+function [31:0] hello_data(input [2:0] k, input [31:0] state, input [31:0] echo);   // args only: Quartus drops a module-scope read
 	begin
 		case (k)
 		3'd0: hello_data = C_VERSION_1_0;
 		3'd1: hello_data = C_CAPS_EVT;
-		3'd2: hello_data = hj_state;
+		3'd2: hello_data = state;
 		3'd3: hello_data = 32'd0;
 		3'd4: hello_data = 32'd0;
 		3'd5: hello_data = C_RING3_EVT;
-		default: hello_data = echo_q;
+		default: hello_data = echo;
 		endcase
 	end
 endfunction
@@ -437,7 +437,7 @@ always @(*) begin
 			3'd5: t_off = C_RING3;
 			default: t_off = C_HELLO;
 			endcase
-			t_wdata = hello_data(hj_k);
+			t_wdata = hello_data(hj_k, hj_state, echo_q);
 		end
 		else if (sto_pend) begin
 			t_go = 1'b1; t_we = 1'b1; t_off = C_HELLO; t_wdata = sto_data;
