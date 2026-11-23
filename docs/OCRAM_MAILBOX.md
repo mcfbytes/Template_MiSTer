@@ -45,7 +45,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 |---|---|---|---|
 | `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, one GPI bit | - | 180-260 ALMs, no block memory |
 | `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer` | the floor | 60-80 ALMs |
-| `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames and acks for one `hps_io` slot and up to two save slots; their requests as records | the floor | 180-230 ALMs, 280-350 with two save slots |
+| `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor | 180-230 ALMs |
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
@@ -57,7 +57,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 
 | set | macros | for |
 |---|---|---|
-| LW pads, OCRAM bulk | `MISTER_LW`, `MISTER_LW_PAD`, `MISTER_LW_EVT`, `MISTER_OCRAM`, `MISTER_OCRAM_OSD`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT` | a core with a disc, or two bulk functions: pads keep the path proven on hardware, the blocks that cost block memory move |
+| LW pads, OCRAM bulk | `MISTER_LW`, `MISTER_LW_PAD`, `MISTER_LW_EVT`, `MISTER_OCRAM`, `MISTER_OCRAM_OSD`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT` and keeps its save slots on SPI | a core with a disc, or two bulk functions: pads keep the path proven on hardware, the blocks that cost block memory move |
 | lean, no LW bridge | `MISTER_OCRAM`, `MISTER_OCRAM_OSD`, `MISTER_OCRAM_EVT`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT`; pads stay on SPI or take `MISTER_OCRAM_PAD` | a core short of logic or block memory, or one that wants no bridge the HPS must be answered on |
 | LW only | the tiers of `docs/LW_BRIDGE.md` | a cartridge core; any core until the mailbox is proven |
 
@@ -125,22 +125,25 @@ descriptor, and its span is never read or written.
 
 ### The control page
 
-Each word has one writer. A host stores the fabric's half only to zero it, and only while the master is stopped
-("The rule that replaces the firewall").
+Each word has one writer. In a host of several threads, H_SECTOR and each H_IDX belong to the thread that serves
+that ring. A host stores the fabric's half only to zero it, and only while the master is stopped ("The rule that
+replaces the firewall").
 
 | offset | word | written by | content |
 |---|---|---|---|
 | `0x00` | H_HELLO | host | `{0x4F43, nonce[15:0]}`, the nonce never 0; 0 = no session. Stored last |
-| `0x04` | H_BIND | host | the functions the host takes from SPI: SECTOR slots `[2:0]`, EVT `[8]`, LANE `[9]`, PAD `[10]`, OSD `[11]` |
+| `0x04` | H_BIND | host | the functions the host takes from SPI for the whole session: EVT `[8]`, LANE `[9]`, PAD `[10]`, OSD `[11]` |
 | `0x08` | H_LINE | host | bit *r*: ring *r*'s interrupt line may rise |
+| `0x0C` | H_SECTOR | host | bit 0: the SECTOR slot is served here. It may change within a session ("Records") |
 | `0x10` + 4*r* | H_IDX[*r*] | host | its head of a host-to-core ring, its tail of a core-to-host ring |
 | `0x80` | C_HELLO | fabric | the master's state, below; in a session, the echo of H_HELLO, stored last |
 | `0x84` | C_VERSION | fabric | `{major, minor}` of the layout |
 | `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; the rest 0 |
 | `0x8C` | C_STATE | fabric | `[7:0]` hellos taken since configuration; `[12:8]` ring *r* is stopped on a fault; `[20:16]` ring *r* ended the session before this one mid-record |
 | `0x90` + 4*r* | C_IDX[*r*] | fabric | its tail of a host-to-core ring, its head of a core-to-host ring |
-| `0xB0` + 4*r* | C_RING[*r*] | fabric | `{kind[31:27], line ordinal[26:22], log2 words[21:18], 0[17:14], offset in words[13:0]}`; kind is *r* + 1; 0 = absent |
-| `0xD0`... | C_K[*n*] | fabric | per-kind constants: SECTOR slots and frame lengths, OSD rows |
+| `0xA4` | C_BIND | fabric | the binds in effect: H_BIND's bits, and bit 0 = the SECTOR slot's mux is on the mailbox side. Stored at every change; a bind or its drop has taken effect when this word shows it |
+| `0xB0` + 4*r* | C_RING[*r*] | fabric | `{kind[31:27], line ordinal[26:22], log2 words[21:18], 0[17:14], offset in words[13:0]}`; kind is the function's kind in the LW directory (PAD 1, SECTOR 2, OSD 3, EVT 4, LANE 5); 0 = absent |
+| `0xD0` + 4*n* | C_K[*n*], *n* 0-11 | fabric | `[0..7]` SECTOR: the SECTOR block's K0-K7 for its one slot, with K0's FIFO field 0 and K2 = 1. `[8]` OSD: OSDBUF's K0, `{rows, row bytes}`. `[9..11]` 0 |
 
 | C_HELLO | the master is | stored by |
 |---|---|---|
@@ -157,7 +160,8 @@ Each word has one writer. A host stores the fabric's half only to zero it, and o
 Map `0xFFFF0000`, 64 KB, **uncached and strongly ordered**: on ARMv7 Linux an `mmap` of `/dev/mem` over this range
 is exactly that, because the range is not kernel RAM. Each store is then one bus write that completes before the
 next begins; nothing merges, repeats or reorders; and no cache on either side holds a copy. There is nothing to
-flush and no barrier to issue. A cached or write-combined mapping is not legal.
+flush and no barrier to issue. A cached mapping is not legal. Nor is a write-combined one as this guide stands: its
+stores would need an ordering step before each publish that nobody has measured.
 
 ### Before the first store: the warm-boot rule
 
@@ -191,7 +195,7 @@ words.
    H_HELLO.
 5. Read C_HELLO until it equals H_HELLO, for at most 1 ms. No armed value or no echo: no mailbox this session; clear
    the run bit, take the stopped read of the rule below, and use the LW window or SPI. An echo: read the descriptors
-   and bind each function once.
+   and bind each function once. A bind is in effect when C_BIND shows it.
 
 **The session ends** when the master stops (the run bit falls, `gp_out[31]` falls for the ID view or the core reset
 through GPO, or the fabric sees an HPS reset), or when it reads an H_HELLO that is not the one it echoed: a 0 arms it
@@ -239,9 +243,8 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 |---|---|---|---|
 | OSD | `0x01` ROW, `arg` = row | 64 words: the row's 256 bytes | written into `osd_buffer` as the LW OSDBUF writer does, under the same guard |
 | SECTOR | `0x10` FRAME, `arg` = slot index | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
-| SECTOR | `0x11` ACK, `arg` = slot index | the LBA | answers a save slot's write with an ack pulse, after the host has copied the block |
 | EVT | `0x20` STATUS | four words | a status transfer landed, whole |
-| EVT | `0x21` REQUEST, `arg` = slot index, bit 7 = a write | the LBA | a bound slot's request opened and no queued frame answers it |
+| EVT | `0x21` REQUEST, `arg` = slot index | the LBA | the bound slot's request opened and no queued frame answers it |
 | EVT | `0x22` REPLY | reply words | the frame lane's captured replies |
 | EVT | `0x23` MARK, `arg` = ring | its deepest fill | a ring's high-water mark, for sizing |
 | EVT | `0x24` CONFSTR | the string, four bytes a word | the configuration string, once after the hello |
@@ -253,13 +256,19 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   atomic flip: a repaint is visible as it lands.
 - **Block frames** carry their slot and LBA. While no request stands, the frame at the ring's tail waits. When one
   stands, the fabric plays the tail frame if it answers it and discards it if it does not, and posts a REQUEST when
-  the ring holds no answer. A frame for a slot that is not bound is discarded. So a host may queue blocks ahead of
-  the core's requests, and a wrong guess costs only the stores. **A slot that is not bound is an SPI slot:** its
-  request shows in the SPI poll and the host answers it there, and a bind dropped while a frame plays zero-fills
-  that frame. So a host that changes what a slot holds drops the slot's bind, serves the slot over SPI while the
-  ring drains, and binds again; no request is left unanswered.
-- **Save-slot writes** keep the rule of `docs/LW_BRIDGE.md`: the core keeps the image in DDR, the host copies the
-  block for the request it was shown, then publishes the ACK.
+  the ring holds no answer. So a host may queue blocks ahead of the core's requests, and a wrong guess costs only
+  the stores.
+- **The block slot's handover is the SECTOR block's own.** The tier is a second feeder behind `sys/lw_blk_mux.sv`
+  and `hps_io`'s commit mark, which then build for either path. So the slot's mux moves only between requests, moves
+  to the mailbox side only while the commit mark reads 0, and one request is never shown on both paths
+  (`docs/LW_BRIDGE.md`, "One request, one path"). H_SECTOR bit 0 asks for the slot and C_BIND bit 0 is the mux:
+  publish frames only while it reads 1, and serve the slot over SPI, from GET_SDSTAT, while it reads 0.
+- **Changing what the slot holds** (a mount, a disc change): clear H_SECTOR's bit. A frame already playing
+  finishes, every frame behind it is discarded, and the mux returns to SPI at the slot's next idle point. Wait for
+  C_BIND, serve SPI meanwhile, then set the bit again. No stale frame survives and no request is left unanswered.
+- **Save slots are not carried.** A save slot's read must reach the core whole or not at all, which the SECTOR
+  block keeps by holding the frame in its FIFO; a consumer with no FIFO cannot withdraw a frame that the session's
+  end cuts short. Save slots stay on SPI, or on the SECTOR block of `docs/LW_BRIDGE.md` where that is built.
 
 ## What a host must not assume
 
@@ -273,6 +282,8 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 - that a warm reset is safe before `warmramgrp.enable` is cleared, or that it boots after;
 - that the top 4 KB (`0xF000`-`0xFFFF`) is the mailbox's: it is never read or written;
 - that the session survives an identification, a core reset through GPO, or an HPS reset;
+- that a bind is in effect because it was stored: C_BIND says when;
+- that a save slot can be served here;
 - that an index it does not write holds still, or that an index it writes is read at once: the fabric polls;
 - that an interrupt means the ring holds a record: one may arrive after the drain.
 
