@@ -1203,13 +1203,26 @@ wire [15:0] hdr_off  = TS_BASE + ((tail & (TS_WORDS - 1)) << 2);
 wire [15:0] pay1_off = TS_BASE + ((pay1_idx & (TS_WORDS - 1)) << 2);
 wire [15:0] pay2_off = TS_BASE + ((pay2_idx & (TS_WORDS - 1)) << 2);
 wire [15:0] head_gap = head_c - tail;
-wire [15:0] new_gap  = c_rdata[15:0] - tail;
-wire [16:0] hdr_words = {1'b0, c_rdata[15:0]} + 17'd1;
+wire [15:0] new_gap  = d_data_q[15:0] - tail;          // every decision is one cycle after the response
+wire [16:0] hdr_words = {1'b0, d_data_q[15:0]} + 17'd1;
 wire [16:0] gap_words = {1'b0, head_gap};
 wire [31:0] v_expect  = g ^ {g[15:0], g[31:16]} ^ 32'h9E37_79B9;
 
+// The consumer's read word is registered before any decision: the fpga2hps atom's rdata reaches d_data_q and
+// nothing else in the response cycle, so the header compare, the length arithmetic and the next offset sit on
+// registers. The state machine acts one cycle after c_done, on that copy; a test sink can afford the cycle.
+reg         d_v_q = 1'b0;              // a completion is held for this cycle
+reg         d_ok_q = 1'b0;
+reg  [31:0] d_data_q = 32'd0;
+
 always @(posedge clk) begin
 	fault_q <= 1'b0;
+	d_v_q   <= 1'b0;
+	if (c_done) begin
+		d_v_q    <= 1'b1;
+		d_ok_q   <= c_ok;
+		d_data_q <= c_rdata;
+	end
 
 	if (s_hello) begin
 		tst     <= T_IDLE;
@@ -1231,6 +1244,7 @@ always @(posedge clk) begin
 		skipped <= 16'd0;
 		deepest <= 16'd0;
 		pay_i   <= 16'd0;
+		d_v_q   <= 1'b0;               // a completion of the ending session is not acted on
 	end
 	else begin
 		if (s_tick) head_due <= 1'b1;
@@ -1255,8 +1269,8 @@ always @(posedge clk) begin
 		T_HEAD: begin
 			if (!s_live) begin req <= 1'b0; tst <= T_IDLE; end
 			else if (c_grant) req <= 1'b0;
-			else if (c_done) begin
-				if (!c_ok) req <= 1'b1;
+			else if (d_v_q) begin
+				if (!d_ok_q) req <= 1'b1;
 				else if (new_gap > TS_WORDS) begin
 					// a head more than the ring's size ahead: a host defect
 					fault_q   <= 1'b1;
@@ -1265,9 +1279,9 @@ always @(posedge clk) begin
 					tst       <= T_STOP;
 				end
 				else begin
-					head_c <= c_rdata[15:0];
+					head_c <= d_data_q[15:0];
 					if (new_gap > deepest) deepest <= new_gap;
-					if (c_rdata[15:0] == tail) tst <= T_IDLE;
+					if (d_data_q[15:0] == tail) tst <= T_IDLE;
 					else begin
 						req     <= 1'b1;
 						req_we  <= 1'b0;
@@ -1281,8 +1295,8 @@ always @(posedge clk) begin
 		T_HDR: begin
 			if (!s_live) begin req <= 1'b0; tst <= T_IDLE; end
 			else if (c_grant) req <= 1'b0;
-			else if (c_done) begin
-				if (!c_ok) begin
+			else if (d_v_q) begin
+				if (!d_ok_q) begin
 					req <= 1'b1;
 				end
 				else if (hdr_words > gap_words || hdr_words > {1'b0, TS_WORDS}) begin
@@ -1292,26 +1306,26 @@ always @(posedge clk) begin
 					mid_q     <= 1'b0;
 					tst       <= T_STOP;
 				end
-				else if (c_rdata[31:24] != 8'h50) begin
+				else if (d_data_q[31:24] != 8'h50) begin
 					// an unknown kind: skipped by its length, counted
 					skipped   <= skipped + 16'd1;
-					tail      <= tail + 16'd1 + c_rdata[15:0];
+					tail      <= tail + 16'd1 + d_data_q[15:0];
 					req       <= 1'b1;
 					req_we    <= 1'b1;
 					req_off   <= C_IDX4;
-					req_wdata <= {16'd0, tail + 16'd1 + c_rdata[15:0]};
+					req_wdata <= {16'd0, tail + 16'd1 + d_data_q[15:0]};
 					tseq      <= 1'b0;
 					tst       <= T_TAIL;
 				end
 				else begin
-					if (c_rdata[23:16] != exp_seq) errors <= errors + 32'd1;
+					if (d_data_q[23:16] != exp_seq) errors <= errors + 32'd1;
 					exp_seq <= exp_seq + 8'd1;
-					rec_len <= c_rdata[15:0];
+					rec_len <= d_data_q[15:0];
 					pay_i   <= 16'd0;
 					tseq    <= 1'b1;
 					req     <= 1'b1;
 					req_we  <= 1'b0;
-					if (c_rdata[15:0] == 16'd0) begin
+					if (d_data_q[15:0] == 16'd0) begin
 						// a TSEQ with no payload words: the header alone is the record
 						tail      <= tail + 16'd1;
 						req_we    <= 1'b1;
@@ -1329,17 +1343,17 @@ always @(posedge clk) begin
 		T_PAY: begin
 			if (!s_live) begin req <= 1'b0; tst <= T_IDLE; end
 			else if (c_grant) req <= 1'b0;
-			else if (c_done) begin
-				if (!c_ok) req <= 1'b1;
+			else if (d_v_q) begin
+				if (!d_ok_q) req <= 1'b1;
 				else if (!s_live) tst <= T_IDLE;
 				else begin
 					words <= words + 32'd1;
-					sum   <= sum + c_rdata;
-					if (c_rdata != v_expect) begin
+					sum   <= sum + d_data_q;
+					if (d_data_q != v_expect) begin
 						errors <= errors + 32'd1;
 						if (!got_bad) begin
 							first_g   <= g;
-							first_got <= c_rdata;
+							first_got <= d_data_q;
 							got_bad   <= 1'b1;
 						end
 					end
@@ -1372,8 +1386,8 @@ always @(posedge clk) begin
 				if (tseq) records <= records + 32'd1;
 				head_due <= 1'b1;
 			end
-			else if (c_done && !c_ok) req <= 1'b1;
-			else if (c_done) tst <= T_IDLE;
+			else if (d_v_q && !d_ok_q) req <= 1'b1;
+			else if (d_v_q) tst <= T_IDLE;
 		end
 		T_STOP: ;
 		default: tst <= T_IDLE;
