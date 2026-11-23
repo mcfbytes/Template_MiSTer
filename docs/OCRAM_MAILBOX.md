@@ -5,10 +5,12 @@ A proposed third path between the HPS and a core, beside the GPO/GPI ("SPI") lin
 **on-chip RAM** (OCRAM, physical `0xFFFF0000`), and the core fetches them as an AXI master on the Cyclone V
 **FPGA-to-HPS bridge**, whose atom `sys/` already instantiates with no port connected.
 
-**Status: the floor is built, for test cores only.** `MISTER_OCRAM` builds the bridge master, the run latch, the
-poller, the hello, the EVT ring's writer and its line; `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the
-latency counters and the GPO 27/26 test knobs (below). Nothing else in this document is built: no OSD, SECTOR,
-EVT, LANE or PAD tier, no consumer, no consumer handshake. No figure below is measured, and several facts the
+**Status: the floor and the OSD tier are built, for test cores only.** `MISTER_OCRAM` builds the bridge master,
+the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake;
+`MISTER_OCRAM_OSD` builds the OSD consumer, which writes the OSD ring's rows into every `osd`'s `osd_buffer`
+through the LW OSDBUF writer's port. `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters,
+the GPO 27/26 test knobs, the GPO 25 freeze knob and the host-to-fabric torture sink (below). Nothing else in
+this document is built: no SECTOR, EVT, LANE or PAD tier. No figure below is measured, and several facts the
 floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
 core and host authors can read both paths side by side and say which they would build.
 
@@ -47,7 +49,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | macro (proposed) | builds | needs | cost (ESTIMATED, by analogy with the fitted LW blocks less their FIFOs) |
 |---|---|---|---|
 | `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, the core-to-host ring's writer and its interrupt line, one GPI bit | - | 180-260 ALMs, no block memory |
-| `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer` | the floor | 60-80 ALMs |
+| `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor | 60-80 ALMs |
 | `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor | 180-230 ALMs |
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
@@ -77,6 +79,17 @@ counted, and every counter clears at each hello.
 Two GPO bits are test knobs, sampled at the run latch's set. **GPO 27 = 1 sets `AxPROT[1]` (non-secure) for that
 run.** **GPO 26 = 1 sets flood, so MARK records are posted back to back.** Neither is a protocol bit, and a
 shipping build (`MISTER_OCRAM` without `MISTER_OCRAM_DIAG`) ignores both.
+
+The same build carries the host-to-fabric torture sink: consumer port 1 walks the SECTOR span as a ring (r = 4,
+base `0x7000`, 8,192 words) in every session, with no bind, and checks each TSEQ record's payload word `g`
+against `g ^ {g[15:0], g[31:16]} ^ 0x9E3779B9` and each record's `seq` against its number since the hello. Its
+counters, and the OSD walker's finished-row count and deepest fill, fill a VERDICT record (`kind 0x25`, `arg` 4,
+8 payload words) posted on the MARK period right after each MARK; flood posts none. A ring fault is C_STATE bit
+12, a session cut mid-record bit 20.
+
+With `MISTER_OCRAM_OSD`, GPO 25 is a freeze knob that models a stopped `clk_sys`: while it is 1 the OSD writer
+latches a word but writes no byte, launches no done and reports not at rest, so a hello waits unechoed until it
+is cleared. Without `MISTER_OCRAM_DIAG` GPO 25 is never read.
 
 ## How it works
 
