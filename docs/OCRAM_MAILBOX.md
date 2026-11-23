@@ -265,22 +265,26 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   (`docs/LW_BRIDGE.md`, "One request, one path"). The rules are reused; `sys/lw_blk_mux.sv` and the commit mark as
   they stand are not, because both live on the 384-bit `HPS_BUS` that only `MISTER_LW` builds. The tier needs a
   plain-port mux with one feeder port per path, and the commit mark as a plain output under either path's block
-  macro. `lw_blk_mux` stays, as the LW wrapper around that mux, and `HPS_BUS[380]` and `[381]` still carry the mark
-  under `MISTER_LW`: no bus bit, port or hooking line of `docs/LW_BRIDGE.md` moves. With both paths' enables set
+  macro. `lw_blk_mux` stays, as the LW wrapper around that mux, and `HPS_BUS[380]` still carries the mark, and
+  `[381]` its presence, under `MISTER_LW`: no existing bus bit, port or hooking line of `docs/LW_BRIDGE.md` moves. With both paths' enables set
   the mux takes neither: the slot stays on SPI and the SECTOR ring's fault bit sets. A host binds one path for the
   slot, and never stores the SECTOR block's EN for a slot it serves here.
 - **H_SECTOR bit 0 asks for the slot, and C_BIND bit 0 says the mux is on the mailbox's feeder.** Publish frames
   only while H_SECTOR's bit is set, C_BIND's reads 1 and C_HELLO holds the echo; serve the slot over SPI, from
-  GET_SDSTAT, whenever they do not. The fabric stores C_BIND's bit before it posts the first REQUEST of that bind:
-  read C_BIND after the record, never before, and a record read always finds the bind that posted it.
+  GET_SDSTAT, whenever they do not.
+- **A REQUEST record belongs to one bind.** The fabric stores C_BIND's bit as 1 before it posts that bind's first
+  REQUEST, and a request that already stands when the mux arrives is that first record. It posts none after it has
+  stored the bit as 0. Read C_BIND after a record, never before. A record read while H_SECTOR's bit is clear is
+  void. **Drain the core-to-host ring after reading C_BIND = 0 and before setting the bit again,** so every record
+  of the bind that ended is read, and void, before the next bind can post one.
 - **Never wait on C_BIND:** read it on each pass and take the path it shows. Serving SPI is what clears the commit
   mark, so a set bit that has not taken effect costs slow blocks, never a stall. Before setting the bit, serve over
   SPI what the last GET_SDSTAT showed.
 - **Changing what the slot holds** (a mount, a disc change): clear H_SECTOR's bit. A frame already playing
   finishes, every frame behind it is discarded, and the mux returns to SPI at the slot's next idle point. A request
-  that stood on the mailbox then shows in the SPI poll, and its REQUEST record is void: with H_SECTOR's bit clear
-  the host answers none. Serve SPI, change the mount once C_BIND shows 0 or C_HELLO no longer holds the echo, then
-  set the bit again. No stale frame survives and no request is left unanswered.
+  that stood on the mailbox then shows in the SPI poll, and if it still stands at the next bind the fabric posts it
+  again. Serve SPI; once C_BIND shows 0 or C_HELLO no longer holds the echo, drain the core-to-host ring, change
+  the mount, then set the bit again. No stale frame survives and no request is left unanswered.
 - **Save slots are not carried.** A save slot's read must reach the core whole or not at all, which the SECTOR
   block keeps by holding the frame in its FIFO; a consumer with no FIFO cannot withdraw a frame that the session's
   end cuts short. Save slots stay on SPI, or on the SECTOR block of `docs/LW_BRIDGE.md` where that is built.

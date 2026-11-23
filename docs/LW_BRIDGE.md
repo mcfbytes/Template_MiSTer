@@ -142,9 +142,9 @@ instantiates with no port connected. The payload waits in the HPS's RAM, so its 
 the HPS never issues an access the fabric must answer. **It is a design: nothing in `sys/` builds it, and none of its
 macros exists.**
 
-It changes no interface in this document. If its block tier is built, `lw_blk_mux` becomes a wrapper around a
-plain-port mux that both paths feed, and `hps_io`'s commit mark gains a plain output beside `HPS_BUS[380]`; every
-bus bit, port and hooking line here stays as it is. The two paths are independent: either floor builds without the other, each
+It moves no interface in this document. If its block tier is built, `lw_blk_mux` becomes a wrapper around a
+plain-port mux that both paths feed, and `hps_io` gains one output, its commit mark beside `HPS_BUS[380]`; no
+existing bus bit, port or hooking line here moves. The two paths are independent: either floor builds without the other, each
 function has its own macro on each path, SPI stays under both, and a host binds one carrier per function. Where both
 are built the proposal is:
 
