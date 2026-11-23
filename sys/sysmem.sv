@@ -40,10 +40,58 @@ module sysmem_lite
 	input  [127:0] vbuf_writedata,
 	input   [15:0] vbuf_byteenable,
 	input          vbuf_write
+`ifdef MISTER_OCRAM
+	,
+	// the fpga2hps AXI3 master bundle (hps_ocram_master.sv), 32-bit data
+	input  wire  [7:0] awid,
+	input  wire [31:0] awaddr,
+	input  wire  [3:0] awlen,
+	input  wire  [2:0] awsize,
+	input  wire  [1:0] awburst,
+	input  wire  [1:0] awlock,
+	input  wire  [3:0] awcache,
+	input  wire  [2:0] awprot,
+	input  wire  [4:0] awuser,
+	input  wire        awvalid,
+	output wire        awready,
+	input  wire  [7:0] wid,
+	input  wire [31:0] wdata,
+	input  wire  [3:0] wstrb,
+	input  wire        wlast,
+	input  wire        wvalid,
+	output wire        wready,
+	output wire  [7:0] bid,
+	output wire  [1:0] bresp,
+	output wire        bvalid,
+	input  wire        bready,
+	input  wire  [7:0] arid,
+	input  wire [31:0] araddr,
+	input  wire  [3:0] arlen,
+	input  wire  [2:0] arsize,
+	input  wire  [1:0] arburst,
+	input  wire  [1:0] arlock,
+	input  wire  [3:0] arcache,
+	input  wire  [2:0] arprot,
+	input  wire  [4:0] aruser,
+	input  wire        arvalid,
+	output wire        arready,
+	output wire  [7:0] rid,
+	output wire [31:0] rdata,
+	output wire  [1:0] rresp,
+	output wire        rlast,
+	output wire        rvalid,
+	input  wire        rready
+`endif
 `ifdef MISTER_LW
 	,
-	// the HPS's fabric reset, for the LW firewall (hps_lw_bridge.sv)
+	// the HPS's fabric reset, for the LW firewall (hps_lw_bridge.sv) and the OCRAM master
 	output         hps_rst_n
+`else
+`ifdef MISTER_OCRAM
+	,
+	// the HPS's fabric reset, for the OCRAM master (hps_ocram_master.sv)
+	output         hps_rst_n
+`endif
 `endif
 );
 
@@ -225,11 +273,56 @@ sysmem_HPS_fpga_interfaces fpga_interfaces (
 	.f2h_sdram2_WRITEDATA     (f2h_ram2_writedata),
 	.f2h_sdram2_BYTEENABLE    (f2h_ram2_byteenable),
 	.f2h_sdram2_WRITE         (f2h_ram2_write)
+`ifdef MISTER_OCRAM
+	,
+	.awid(awid),
+	.awaddr(awaddr),
+	.awlen(awlen),
+	.awsize(awsize),
+	.awburst(awburst),
+	.awlock(awlock),
+	.awcache(awcache),
+	.awprot(awprot),
+	.awuser(awuser),
+	.awvalid(awvalid),
+	.awready(awready),
+	.wid(wid),
+	.wdata(wdata),
+	.wstrb(wstrb),
+	.wlast(wlast),
+	.wvalid(wvalid),
+	.wready(wready),
+	.bid(bid),
+	.bresp(bresp),
+	.bvalid(bvalid),
+	.bready(bready),
+	.arid(arid),
+	.araddr(araddr),
+	.arlen(arlen),
+	.arsize(arsize),
+	.arburst(arburst),
+	.arlock(arlock),
+	.arcache(arcache),
+	.arprot(arprot),
+	.aruser(aruser),
+	.arvalid(arvalid),
+	.arready(arready),
+	.rid(rid),
+	.rdata(rdata),
+	.rresp(rresp),
+	.rlast(rlast),
+	.rvalid(rvalid),
+	.rready(rready)
+`endif
 );
 
 wire hps_h2f_reset_n;
 `ifdef MISTER_LW
 assign hps_rst_n = hps_h2f_reset_n;
+`else
+`ifdef MISTER_OCRAM
+assign hps_rst_n = hps_h2f_reset_n;
+`endif
 `endif
 
 reg init_reset_n = 0;
@@ -301,6 +394,48 @@ module sysmem_HPS_fpga_interfaces
 
 	// f2h_sdram2_clock
 	,input wire [1 - 1 : 0 ] f2h_sdram2_clk
+
+`ifdef MISTER_OCRAM
+	// fpga2hps AXI3 master, 32-bit data (the OCRAM floor)
+	,input wire [8 - 1 : 0 ] awid
+	,input wire [32 - 1 : 0 ] awaddr
+	,input wire [4 - 1 : 0 ] awlen
+	,input wire [3 - 1 : 0 ] awsize
+	,input wire [2 - 1 : 0 ] awburst
+	,input wire [2 - 1 : 0 ] awlock
+	,input wire [4 - 1 : 0 ] awcache
+	,input wire [3 - 1 : 0 ] awprot
+	,input wire [5 - 1 : 0 ] awuser
+	,input wire [1 - 1 : 0 ] awvalid
+	,output wire [1 - 1 : 0 ] awready
+	,input wire [8 - 1 : 0 ] wid
+	,input wire [32 - 1 : 0 ] wdata
+	,input wire [4 - 1 : 0 ] wstrb
+	,input wire [1 - 1 : 0 ] wlast
+	,input wire [1 - 1 : 0 ] wvalid
+	,output wire [1 - 1 : 0 ] wready
+	,output wire [8 - 1 : 0 ] bid
+	,output wire [2 - 1 : 0 ] bresp
+	,output wire [1 - 1 : 0 ] bvalid
+	,input wire [1 - 1 : 0 ] bready
+	,input wire [8 - 1 : 0 ] arid
+	,input wire [32 - 1 : 0 ] araddr
+	,input wire [4 - 1 : 0 ] arlen
+	,input wire [3 - 1 : 0 ] arsize
+	,input wire [2 - 1 : 0 ] arburst
+	,input wire [2 - 1 : 0 ] arlock
+	,input wire [4 - 1 : 0 ] arcache
+	,input wire [3 - 1 : 0 ] arprot
+	,input wire [5 - 1 : 0 ] aruser
+	,input wire [1 - 1 : 0 ] arvalid
+	,output wire [1 - 1 : 0 ] arready
+	,output wire [8 - 1 : 0 ] rid
+	,output wire [32 - 1 : 0 ] rdata
+	,output wire [2 - 1 : 0 ] rresp
+	,output wire [1 - 1 : 0 ] rlast
+	,output wire [1 - 1 : 0 ] rvalid
+	,input wire [1 - 1 : 0 ] rready
+`endif
 );
 
 
@@ -396,11 +531,60 @@ cyclonev_hps_interface_boot_from_fpga boot_from_fpga(
 );
 
 
+`ifdef MISTER_OCRAM
+wire [128 - 1 : 0] f2h_rdata;
+
+cyclonev_hps_interface_fpga2hps fpga2hps(
+ .clk(h2f_user0_clk),
+ .awid(awid),
+ .awaddr(awaddr),
+ .awlen(awlen),
+ .awsize(awsize),
+ .awburst(awburst),
+ .awlock(awlock),
+ .awcache(awcache),
+ .awprot(awprot),
+ .awuser(awuser),
+ .awvalid(awvalid),
+ .awready(awready),
+ .wid(wid),
+ .wdata({{(128 - 32){1'b0}}, wdata}),
+ .wstrb({{(16 - 4){1'b0}}, wstrb}),
+ .wlast(wlast),
+ .wvalid(wvalid),
+ .wready(wready),
+ .bid(bid),
+ .bresp(bresp),
+ .bvalid(bvalid),
+ .bready(bready),
+ .arid(arid),
+ .araddr(araddr),
+ .arlen(arlen),
+ .arsize(arsize),
+ .arburst(arburst),
+ .arlock(arlock),
+ .arcache(arcache),
+ .arprot(arprot),
+ .aruser(aruser),
+ .arvalid(arvalid),
+ .arready(arready),
+ .rid(rid),
+ .rdata(f2h_rdata),
+ .rresp(rresp),
+ .rlast(rlast),
+ .rvalid(rvalid),
+ .rready(rready),
+ .port_size_config(2'b00)
+);
+
+assign rdata = f2h_rdata[32 - 1 : 0];
+`else
 cyclonev_hps_interface_fpga2hps fpga2hps(
  .port_size_config({
     2'b11 // 1:0
   })
 );
+`endif
 
 
 cyclonev_hps_interface_hps2fpga hps2fpga(

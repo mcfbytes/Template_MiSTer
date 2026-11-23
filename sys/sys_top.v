@@ -243,14 +243,26 @@ end
 
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
+`ifdef MISTER_OCRAM
+// gp_in[26] = 1 - the OCRAM floor is built and its master runs (hps_ocram_master.sv drives it)
+wire        ocram_present, ocram_line;
+`endif
 `ifdef MISTER_LW
 // gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it)
 // gp_in[24]     - the firewall holds no transaction (its idle register)
 // gp_in[22]     - the LW host enable is set (lw_sys_window's enable register)
 wire        lw_present, lw_idle, lw_held;
+`ifdef MISTER_OCRAM
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 1'b0, ocram_present, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`endif
+`else
+`ifdef MISTER_OCRAM
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 1'b0, ocram_present, 5'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
 `else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 7'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`endif
 `endif
 wire [31:0] gp_out;
 
@@ -622,9 +634,19 @@ wire        lw_osd_we;
 wire [12:0] lw_osd_addr;
 wire  [7:0] lw_osd_byte;
 `endif
+`ifdef MISTER_OCRAM
+// f2h_irq[11] = the OCRAM EVT ring's line, framework ordinal 4 (GIC SPI 51).
+wire [63:0] f2h_irq = {52'd0, ocram_line, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
+`else
 wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
+`endif
+`else
+`ifdef MISTER_OCRAM
+// f2h_irq[11] = the OCRAM EVT ring's line, framework ordinal 4 (GIC SPI 51).
+wire [63:0] f2h_irq = {52'd0, ocram_line, 9'd0, video_sync, HDMI_TX_VS};
 `else
 wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
+`endif
 `endif
 cyclonev_hps_interface_interrupts interrupts
 (
@@ -656,13 +678,72 @@ end
 wire reset;
 wire clk_100m;
 `ifdef MISTER_LW
-wire lw_hps_rst_n;     // the HPS's fabric reset, to the LW firewall
+wire lw_hps_rst_n;     // the HPS's fabric reset, to the LW firewall and the OCRAM master
+`else
+`ifdef MISTER_OCRAM
+wire ocram_hps_rst_n;  // the HPS's fabric reset, to the OCRAM master
+`endif
+`endif
+`ifdef MISTER_OCRAM
+// The fpga2hps AXI3 master bundle between hps_ocram_master and sysmem (32-bit data).
+wire  [7:0] ocram_awid, ocram_wid, ocram_bid, ocram_arid, ocram_rid;
+wire [31:0] ocram_awaddr, ocram_wdata, ocram_araddr, ocram_rdata;
+wire  [3:0] ocram_awlen, ocram_awcache, ocram_wstrb, ocram_arlen, ocram_arcache;
+wire  [2:0] ocram_awsize, ocram_awprot, ocram_arsize, ocram_arprot;
+wire  [1:0] ocram_awburst, ocram_awlock, ocram_bresp, ocram_arburst, ocram_arlock, ocram_rresp;
+wire  [4:0] ocram_awuser, ocram_aruser;
+wire        ocram_awvalid, ocram_awready, ocram_wlast, ocram_wvalid, ocram_wready;
+wire        ocram_bvalid, ocram_bready, ocram_arvalid, ocram_arready, ocram_rlast, ocram_rvalid, ocram_rready;
 `endif
 
 sysmem_lite sysmem
 (
 `ifdef MISTER_LW
 	.hps_rst_n(lw_hps_rst_n),
+`else
+`ifdef MISTER_OCRAM
+	.hps_rst_n(ocram_hps_rst_n),
+`endif
+`endif
+`ifdef MISTER_OCRAM
+	.awid(ocram_awid),
+	.awaddr(ocram_awaddr),
+	.awlen(ocram_awlen),
+	.awsize(ocram_awsize),
+	.awburst(ocram_awburst),
+	.awlock(ocram_awlock),
+	.awcache(ocram_awcache),
+	.awprot(ocram_awprot),
+	.awuser(ocram_awuser),
+	.awvalid(ocram_awvalid),
+	.awready(ocram_awready),
+	.wid(ocram_wid),
+	.wdata(ocram_wdata),
+	.wstrb(ocram_wstrb),
+	.wlast(ocram_wlast),
+	.wvalid(ocram_wvalid),
+	.wready(ocram_wready),
+	.bid(ocram_bid),
+	.bresp(ocram_bresp),
+	.bvalid(ocram_bvalid),
+	.bready(ocram_bready),
+	.arid(ocram_arid),
+	.araddr(ocram_araddr),
+	.arlen(ocram_arlen),
+	.arsize(ocram_arsize),
+	.arburst(ocram_arburst),
+	.arlock(ocram_arlock),
+	.arcache(ocram_arcache),
+	.arprot(ocram_arprot),
+	.aruser(ocram_aruser),
+	.arvalid(ocram_arvalid),
+	.arready(ocram_arready),
+	.rid(ocram_rid),
+	.rdata(ocram_rdata),
+	.rresp(ocram_rresp),
+	.rlast(ocram_rlast),
+	.rvalid(ocram_rvalid),
+	.rready(ocram_rready),
 `endif
 	//Reset/Clock
 	.reset_core_req(reset_req),
@@ -709,6 +790,62 @@ sysmem_lite sysmem
 	.vbuf_readdatavalid(vbuf_readdatavalid),
 	.vbuf_read(vbuf_read)
 );
+
+`ifdef MISTER_OCRAM
+// The OCRAM mailbox floor: the fpga2hps bridge's AXI3 master (docs/OCRAM_MAILBOX.md).
+hps_ocram_master ocram_master
+(
+	.clk(clk_100m),
+`ifdef MISTER_LW
+	.hps_rst_n(lw_hps_rst_n),
+`else
+	.hps_rst_n(ocram_hps_rst_n),
+`endif
+	.gp_out(gp_out),
+
+	.present(ocram_present),
+	.line(ocram_line),
+
+	.awid(ocram_awid),
+	.awaddr(ocram_awaddr),
+	.awlen(ocram_awlen),
+	.awsize(ocram_awsize),
+	.awburst(ocram_awburst),
+	.awlock(ocram_awlock),
+	.awcache(ocram_awcache),
+	.awprot(ocram_awprot),
+	.awuser(ocram_awuser),
+	.awvalid(ocram_awvalid),
+	.awready(ocram_awready),
+	.wid(ocram_wid),
+	.wdata(ocram_wdata),
+	.wstrb(ocram_wstrb),
+	.wlast(ocram_wlast),
+	.wvalid(ocram_wvalid),
+	.wready(ocram_wready),
+	.bid(ocram_bid),
+	.bresp(ocram_bresp),
+	.bvalid(ocram_bvalid),
+	.bready(ocram_bready),
+	.arid(ocram_arid),
+	.araddr(ocram_araddr),
+	.arlen(ocram_arlen),
+	.arsize(ocram_arsize),
+	.arburst(ocram_arburst),
+	.arlock(ocram_arlock),
+	.arcache(ocram_arcache),
+	.arprot(ocram_arprot),
+	.aruser(ocram_aruser),
+	.arvalid(ocram_arvalid),
+	.arready(ocram_arready),
+	.rid(ocram_rid),
+	.rdata(ocram_rdata),
+	.rresp(ocram_rresp),
+	.rlast(ocram_rlast),
+	.rvalid(ocram_rvalid),
+	.rready(ocram_rready)
+);
+`endif
 
 wire [28:0] ram2_address;
 wire  [7:0] ram2_burstcount;

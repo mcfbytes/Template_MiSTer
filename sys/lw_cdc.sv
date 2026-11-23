@@ -15,11 +15,23 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
+// The crossing cells serve either floor. The derived macro is local to this file and undefined at its end, so
+// a build of neither floor still finds no macro left defined.
 `ifdef MISTER_LW
+`define LW_CDC_BUILT
+`endif
+`ifdef MISTER_OCRAM
+`define LW_CDC_BUILT
+`endif
+
+`ifdef LW_CDC_BUILT
 `default_nettype none
 `ifdef LW_TB_CDC
 `timescale 1ns/1ps
 `endif
+
+/* verilator lint_off DECLFILENAME */   // the crossing cells share this file, as the LW framework lays them out
+/* verilator lint_off UNUSEDPARAM */    // GRAY selects the cell's delay model, built only with LW_TB_CDC
 
 // The clock-crossing cells. Every register of a crossing between clk_100m and a core clock lives in this
 // file; a block instantiates these cells and declares no synchroniser of its own (tb/static.sh holds it).
@@ -339,5 +351,8 @@ end
 
 endmodule
 
+/* verilator lint_on UNUSEDPARAM */
+/* verilator lint_on DECLFILENAME */
 `default_nettype wire
 `endif
+`undef LW_CDC_BUILT
