@@ -134,6 +134,29 @@ failing path inside the scaler (`ascal` to `ascal`), and the bridge clock had 2.
 inside the PAD drain. That build with `MISTER_LW` off gave an rbf bit-identical to upstream's. The frame lane
 without reply capture, measured on a larger core, took 165-177 ALMs plus 6-7 for `lw_link`, and 2 M10K.
 
+### Beside the window: the OCRAM mailbox (proposed)
+
+`docs/OCRAM_MAILBOX.md` proposes a third carrier for bulk data, beside SPI and this window. The HPS writes records
+into its own 64 KB on-chip RAM, and the core fetches them as a master on the FPGA-to-HPS bridge, which `sys/` already
+instantiates and leaves unused. The payload waits in the HPS's RAM, so its tiers cost logic and no block memory, and
+the HPS never issues an access the fabric must answer. **It is a design: nothing in `sys/` builds it, and none of its
+macros exists.**
+
+It changes nothing in this document. The two paths are independent: either floor builds without the other, each
+function has its own macro on each path, SPI stays under both, and a host binds one carrier per function. Where both
+are built the proposal is:
+
+| function | carrier proposed | why |
+|---|---|---|
+| pads | the PAD block here | one store per change, proven on hardware; a mailbox pad arrives one poll period late |
+| status and `hps_io`'s flags | the EVT block here | no block memory already; the mailbox version exists for a core with no LW bridge |
+| the OSD image | the mailbox | OSDBUF's FIFO is two block memories; a mailbox row is 65 memory stores and publishes whole |
+| block reads and save blocks | the mailbox | SECTOR's FIFO is the largest block-memory cost here; a mailbox frame is whole by construction, and a save-block write carries its own bytes |
+| link frames | either | the LANE block's FIFOs are block memory; the mailbox keeps the same player |
+
+The mailbox adds a second floor in logic, so it is not the smaller choice for a core whose only bulk function is the
+OSD. Its guide has the menu, the cost estimates and the list of what is still unverified.
+
 ## Discovery and safety
 
 An LW access the fabric does not answer **hangs the SoC**. Nothing here is probed, so the HPS must know the
