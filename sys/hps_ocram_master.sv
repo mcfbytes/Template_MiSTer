@@ -368,6 +368,7 @@ reg         mark_due_q = 1'b0;
 reg  [MARKW-1:0] mark_t = {MARKW{1'b0}};
 wire [15:0] wait_now = head_q - tail_q;
 wire [31:0] mark_word;
+wire        snap_ready;
 `endif
 
 // The read the poll (or the boot, or the line) wants next.
@@ -443,13 +444,18 @@ always @(*) begin
 		end
 `ifdef MISTER_OCRAM_DIAG
 		else if (rec_act) begin
-			t_go = 1'b1; t_we = 1'b1;
-			if (rec_k == 6'd41) begin
-				t_off = C_IDX3; t_wdata = {16'd0, head_q + 16'd41}; t_counted = 1'b1;
+			if (rec_k == 6'd1 && !snap_ready) begin
+				// the header may go first; payload word 1 reads a snapshot still draining older transactions
 			end
 			else begin
-				t_off = evt_off; t_wdata = (rec_k == 6'd0) ? MARK_HEADER : mark_word;
-				t_counted = 1'b0;
+				t_go = 1'b1; t_we = 1'b1;
+				if (rec_k == 6'd41) begin
+					t_off = C_IDX3; t_wdata = {16'd0, head_q + 16'd41}; t_counted = 1'b1;
+				end
+				else begin
+					t_off = evt_off; t_wdata = (rec_k == 6'd0) ? MARK_HEADER : mark_word;
+					t_counted = 1'b0;
+				end
 			end
 		end
 		else if (mark_ok) begin
@@ -461,8 +467,6 @@ end
 
 `ifdef MISTER_OCRAM_DIAG
 wire mark_start = t_go & t_we & mark_ok & ~rec_act;
-reg  mark_start_q = 1'b0;
-always @(posedge clk) mark_start_q <= mark_start;
 
 // The hello starts the session's counters; a MARK record restarts its period. The period counter marks the
 // period due once and holds it until the record begins.
@@ -724,7 +728,8 @@ hps_ocram_diag diag
 (
 	.clk        (clk),
 	.clr        (diag_clr),
-	.mark_start (mark_start_q),
+	.mark_start (mark_start),
+	.snap_ready (snap_ready),
 	.mark_i     (rec_k - 6'd1),
 	.mark_word  (mark_word),
 	.counted    (counted_q),
@@ -750,20 +755,29 @@ endmodule
 //============================================================================
 //  hps_ocram_diag -- the MARK record's counters (MISTER_OCRAM_DIAG only)
 //
-//  Every counted transaction's latency, from the cycle its ARVALID/AWVALID first rose to the cycle of its R/B
-//  handshake; the counts, sums, min/max (16-bit, saturating), error counts (16-bit, saturating) and the two
-//  32-bit histograms. A MARK record's own header and payload writes are not counted; every other transaction
-//  is. The snapshot is taken when the record begins, so one record's 40 words are one consistent view without
-//  the counters moving under it. All counters clear at each hello. Every array is logic (no block memory), and
-//  each histogram has one adder and one read mux with a decoded write enable.
+//  A counted transaction's latency is timed by a per-direction counter that starts at its address handshake
+//  and advances one a clk, so no 32-bit subtract sits in front of the histogram logic. The accounting is
+//  pipelined in three registered stages, one transaction in each:
+//    A  the R/B handshake's edge: the latency, the error flag, the direction, and a tag saying whether the
+//       transaction handed off at or before the snapshot request;
+//    B  the next edge: the latency's histogram bin, its 16-bit saturated form, and the flags;
+//    C  the next edge: every counter of that transaction together -- count, sum, min, max, errors and its
+//       histogram bin -- so a snapshot never holds half a transaction.
+//  The snapshot is requested by the MARK record's start; it completes when A and B hold no transaction tagged
+//  older than the request, so it has every counted handshake at or before the request's edge and none after.
+//  snap_ready then lets the master send the record's first payload word. A hello empties the pipeline and the
+//  counters; an HPS reset drops only the transaction it orphaned.
+//  Every array is logic (no block memory), and each histogram has one adder and one read mux with a decoded
+//  write enable.
 //============================================================================
 
 /* verilator lint_off DECLFILENAME */   // the sheet keeps the counters in this file so the fit reports their ALMs apart
 module hps_ocram_diag
 (
 	input  wire        clk,
-	input  wire        clr,          // a hello: clear every counter
-	input  wire        mark_start,   // a MARK record begins: snapshot
+	input  wire        clr,          // a hello: clear every counter and empty the pipeline
+	input  wire        mark_start,   // a MARK record begins at this edge: request the snapshot
+	output reg         snap_ready,   // the snapshot is complete; payload word 1 may be sent
 	input  wire  [5:0] mark_i,       // payload word 0-39
 	output reg  [31:0] mark_word,
 
@@ -784,8 +798,10 @@ module hps_ocram_diag
 	input  wire  [7:0] hello_cnt
 );
 
-reg [31:0] cyc = 32'd0;
-always @(posedge clk) cyc <= cyc + 32'd1;
+// The latency: one more each clk from the address handshake's cycle; the handshake cycle's value is the
+// number of edges between ARVALID's/AWVALID's first rise and the R/B handshake, as before.
+reg [31:0] w_age = 32'd0, r_age = 32'd0;
+reg        w_meas = 1'b0, r_meas = 1'b0;
 
 reg aw_d = 1'b0, ar_d = 1'b0;
 wire aw_rise = awvalid & ~aw_d;
@@ -794,11 +810,17 @@ always @(posedge clk) begin aw_d <= awvalid; ar_d <= arvalid; end
 
 wire b_fire = bvalid & bready;
 wire r_fire = rvalid & rready;
+wire w_cap = b_fire & w_meas;
+wire r_cap = r_fire & r_meas;
 
-reg        w_meas = 1'b0, r_meas = 1'b0;
-reg [31:0] w_start = 32'd0, r_start = 32'd0;
-wire [31:0] w_lat = cyc - w_start;
-wire [31:0] r_lat = cyc - r_start;
+// stage A registers
+reg        a_v = 1'b0, a_we = 1'b0, a_err = 1'b0, a_old = 1'b1;
+reg [31:0] a_lat = 32'd0;
+// stage B registers
+reg        b_v = 1'b0, b_we = 1'b0, b_err = 1'b0, b_old = 1'b1;
+reg [31:0] b_lat = 32'd0;
+reg [15:0] b_lat16 = 16'd0;
+reg  [3:0] b_bin = 4'd0;
 
 // counts, sums, extrema and errors
 reg [31:0] rd_n = 32'd0, wr_n = 32'd0;
@@ -808,31 +830,37 @@ reg [15:0] rd_err = 16'd0, wr_err = 16'd0;
 
 (* ramstyle = "logic" *) reg [31:0] rd_hist [0:15];
 (* ramstyle = "logic" *) reg [31:0] wr_hist [0:15];
+// The snapshot a MARK record reads, word by word: word 0 carries the ring's deepest fill, the DIAG knobs and
+// C_STATE's hello count; words 1-7 the counters; 8-23 and 24-39 the two histograms.
+(* ramstyle = "logic" *) reg [31:0] snap [0:39];
 
 // bins (cycles): 0-7, 8-15, ... 56-63, 64-127, 128-255, 256-511, 512-1023, 1024-2047, 2048-4095,
-// 4096-65535, 65536 and more
+// 4096-65535, 65536 and more. Each boundary is a power of two, so the decode is bit tests, not compares.
+/* verilator lint_off UNUSEDSIGNAL */   // bins 0-7 are 8 cycles wide, so bits [2:0] select nothing
 function [3:0] bin_of(input [31:0] lat);
 	begin
-		if (lat < 32'd64)         bin_of = {1'b0, lat[5:3]};
-		else if (lat < 32'd128)   bin_of = 4'd8;
-		else if (lat < 32'd256)   bin_of = 4'd9;
-		else if (lat < 32'd512)   bin_of = 4'd10;
-		else if (lat < 32'd1024)  bin_of = 4'd11;
-		else if (lat < 32'd2048)  bin_of = 4'd12;
-		else if (lat < 32'd4096)  bin_of = 4'd13;
-		else if (lat < 32'd65536) bin_of = 4'd14;
-		else                      bin_of = 4'd15;
+		if (|lat[31:17] || lat[16]) bin_of = 4'd15;
+		else if (|lat[15:12])       bin_of = 4'd14;
+		else if (lat[11])           bin_of = 4'd13;
+		else if (lat[10])           bin_of = 4'd12;
+		else if (lat[9])            bin_of = 4'd11;
+		else if (lat[8])            bin_of = 4'd10;
+		else if (lat[7])            bin_of = 4'd9;
+		else if (lat[6])            bin_of = 4'd8;
+		else                        bin_of = {1'b0, lat[5:3]};
 	end
 endfunction
+/* verilator lint_on UNUSEDSIGNAL */
 
-wire [3:0]  w_bin = bin_of(w_lat);
-wire [3:0]  r_bin = bin_of(r_lat);
-wire [15:0] w_lat16 = (w_lat > 32'h0000_FFFF) ? 16'hFFFF : w_lat[15:0];
-wire [15:0] r_lat16 = (r_lat > 32'h0000_FFFF) ? 16'hFFFF : r_lat[15:0];
-wire [31:0] w_inc = wr_hist[w_bin] + 32'd1;
-wire [31:0] r_inc = rd_hist[r_bin] + 32'd1;
-wire        w_add = b_fire & w_meas;
-wire        r_add = r_fire & r_meas;
+function [15:0] sat16(input [31:0] lat);
+	sat16 = (|lat[31:16]) ? 16'hFFFF : lat[15:0];
+endfunction
+
+wire [31:0] w_inc = wr_hist[b_bin] + 32'd1;
+wire [31:0] r_inc = rd_hist[b_bin] + 32'd1;
+
+// the snapshot request; snap_ready is its completion level
+reg snap_req = 1'b0;
 
 integer hi;
 always @(posedge clk) begin
@@ -845,51 +873,79 @@ always @(posedge clk) begin
 			rd_hist[hi] <= 32'd0;
 			wr_hist[hi] <= 32'd0;
 		end
+		a_v <= 1'b0; b_v <= 1'b0;
 		w_meas <= 1'b0; r_meas <= 1'b0;
+		snap_req <= 1'b0; snap_ready <= 1'b0;
 	end
 	else begin
-		if (aw_rise && counted) begin w_meas <= 1'b1; w_start <= cyc; end
-		if (ar_rise && counted) begin r_meas <= 1'b1; r_start <= cyc; end
-		if (drop) begin w_meas <= 1'b0; r_meas <= 1'b0; end
-		if (w_add) begin
-			w_meas  <= 1'b0;
-			wr_n    <= wr_n + 32'd1;
-			wr_sum  <= wr_sum + w_lat;
-			if (w_lat16 > wr_max) wr_max <= w_lat16;
-			if (w_lat16 < wr_min) wr_min <= w_lat16;
-			if ((bresp != 2'b00) && (wr_err != 16'hFFFF)) wr_err <= wr_err + 16'd1;
+		// stage C: all of B's counters land at this edge
+		if (b_v && b_we) begin
+			wr_n   <= wr_n + 32'd1;
+			wr_sum <= wr_sum + b_lat;
+			if (b_lat16 > wr_max) wr_max <= b_lat16;
+			if (b_lat16 < wr_min) wr_min <= b_lat16;
+			if (b_err && (wr_err != 16'hFFFF)) wr_err <= wr_err + 16'd1;
 			for (hi = 0; hi < 16; hi = hi + 1)
-				if (w_bin == hi[3:0]) wr_hist[hi] <= w_inc;
+				if (b_bin == hi[3:0]) wr_hist[hi] <= w_inc;
 		end
-		if (r_add) begin
-			r_meas  <= 1'b0;
-			rd_n    <= rd_n + 32'd1;
-			rd_sum  <= rd_sum + r_lat;
-			if (r_lat16 > rd_max) rd_max <= r_lat16;
-			if (r_lat16 < rd_min) rd_min <= r_lat16;
-			if ((rresp != 2'b00) && (rd_err != 16'hFFFF)) rd_err <= rd_err + 16'd1;
+		else if (b_v) begin
+			rd_n   <= rd_n + 32'd1;
+			rd_sum <= rd_sum + b_lat;
+			if (b_lat16 > rd_max) rd_max <= b_lat16;
+			if (b_lat16 < rd_min) rd_min <= b_lat16;
+			if (b_err && (rd_err != 16'hFFFF)) rd_err <= rd_err + 16'd1;
 			for (hi = 0; hi < 16; hi = hi + 1)
-				if (r_bin == hi[3:0]) rd_hist[hi] <= r_inc;
+				if (b_bin == hi[3:0]) rd_hist[hi] <= r_inc;
 		end
-	end
-end
 
-// The snapshot a MARK record reads, word by word: word 0 carries the ring's deepest fill, the DIAG knobs and
-// C_STATE's hello count; words 1-7 the counters; 8-23 and 24-39 the two histograms.
-(* ramstyle = "logic" *) reg [31:0] snap [0:39];
-integer si;
-always @(posedge clk) if (mark_start) begin
-	snap[0] <= {hello_cnt, 6'd0, flood, ns, deepest};
-	snap[1] <= rd_n;
-	snap[2] <= wr_n;
-	snap[3] <= {rd_max, rd_min};
-	snap[4] <= {wr_max, wr_min};
-	snap[5] <= rd_sum;
-	snap[6] <= wr_sum;
-	snap[7] <= {rd_err, wr_err};
-	for (si = 0; si < 16; si = si + 1) begin
-		snap[8  + si] <= rd_hist[si];
-		snap[24 + si] <= wr_hist[si];
+		// stage B: the bin, the saturated latency and the flags
+		b_v     <= a_v;
+		b_we    <= a_we;
+		b_lat   <= a_lat;
+		b_lat16 <= sat16(a_lat);
+		b_bin   <= bin_of(a_lat);
+		b_err   <= a_err;
+		b_old   <= a_old;
+
+		// stage A: the handshake, and the latency counters that feed it
+		a_v <= 1'b0;
+		if (w_cap) begin
+			a_v <= 1'b1; a_we <= 1'b1; a_lat <= w_age; a_err <= (bresp != 2'b00); a_old <= ~snap_req;
+			w_meas <= 1'b0;
+		end
+		else if (aw_rise && counted) begin
+			w_meas <= 1'b1; w_age <= 32'd1;
+		end
+		else if (w_meas) w_age <= w_age + 32'd1;
+		if (r_cap) begin
+			a_v <= 1'b1; a_we <= 1'b0; a_lat <= r_age; a_err <= (rresp != 2'b00); a_old <= ~snap_req;
+			r_meas <= 1'b0;
+		end
+		else if (ar_rise && counted) begin
+			r_meas <= 1'b1; r_age <= 32'd1;
+		end
+		else if (r_meas) r_age <= r_age + 32'd1;
+		if (drop) begin w_meas <= 1'b0; r_meas <= 1'b0; end
+
+		// the snapshot: requested at the record's start, taken once no older transaction is in A or B. A
+		// transaction that hands off at the request's own edge is in A by the next, so this edge cannot take it.
+		if (mark_start) begin snap_req <= 1'b1; snap_ready <= 1'b0; end
+		if (snap_req && !((a_v && a_old) || (b_v && b_old))) begin
+			snap[0] <= {hello_cnt, 6'd0, flood, ns, deepest};
+			snap[1] <= rd_n;
+			snap[2] <= wr_n;
+			snap[3] <= {rd_max, rd_min};
+			snap[4] <= {wr_max, wr_min};
+			snap[5] <= rd_sum;
+			snap[6] <= wr_sum;
+			snap[7] <= {rd_err, wr_err};
+			for (hi = 0; hi < 16; hi = hi + 1) begin
+				snap[8  + hi] <= rd_hist[hi];
+				snap[24 + hi] <= wr_hist[hi];
+			end
+			snap_req <= 1'b0;
+			snap_ready <= 1'b1;
+		end
 	end
 end
 
