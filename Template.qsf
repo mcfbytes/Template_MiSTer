@@ -108,6 +108,14 @@ set_global_assignment -name SEED 1
 # LW OSD image stores, written through each osd's own osd_buffer port (docs/LW_BRIDGE.md, "OSDBUF block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
 
+# OCRAM mailbox floor (docs/OCRAM_MAILBOX.md): the HPS on-chip-RAM AXI master, its hello, its EVT ring and line.
+# Off by default, and it needs no other macro.
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM=1"
+# Test-core diagnostics: MARK records, the latency counters and the GPO 27/26 knobs (test cores only).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_DIAG=1"
+# Idle poll period as a power of two clk_100m cycles (default 12: 41 us).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_POLL=12"
+
 source sys/sys.tcl
 source sys/sys_analog.tcl
 source files.qip
