@@ -55,6 +55,8 @@ UP, O = sys.argv[1], sys.argv[2]
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
         'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE', 'lw_osd.sv': 'MISTER_LW_OSD'}
+# the OCRAM tiers: the floor's macro instead of MISTER_LW
+OTIER = {'hps_ocram_osd.sv': 'MISTER_OCRAM_OSD'}
 checks = fails = 0
 
 def check(ok, what):
@@ -185,6 +187,9 @@ for x in lw:
     runs = [(label, defs) for label, defs in sets]
     if x in TIER:
         runs += [('MISTER_LW without ' + TIER[x] + ', ' + label, ['MISTER_LW'] + defs) for label, defs in sets]
+    if x in OTIER:
+        runs += [('MISTER_OCRAM without ' + OTIER[x] + ', ' + label, ['MISTER_OCRAM'] + defs)
+                 for label, defs in sets]
     for label, defs in runs:
         t, e = pp(f, defs)
         if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
@@ -205,6 +210,10 @@ for x in lw:
         head = ['`ifdef', 'MISTER_OCRAM', '`default_nettype', 'none']
         tail = ['`default_nettype', 'wire', '`endif', '`undef', 'MISTER_OCRAM_MARK',
                 '`undef', 'MISTER_OCRAM_POLL']
+        scan = True
+    elif x in OTIER:
+        head = ['`ifdef', 'MISTER_OCRAM', '`ifdef', OTIER[x], '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`endif']
         scan = True
     else:
         head = ['`ifdef', 'MISTER_LW'] + (['`ifdef', TIER[x]] if x in TIER else []) + ['`default_nettype', 'none']

@@ -458,6 +458,31 @@ initial begin
 	release dut.lw_sys_window.osd_we; release dut.lw_sys_window.osd_addr; release dut.lw_sys_window.osd_byte;
 `endif
 
+`ifdef MISTER_OCRAM_OSD
+	$display("-- osd: the OCRAM writer's bytes reach each osd, and the mux takes the LW writer when it is quiet");
+	force dut.ocram_osd.we = 1'b1;
+	force dut.ocram_osd.addr = 13'h0A5A;
+	force dut.ocram_osd.dbyte = 8'hC3;
+	#1;
+	check("vga_osd {lw_we, lw_addr, lw_byte} from the OCRAM writer",
+	      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte}, {1'b1, 13'h0A5A, 8'hC3});
+`ifndef MISTER_DEBUG_NOHDMI
+	check("hdmi_osd {lw_we, lw_addr, lw_byte} from the OCRAM writer",
+	      {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_byte}, {1'b1, 13'h0A5A, 8'hC3});
+`endif
+	force dut.ocram_osd.we = 1'b0; #1;
+`ifdef LW_OSD_PORTS
+	force dut.lw_sys_window.osd_we = 1'b1;
+	force dut.lw_sys_window.osd_addr = 13'h15A5;
+	force dut.lw_sys_window.osd_byte = 8'h3C;
+	#1;
+	check("the mux takes the LW writer while the OCRAM writer is quiet",
+	      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte}, {1'b1, 13'h15A5, 8'h3C});
+	release dut.lw_sys_window.osd_we; release dut.lw_sys_window.osd_addr; release dut.lw_sys_window.osd_byte;
+`endif
+	release dut.ocram_osd.we; release dut.ocram_osd.addr; release dut.ocram_osd.dbyte;
+`endif
+
 	$display("-- the link: selects, data and acknowledge as the stock decode makes them");
 	for (i = 0; i < 8; i = i + 1) begin
 		ss = i[2:0];
