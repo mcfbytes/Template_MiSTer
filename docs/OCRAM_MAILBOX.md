@@ -43,7 +43,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 
 | macro (proposed) | builds | needs | cost (ESTIMATED, by analogy with the fitted LW blocks less their FIFOs) |
 |---|---|---|---|
-| `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, one GPI bit | - | 180-260 ALMs, no block memory |
+| `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, the core-to-host ring's writer and its interrupt line, one GPI bit | - | 180-260 ALMs, no block memory |
 | `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer` | the floor | 60-80 ALMs |
 | `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor | 180-230 ALMs |
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
@@ -84,7 +84,7 @@ drives it.
 - **When the run bit or `gp_out[31]` clears the latch** it completes the transaction in flight, stores C_HELLO =
   `0x51540000` as its one last transaction, and issues nothing more until the next rising edge of the run bit.
 - **One arbiter, fixed order:** that last store; an interrupt line's tail re-read and the poll when due; the
-  core-to-host ring's words; then the consumers, round robin.
+  core-to-host ring's words and the fabric's own control words; then the consumers, round robin.
 
 Consumers run on `clk_sys`. Each fetches one word at a time through one held-data handshake built from the cells of
 `sys/lw_cdc.sv`, so no crossing carries a clock ratio and none reaches a video clock. That is why no FIFO is needed:
@@ -191,11 +191,13 @@ words.
    an earlier session left holding a plausible hello therefore starts nothing. Read the armed value within 1 ms of
    the edge: the run bit reached the fabric and a live master is polling.
 4. Store H_HELLO with a non-zero nonce. The armed master waits until every consumer's `clk_sys` half is at rest,
-   starts every index at 0, stores its version, capabilities, state, descriptors and constants, then C_HELLO =
-   H_HELLO.
+   starts every index at 0, stores its version, capabilities, state, C_BIND = 0, descriptors and constants, then
+   C_HELLO = H_HELLO.
 5. Read C_HELLO until it equals H_HELLO, for at most 1 ms. No armed value or no echo: no mailbox this session; clear
    the run bit, take the stopped read of the rule below, and use the LW window or SPI. An echo: read the descriptors
-   and bind each function once. A bind is in effect when C_BIND shows it.
+   and bind each of H_BIND's functions once. The block slot's bind is H_SECTOR ("Records"). **A bind is in effect
+   only while C_BIND shows it and C_HELLO still holds the echo:** the words of an ended session are stale, C_BIND
+   among them.
 
 **The session ends** when the master stops (the run bit falls, `gp_out[31]` falls for the ID view or the core reset
 through GPO, or the fabric sees an HPS reset), or when it reads an H_HELLO that is not the one it echoed: a 0 arms it
@@ -258,14 +260,21 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   stands, the fabric plays the tail frame if it answers it and discards it if it does not, and posts a REQUEST when
   the ring holds no answer. So a host may queue blocks ahead of the core's requests, and a wrong guess costs only
   the stores.
-- **The block slot's handover is the SECTOR block's own.** The tier is a second feeder behind `sys/lw_blk_mux.sv`
-  and `hps_io`'s commit mark, which then build for either path. So the slot's mux moves only between requests, moves
-  to the mailbox side only while the commit mark reads 0, and one request is never shown on both paths
-  (`docs/LW_BRIDGE.md`, "One request, one path"). H_SECTOR bit 0 asks for the slot and C_BIND bit 0 is the mux:
-  publish frames only while it reads 1, and serve the slot over SPI, from GET_SDSTAT, while it reads 0.
+- **The block slot's handover follows the SECTOR block's rules.** The slot's mux moves only between requests, moves
+  to the mailbox side only while `hps_io`'s commit mark reads 0, and one request is never shown on both paths
+  (`docs/LW_BRIDGE.md`, "One request, one path"). The rules are reused; `sys/lw_blk_mux.sv` and the commit mark as
+  they stand are not, because both live on the 384-bit `HPS_BUS` that only `MISTER_LW` builds. The tier needs a
+  plain-port mux with one feeder port per path, which the LW wrapper then uses with its bus bits unmoved, and the
+  commit mark as a plain output.
+- **H_SECTOR bit 0 asks for the slot, and C_BIND bit 0 says the mux is on the mailbox's feeder.** Publish frames
+  only while that bit reads 1 and C_HELLO holds the echo; serve the slot over SPI, from GET_SDSTAT, whenever it does
+  not. **Never wait on C_BIND:** read it on each pass and take the path it shows. Serving SPI is what clears the
+  commit mark, so a set bit that has not taken effect costs slow blocks, never a stall. Before setting the bit,
+  serve over SPI what the last GET_SDSTAT showed.
 - **Changing what the slot holds** (a mount, a disc change): clear H_SECTOR's bit. A frame already playing
-  finishes, every frame behind it is discarded, and the mux returns to SPI at the slot's next idle point. Wait for
-  C_BIND, serve SPI meanwhile, then set the bit again. No stale frame survives and no request is left unanswered.
+  finishes, every frame behind it is discarded, and the mux returns to SPI at the slot's next idle point. Serve SPI,
+  change the mount once C_BIND shows 0, then set the bit again. No stale frame survives and no request is left
+  unanswered.
 - **Save slots are not carried.** A save slot's read must reach the core whole or not at all, which the SECTOR
   block keeps by holding the frame in its FIFO; a consumer with no FIFO cannot withdraw a frame that the session's
   end cuts short. Save slots stay on SPI, or on the SECTOR block of `docs/LW_BRIDGE.md` where that is built.
