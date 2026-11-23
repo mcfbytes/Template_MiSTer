@@ -246,7 +246,7 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 | OSD | `0x01` ROW, `arg` = row | 64 words: the row's 256 bytes | written into `osd_buffer` as the LW OSDBUF writer does, under the same guard |
 | SECTOR | `0x10` FRAME, `arg` = slot index | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
 | EVT | `0x20` STATUS | four words | a status transfer landed, whole |
-| EVT | `0x21` REQUEST, `arg` = slot index | the LBA | the bound slot's request opened and no queued frame answers it |
+| EVT | `0x21` REQUEST, `arg` = slot index | the LBA | the bound slot's request stands and the ring holds no answer, including a request that already stood when the bind arrived |
 | EVT | `0x22` REPLY | reply words | the frame lane's captured replies |
 | EVT | `0x23` MARK, `arg` = ring | its deepest fill | a ring's high-water mark, for sizing |
 | EVT | `0x24` CONFSTR | the string, four bytes a word | the configuration string, once after the hello |
@@ -274,9 +274,10 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   GET_SDSTAT, whenever they do not.
 - **A REQUEST record belongs to one bind.** The fabric stores C_BIND's bit as 1 before it posts that bind's first
   REQUEST, and a request that already stands when the mux arrives is that first record. It posts none after it has
-  stored the bit as 0. Read C_BIND after a record, never before. A record read while H_SECTOR's bit is clear is
-  void. **Drain the core-to-host ring after reading C_BIND = 0 and before setting the bit again,** so every record
-  of the bind that ended is read, and void, before the next bind can post one.
+  stored the bit as 0. Read C_BIND after a REQUEST you act on, never before. A REQUEST read while H_SECTOR's bit is
+  clear is void. **Drain the core-to-host ring after reading C_BIND = 0 and before setting the bit again,** so every
+  REQUEST of the bind that ended is read, and void, before the next bind can post one. Records of other kinds are
+  handled as ever: only the slot's REQUESTs belong to a bind.
 - **Never wait on C_BIND:** read it on each pass and take the path it shows. Serving SPI is what clears the commit
   mark, so a set bit that has not taken effect costs slow blocks, never a stall. Before setting the bit, serve over
   SPI what the last GET_SDSTAT showed.
