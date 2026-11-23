@@ -9,12 +9,14 @@
 #      only its clk_sys write side.
 #   1c. hps_io.sv with MISTER_LW and MISTER_LW_SECTOR_SLOT, under each of those macro sets, gives upstream's token
 #      stream for uio_block (the SPI command decoder): SECTOR's commit mark watches the commands and changes none.
-#   2. Every LW-only file (sys/hps_lw_*.sv, sys/lw_*.sv) preprocesses to no token at all without MISTER_LW,
-#      under each of those macro sets; a tier's file also with MISTER_LW and without its tier macro.
-#   3. Every LW-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro) first,
-#      `default_nettype none first inside it, `default_nettype wire last. Each macro the file defines begins
-#      with LW_ and is undefined before the guard closes; it undefines no macro it did not define; it defines
-#      no LW_DIAG (a build sets that one).
+#   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
+#      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
+#      without its tier macro; sys/lw_cdc.sv, which serves either floor, is empty with neither and present
+#      with MISTER_LW or MISTER_OCRAM.
+#   3. Every framework-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro), or
+#      `ifdef MISTER_OCRAM, first; `default_nettype none first inside it, `default_nettype wire last. Each macro
+#      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
+#      file ends; it undefines no macro it did not define; it defines no LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
 #      SYSTEMVERILOG_FILE lines for LW-only files and one SDC_FILE line for lw_bridge.sdc, right after
 #      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's, and its
@@ -155,10 +157,31 @@ for label, defs in sets:
     else:
         check(True, '')
 
-lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_)\w*\.s?v$', x))
-print('-- every LW-only file is empty without its macro (%s)' % ' '.join(lw))
+lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
+OCM = 'hps_ocram_master.sv'
+print('-- every framework-only file is empty without its floor macro (%s)' % ' '.join(lw))
 for x in lw:
     f = 'sys/' + x
+    if x == 'lw_cdc.sv':
+        # the cells serve either floor: empty with neither, present with either
+        for label, defs in sets:
+            t, e = pp(f, defs)
+            if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
+                check(t == [], '%s [%s]: %d tokens with neither floor, from: %s'
+                      % (f, label, len(t or []), ' '.join((t or [])[:12])))
+        for label in ('MISTER_LW', 'MISTER_OCRAM'):
+            t, e = pp(f, [label])
+            check(t is not None and len(t) > 0, '%s [%s]: empty with a floor macro' % (f, label))
+        continue
+    if x == OCM:
+        for label, defs in sets:
+            t, e = pp(f, defs)
+            if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
+                check(t == [], '%s [%s]: %d tokens without MISTER_OCRAM, from: %s'
+                      % (f, label, len(t or []), ' '.join((t or [])[:12])))
+        t, e = pp(f, ['MISTER_OCRAM'])
+        check(t is not None and len(t) > 0, '%s: empty with MISTER_OCRAM' % f)
+        continue
     runs = [(label, defs) for label, defs in sets]
     if x in TIER:
         runs += [('MISTER_LW without ' + TIER[x] + ', ' + label, ['MISTER_LW'] + defs) for label, defs in sets]
@@ -168,30 +191,46 @@ for x in lw:
             check(t == [], '%s [%s]: %d tokens outside the guard, from: %s' % (f, label, len(t or []),
                                                                              ' '.join((t or [])[:12])))
 
-print('-- every LW-only file keeps its body in its guard and leaves no macro behind')
+print('-- every framework-only file keeps its body in its guard and leaves no macro behind')
 for x in lw:
     f = 'sys/' + x
     t = tokens(open(f).read())
-    head = ['`ifdef', 'MISTER_LW'] + (['`ifdef', TIER[x]] if x in TIER else []) + ['`default_nettype', 'none']
-    tail = ['`default_nettype', 'wire'] + (['`endif'] if x in TIER else []) + ['`endif']
+    if x == 'lw_cdc.sv':
+        head = ['`ifdef', 'MISTER_LW', '`define', 'LW_CDC_BUILT', '`endif',
+                '`ifdef', 'MISTER_OCRAM', '`define', 'LW_CDC_BUILT', '`endif',
+                '`ifdef', 'LW_CDC_BUILT', '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`undef', 'LW_CDC_BUILT']
+        scan = False                       # the prologue's ifdef/endif pairs are not one guard
+    elif x == OCM:
+        head = ['`ifdef', 'MISTER_OCRAM', '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`undef', 'MISTER_OCRAM_MARK',
+                '`undef', 'MISTER_OCRAM_POLL']
+        scan = True
+    else:
+        head = ['`ifdef', 'MISTER_LW'] + (['`ifdef', TIER[x]] if x in TIER else []) + ['`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire'] + (['`endif'] if x in TIER else []) + ['`endif']
+        scan = True
     check(t[:len(head)] == head, '%s: does not open with %s' % (f, ' '.join(head)))
     check(t[-len(tail):] == tail, '%s: does not close with %s' % (f, ' '.join(tail)))
-    depth, closed_at = 0, None
-    for i, k in enumerate(t):
-        if k in ('`ifdef', '`ifndef'):
-            depth += 1
-        elif k == '`endif':
-            depth -= 1
-            if depth == 0 and closed_at is None:
-                closed_at = i
-    check(closed_at == len(t) - 1, '%s: the guard closes before the end of the file (token %s of %d)' %
-          (f, closed_at, len(t)))
+    if scan:
+        depth, closed_at = 0, None
+        for i, k in enumerate(t):
+            if k in ('`ifdef', '`ifndef'):
+                depth += 1
+            elif k == '`endif':
+                depth -= 1
+                if depth == 0 and closed_at is None:
+                    closed_at = i
+        close_at = len(t) - len(tail) + max(i for i, x in enumerate(tail) if x == '`endif')
+        check(closed_at == close_at, '%s: the guard closes at token %s, not %d (of %d)' %
+              (f, closed_at, close_at, len(t)))
     live = {}
     for i, k in enumerate(t):
         if k in ('`define', '`undef') and i + 1 < len(t):
             m = t[i + 1]
             if k == '`define':
-                check(m.startswith('LW_'), '%s: defines %s, a name outside LW_' % (f, m))
+                okname = m.startswith('LW_') or (x == OCM and m.startswith('MISTER_OCRAM_'))
+                check(okname, '%s: defines %s, a name outside LW_' % (f, m))
                 check(m != 'LW_DIAG', '%s: defines LW_DIAG, which only a build sets' % f)
                 live[m] = True
             else:
@@ -207,7 +246,7 @@ def tree(root):
             r.add(os.path.relpath(os.path.join(d, x), root))
     return r
 mine, theirs = tree('.'), tree(UP)
-lwonly = lambda p: re.match(r'sys/(hps_lw_|lw_)[^/]*$', p) is not None
+lwonly = lambda p: re.match(r'sys/(hps_lw_|lw_|hps_ocram_)[^/]*$', p) is not None
 for p in sorted(mine - theirs):
     check(lwonly(p), '%s: not in upstream and not an LW-only file' % p)
 for p in sorted(theirs - mine):
@@ -218,7 +257,7 @@ for p in sorted(mine & theirs) + ['files.qip']:
     check(open(p, 'rb').read() == open(os.path.join(UP, p), 'rb').read(), '%s: differs from upstream' % p)
 qip = open('sys/sys.qip').read().splitlines()
 add = re.compile(r'set_global_assignment -name SYSTEMVERILOG_FILE \[file join \$::quartus\(qip_path\) '
-                 r'(hps_lw_|lw_)\w+\.sv \]$')
+                 r'(hps_lw_|lw_|hps_ocram_)\w+\.sv \]$')
 sdc = re.compile(r'set_global_assignment -name SDC_FILE +\[file join \$::quartus\(qip_path\) lw_bridge\.sdc \]$')
 rest = [l for l in qip if not add.match(l) and not sdc.match(l)]
 check(rest == open(os.path.join(UP, 'sys/sys.qip')).read().splitlines(),
