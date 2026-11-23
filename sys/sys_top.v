@@ -241,11 +241,53 @@ end
 `endif
 `endif
 
+// MISTER_OCRAM_OSD: the OCRAM OSD writer drives the same osd_buffer port the LW OSDBUF writer uses. The host
+// binds one writer, so the two never meet in a legal session; a build with neither keeps the port out of osd.v.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`define OCRAM_OSD_PORTS
+`endif
+`endif
+`ifdef LW_OSD_PORTS
+`define OSD_WPORTS
+`endif
+`ifdef OCRAM_OSD_PORTS
+`ifndef OSD_WPORTS
+`define OSD_WPORTS
+`endif
+`endif
+
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
 `ifdef MISTER_OCRAM
 // gp_in[26] = 1 - the OCRAM floor is built and its master runs (hps_ocram_master.sv drives it)
 wire        ocram_present, ocram_line;
+// The master's consumer port 0 (the OSD walker) and its session interface. Without MISTER_OCRAM_OSD the port is
+// tied off and the OSD statistics are the constant 0.
+wire        ocram_c0_req, ocram_c0_we;
+wire [15:0] ocram_c0_off;
+wire [31:0] ocram_c0_wdata;
+wire        ocram_c0_grant, ocram_c0_done, ocram_c0_ok;
+wire [31:0] ocram_c0_rdata;
+wire        ocram_s_hello, ocram_s_live, ocram_s_tick, ocram_osd_bind;
+wire        ocram_c0_rest, ocram_c0_fault, ocram_c0_mid, ocram_c0_open;
+wire [15:0] ocram_osd_rows, ocram_osd_deepest;
+`ifdef MISTER_OCRAM_OSD
+wire        ocram_osd_we;
+wire [12:0] ocram_osd_addr;
+wire  [7:0] ocram_osd_byte;
+`else
+assign ocram_c0_req   = 1'b0;
+assign ocram_c0_we    = 1'b0;
+assign ocram_c0_off   = 16'd0;
+assign ocram_c0_wdata = 32'd0;
+assign ocram_c0_rest  = 1'b1;
+assign ocram_c0_fault = 1'b0;
+assign ocram_c0_mid   = 1'b0;
+assign ocram_c0_open  = 1'b0;
+assign ocram_osd_rows = 16'd0;
+assign ocram_osd_deepest = 16'd0;
+`endif
 `endif
 `ifdef MISTER_LW
 // gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it)
@@ -653,6 +695,30 @@ cyclonev_hps_interface_interrupts interrupts
 	.irq(f2h_irq)
 );
 
+// The osd write port's bytes (osd.v's lw_we/lw_addr/lw_byte): the OCRAM writer's when it writes, else the LW
+// writer's. Both are built only in a prix-fixe build and the host binds one, so a collision cannot happen in a
+// legal session. OSD_WPORTS means at least one writer is built.
+`ifdef OSD_WPORTS
+wire        osd_we;
+wire [12:0] osd_addr;
+wire  [7:0] osd_byte;
+`ifdef OCRAM_OSD_PORTS
+`ifdef LW_OSD_PORTS
+assign osd_we   = ocram_osd_we | lw_osd_we;
+assign osd_addr = ocram_osd_we ? ocram_osd_addr : lw_osd_addr;
+assign osd_byte = ocram_osd_we ? ocram_osd_byte : lw_osd_byte;
+`else
+assign osd_we   = ocram_osd_we;
+assign osd_addr = ocram_osd_addr;
+assign osd_byte = ocram_osd_byte;
+`endif
+`else
+assign osd_we   = lw_osd_we;
+assign osd_addr = lw_osd_addr;
+assign osd_byte = lw_osd_byte;
+`endif
+`endif
+
 ///////////////////////////  RESET  ///////////////////////////////////
 
 reg reset_req = 0;
@@ -806,6 +872,25 @@ hps_ocram_master ocram_master
 	.present(ocram_present),
 	.line(ocram_line),
 
+	.c0_req(ocram_c0_req),
+	.c0_we(ocram_c0_we),
+	.c0_off(ocram_c0_off),
+	.c0_wdata(ocram_c0_wdata),
+	.c0_grant(ocram_c0_grant),
+	.c0_done(ocram_c0_done),
+	.c0_ok(ocram_c0_ok),
+	.c0_rdata(ocram_c0_rdata),
+	.s_hello(ocram_s_hello),
+	.s_live(ocram_s_live),
+	.s_tick(ocram_s_tick),
+	.osd_bind(ocram_osd_bind),
+	.c0_rest(ocram_c0_rest),
+	.c0_fault(ocram_c0_fault),
+	.c0_mid(ocram_c0_mid),
+	.c0_open(ocram_c0_open),
+	.osd_rows(ocram_osd_rows),
+	.osd_deepest(ocram_osd_deepest),
+
 	.awid(ocram_awid),
 	.awaddr(ocram_awaddr),
 	.awlen(ocram_awlen),
@@ -845,6 +930,7 @@ hps_ocram_master ocram_master
 	.rvalid(ocram_rvalid),
 	.rready(ocram_rready)
 );
+
 `endif
 
 wire [28:0] ram2_address;
@@ -1396,11 +1482,11 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
 		.de_out(hdmi_de_osd)
-`ifdef LW_OSD_PORTS
+`ifdef OSD_WPORTS
 		,
-		.lw_we(lw_osd_we),
-		.lw_addr(lw_osd_addr),
-		.lw_byte(lw_osd_byte)
+		.lw_we(osd_we),
+		.lw_addr(osd_addr),
+		.lw_byte(osd_byte)
 `endif
 	);
 
@@ -1623,11 +1709,11 @@ osd vga_osd
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
 	.de_out(vga_de_osd)
-`ifdef LW_OSD_PORTS
+`ifdef OSD_WPORTS
 	,
-	.lw_we(lw_osd_we),
-	.lw_addr(lw_osd_addr),
-	.lw_byte(lw_osd_byte)
+	.lw_we(osd_we),
+	.lw_addr(osd_addr),
+	.lw_byte(osd_byte)
 `endif
 );
 
@@ -1897,6 +1983,53 @@ assign user_in[6] =         USER_IO[6];
 ///////////////////  User module connection ////////////////////////////
 
 wire        clk_sys;
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+// The OSD consumer: ROW records from the OSD ring into every osd's osd_buffer (hps_ocram_osd.sv).
+`ifdef MENU_CORE
+localparam integer OCRAM_OSD_ROWS = 20;
+`else
+localparam integer OCRAM_OSD_ROWS = 16;
+`endif
+`ifdef MISTER_DEBUG_NOHDMI
+wire [1:0] ocram_osd_sel = {io_osd_vga, 1'b0};       // no HDMI osd
+`else
+wire [1:0] ocram_osd_sel = {io_osd_vga, io_osd_hdmi};
+`endif
+hps_ocram_osd #(.ROWS(OCRAM_OSD_ROWS)) ocram_osd
+(
+	.clk(clk_100m),
+	.clk_sys(clk_sys),
+	.gp_out25(gp_out[25]),
+
+	.s_hello(ocram_s_hello),
+	.s_live(ocram_s_live),
+	.s_tick(ocram_s_tick),
+	.bind_en(ocram_osd_bind),
+	.c_rest(ocram_c0_rest),
+	.c_fault(ocram_c0_fault),
+	.c_mid(ocram_c0_mid),
+	.c_open(ocram_c0_open),
+	.osd_rows(ocram_osd_rows),
+	.osd_deepest(ocram_osd_deepest),
+
+	.c_req(ocram_c0_req),
+	.c_we(ocram_c0_we),
+	.c_off(ocram_c0_off),
+	.c_wdata(ocram_c0_wdata),
+	.c_grant(ocram_c0_grant),
+	.c_done(ocram_c0_done),
+	.c_ok(ocram_c0_ok),
+	.c_rdata(ocram_c0_rdata),
+
+	.sel(ocram_osd_sel),
+	.view(gp_outr[31]),
+	.we(ocram_osd_we),
+	.addr(ocram_osd_addr),
+	.dbyte(ocram_osd_byte)
+);
+`endif
+`endif
 wire [15:0] audio_l, audio_r;
 wire        audio_s;
 wire  [1:0] audio_mix;
@@ -2206,6 +2339,12 @@ lw_sys_window #(
 `ifdef LW_OSD_PORTS
 `undef LW_OSD_PORTS
 `endif
+`endif
+`ifdef OSD_WPORTS
+`undef OSD_WPORTS
+`endif
+`ifdef OCRAM_OSD_PORTS
+`undef OCRAM_OSD_PORTS
 `endif
 
 emu emu
