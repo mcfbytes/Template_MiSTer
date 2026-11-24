@@ -42,7 +42,17 @@ MISTER_SMALL_VBUF        | Sets a smaller video buffer for the ASCAL
 MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
 MISTER_FB_PALETTE        | Framebuffer palette
+MISTER_DISABLE_DOWNSCALE | Removes Ascal's downscale path (see below)
 
+
+#### Optional scaler features
+Some macros remove a scaler feature to save FPGA resources. Each one sets a bit in the reply to the `UIO_SET_VIDEO` (0x20) command, so the HPS binary can tell the feature is missing. A clear bit means the feature is present.
+
+Macro                     | 0x20 reply bit | Saves (Quartus 17.0.2, one fit)  | Lost
+--------------------------|----------------|----------------------------------|---------------------------------
+MISTER_DISABLE_DOWNSCALE  | 2              | about 270 ALMs, 5 M10K, 6 DSP    | any HDMI picture smaller than the core's output
+
+**MISTER_DISABLE_DOWNSCALE is not safe with a stock HPS binary that does not read bit 2.** Without the downscale path the scaler cannot shrink a picture: if the HDMI output window is smaller than the core's picture (for example `video_mode` 640x480 with a 704-pixel-wide core, or a small `vscale_mode` result) the picture is broken. Enable it only in a core whose output always fits the usual 720p/1080p windows, and say so in the core's release notes.
 
 # Quartus version
 Cores must be developed in **Quartus v17.0.x**. It's recommended to have updates, so it will be **v17.0.2**. Newer versions won't give any benefits to FPGA used in MiSTer, however they will introduce incompatibilities in project settings and it will make harder to maintain the core and collaborate with others. **So please stick to good old 17.0.x version.** You may use either Lite or Standard license.
