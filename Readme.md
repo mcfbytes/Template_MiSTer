@@ -52,7 +52,7 @@ Some macros remove a scaler feature to save FPGA resources. Each one sets a bit 
 Macro                     | 0x20 reply bit | Saves (Quartus 17.0.2, one fit)  | Lost
 --------------------------|----------------|----------------------------------|---------------------------------
 MISTER_DISABLE_DOWNSCALE  | 2              | about 270 ALMs, 5 M10K, 6 DSP    | any HDMI picture smaller than the core's output
-MISTER_DISABLE_VGA_SCALER | 3              | about 150 ALMs, 1 M10K (estimate) | `vga_scaler=1` and the framebuffer on the analog output
+MISTER_DISABLE_VGA_SCALER | 3              | about 1,000 ALMs, 0 M10K (one fit)| `vga_scaler=1` and the framebuffer on the analog output
 
 **Policy.** MISTER_DISABLE_VGA_SCALER may ship in a published core. MISTER_DISABLE_DOWNSCALE is for area-critical builds only: it is the core author's choice, never a default, and never enabled just because it fits.
 
