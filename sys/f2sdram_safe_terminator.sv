@@ -120,14 +120,19 @@ end
 
 /*
 * Write burst transaction observer
+*
+* It watches the master side, the bus that f2sdram actually sees, so it stays
+* in step while this module drives the bus, and with a user master that keeps
+* write asserted through its reset. A beat counts only when write is asserted
+* and waitrequest is not.
 */
 reg  state_write = 1'b0;
 wire next_state_write;
 
 wire burst_write_start     = !state_write  && next_state_write;
-wire valid_write_data      = state_write && !waitrequest_master;
-wire burst_write_end       = state_write && (write_burstcounter == write_burstcount_latch - 1'd1);
-wire valid_non_burst_write = !state_write && write_slave && (burstcount_slave == 1) && !waitrequest_master;
+wire valid_write_data      = state_write && write_master && !waitrequest_master;
+wire burst_write_end       = valid_write_data && (write_burstcounter == write_burstcount_latch - 1'd1);
+wire valid_non_burst_write = !state_write && write_master && (burstcount_master == 1) && !waitrequest_master;
 
 reg [BURSTCOUNT_WIDTH-1:0] write_burstcounter     = 0;
 reg [BURSTCOUNT_WIDTH-1:0] write_burstcount_latch = 0;
@@ -138,8 +143,8 @@ always_ff @(posedge clk) begin
 
 	if (burst_write_start) begin
 		write_burstcounter     <= waitrequest_master ? 1'd0 : 1'd1;
-		write_burstcount_latch <= burstcount_slave;
-		write_address_latch    <= address_slave;
+		write_burstcount_latch <= burstcount_master;
+		write_address_latch    <= address_master;
 	end
 	else if (valid_write_data) begin
 		write_burstcounter     <= write_burstcounter + 1'd1;
@@ -150,7 +155,7 @@ always_comb begin
 	if (!state_write) begin
 		if (valid_non_burst_write)
 			next_state_write = 1'b0;
-		else if (write_slave)
+		else if (write_master)
 			next_state_write = 1'b1;
 		else
 			next_state_write = 1'b0;
@@ -190,7 +195,7 @@ always_ff @(posedge clk) begin
 					write_terminating          <= 1;
 					burstcount_latch           <= write_burstcount_latch;
 					address_latch              <= write_address_latch;
-					write_terminate_counter    <= waitrequest_master ? write_burstcounter : write_burstcounter + 1'd1;
+					write_terminate_counter    <= valid_write_data ? write_burstcounter + 1'd1 : write_burstcounter;
 				end
 				else if (on_start_write_transaction) begin
 					if (!valid_non_burst_write) begin
@@ -215,9 +220,9 @@ always_ff @(posedge clk) begin
 	end
 
 	if (write_terminating) begin
-		// Continue write transaction until the end
+		// Continue write transaction until its last beat is accepted
 		if (!waitrequest_master) write_terminate_counter <= write_terminate_counter + 1'd1;
-		if (write_terminate_counter == burstcount_latch - 1'd1) write_terminating <= 0;
+		if (!waitrequest_master && write_terminate_counter == burstcount_latch - 1'd1) write_terminating <= 0;
 	end
 end
 
