@@ -741,7 +741,7 @@ wire         bob_deint;
 	)
 	ascal
 	(
-		.reset_na   (~reset_req),
+		.reset_na   (~reset),
 		.run        (1),
 		.freeze     (freeze),
 		.bob_deint  (bob_deint),
