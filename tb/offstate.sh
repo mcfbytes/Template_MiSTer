@@ -9,6 +9,9 @@
 #      only its clk_sys write side.
 #   1c. hps_io.sv with MISTER_LW and MISTER_LW_SECTOR_SLOT, under each of those macro sets, gives upstream's token
 #      stream for uio_block (the SPI command decoder): SECTOR's commit mark watches the commands and changes none.
+#   1d. hps_io.sv with MISTER_LW, MISTER_LW_PAD and MISTER_DISABLE_SPI_PAD gives the uio_block of the same build
+#      without it (1c ties that one to upstream's) less exactly the link's eight pad arms (0x02, 0x03, 0x10-0x13,
+#      0x1A, 0x3D), under each of those macro sets.
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
 #      without its tier macro; sys/lw_cdc.sv, which serves either floor, is empty with neither and present
@@ -158,6 +161,30 @@ for label, defs in sets:
               (label, n, x, y))
     else:
         check(True, '')
+
+print('-- hps_io.sv with MISTER_DISABLE_SPI_PAD: the uio_block without it less exactly the link\'s eight pad arms')
+PADARMS = ["'h02", "'h03", "'h10", "'h11", "'h12", "'h13", "'h1a", "'h3d"]
+def labels(t):
+    # the case labels of uio_block's casex: a label token followed by ':' after a ';', 'end', 'begin' or 'endcase'
+    return [t[i] for i in range(1, len(t) - 1) if re.match(r"'h[0-9a-fA-FX]+$", t[i]) and t[i + 1] == ':' and
+            t[i - 1] in (';', 'end', 'begin', 'endcase')]
+for label, defs in sets:
+    lwd = ['MISTER_LW', 'MISTER_LW_PAD']
+    mine, e1 = pp('sys/hps_io.sv', lwd + ['MISTER_DISABLE_SPI_PAD'] + defs)
+    base, e2 = pp('sys/hps_io.sv', lwd + defs)
+    if not check(mine is not None and base is not None, 'sys/hps_io.sv [SPI_PAD, %s]: preprocessor error %s%s' %
+                 (label, e1, e2)):
+        continue
+    a_, b_ = uio_block(mine), uio_block(base)
+    if not check(a_ is not None and b_ is not None, 'sys/hps_io.sv [SPI_PAD, %s]: no uio_block' % label):
+        continue
+    ops = difflib.SequenceMatcher(None, b_, a_, autojunk=False).get_opcodes()
+    gone = sum((b_[i1:i2] for tg, i1, i2, _, _ in ops if tg == 'delete'), [])
+    other = [tg for tg, _, _, _, _ in ops if tg not in ('equal', 'delete')]
+    check(not other and sorted(labels(['end'] + gone)) == sorted(PADARMS) and
+          gone.count('begin') == gone.count('end'),
+          'sys/hps_io.sv [SPI_PAD, %s]: uio_block is not the LW build\'s less the arms %s: removed %s, other edits %s'
+          % (label, ' '.join(PADARMS), ' '.join(labels(['end'] + gone)), other))
 
 lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
 OCM = 'hps_ocram_master.sv'

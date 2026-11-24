@@ -218,7 +218,13 @@ localparam [255:0] LANE_OPS = (256'd1 << 8'h01) | (256'd1 << 8'h1C) | (256'd1 <<
                               (256'd1 << 8'h33) | (256'd1 << 8'h3B);
 localparam [31:0] LANE_CAPS = 32'h0000_0003;
 
-// PAD kind words K0-K7: the honoured-opcode bitmap; K8 {spinner FIFO depth, keyed slots}.
+// PAD kind words K0-K7: the honoured-opcode bitmap; K8 {spinner FIFO depth, keyed slots}; K9 bit 0: the link's
+// pad arm is not built (MISTER_DISABLE_SPI_PAD in hps_io.sv), so the pads have no path but this block.
+`ifdef MISTER_DISABLE_SPI_PAD
+localparam [31:0] PAD_K9    = 32'd1;
+`else
+localparam [31:0] PAD_K9    = 32'd0;
+`endif
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
                              (256'd1 << 8'h12) | (256'd1 << 8'h13) |
@@ -383,7 +389,7 @@ endfunction
 
 // The kind words, K0 first.
 function automatic [31:0] pad_kw(input [4:0] k);
-	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : (k == 5'd8) ? {16'd16, 16'd24} : 32'd0;
+	pad_kw = (k < 5'd8) ? PAD_OPS[{k[2:0], 5'd0} +: 32] : (k == 5'd8) ? {16'd16, 16'd24} : (k == 5'd9) ? PAD_K9 : 32'd0;
 endfunction
 
 // SECTOR: K0 {FIFO entries, 0, strobe gap}, K1 {BLKSZ[10:8], wide[0]} (hps_io's io_wide), K2 the descriptors that

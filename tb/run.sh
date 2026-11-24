@@ -24,6 +24,8 @@
 #   W  LW_DIAG=0 with hps_io at WIDE=0 (byte strobes), a 4096-word primary on hps_io slot 9, save slots of 510 and
 #      256 words with 32-bit LBAs on slots 12 and 15, strobes 5 cycles apart (LW_TB_GEOMW): T-SEC6
 #   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
+#   P  LW_DIAG=0 with MISTER_DISABLE_SPI_PAD: the link's eight pad opcodes (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D) are
+#      ignored and the LW PAD block's are taken; PAD K9 bit 0 reads 1 (the other arms prove the link's are taken)
 #   X  each tier macro without MISTER_LW: the compile of hps_io fails, naming lw_tier_needs_MISTER_LW (and
 #      compiles without the macro, and with MISTER_LW); and each unservable SECTOR geometry: the compile of the
 #      window fails, naming lw_sector_unservable_geometry (and the servable edges compile); and the Template's
@@ -46,6 +48,9 @@
 #      run on the build host: tb/hps/lw_probe_test.c includes the probe against a model of the window (its cases
 #      in its header), compiled the same way and run once. It all runs before any container starts (the image
 #      has no C compiler). Without a C compiler the arm reports SKIPPED and does not fail.
+#   Q  hps_io's 0x14 readout of a synthetic CONF_STR over 3 KB (tb/conf_str_3k.vh) with CONF_STR_BRAM 0 and 1
+#      (tb/confstr_tb.sv): every byte equal between the two and to the string, at strobe gaps of 2 and 5. Icarus
+#      reads a copy of hps_io.sv with byte_cnt declared above confstr_rom's port connection, which names it first
 #   O  the OCRAM floor's and OSD tier's bench (tb/ocram_tb.sv) under Icarus, every seed of LW_TB_SEEDS once
 #      plain and once with the crossing cells' delay models (LW_TB_CDC), compiled twice: with DIAG (MARK records,
 #      the torture sink, the freeze knob) and without (the OSD cases in the shipping shape); and verilator
@@ -58,7 +63,7 @@
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O P Q}
 O=${LW_TB_OUT:-tb/out}
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
@@ -449,6 +454,19 @@ for g in $ARMS; do
 "
     continue
   fi
+  if [ "$g" = Q ]; then
+    echo "== arm Q: tb/confstr_tb.sv, the CONF_STR readout from logic and from block RAM"
+    awk '/^reg \[MAX_W:0\] byte_cnt;/ { next } /^wire \[7:0\] conf_byte;/ { print "reg [MAX_W:0] byte_cnt;" } { print }' \
+      sys/hps_io.sv > "$O/confstrQ_hps_io.sv"
+    if iverilog -g2012 -I tb -I sys -o "$O/confstrQ.vvp" tb/confstr_tb.sv "$O/confstrQ_hps_io.sv" > "$O/confstrQ.err" 2>&1
+    then vvp -n "$O/confstrQ.vvp" > "$O/confstr_tbQ.log" 2>&1
+    else { echo "FAIL bench: does not compile"; head -20 "$O/confstrQ.err"; } > "$O/confstr_tbQ.log"; fi
+    grep -v "^pass " "$O/confstr_tbQ.log"
+    V=$(verdict Q "$O/confstr_tbQ.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
   if [ "$g" = V ]; then
     echo "== arm V: slang"
     if ! command -v slang >/dev/null 2>&1; then V="arm V: SKIPPED (no slang on PATH)"
@@ -488,6 +506,7 @@ for g in $ARMS; do
     G) D="$B $A -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
     W) D="$B $A -DLW_DIAG=0 -DLW_TB_GEOMW";;
     L) D="$B $L";;
+    P) D="$B $A -DLW_DIAG=0 -DMISTER_DISABLE_SPI_PAD";;
     R12) D="$B $C -DLW_TB_SYS_HP_PS=41667";;
     R20) D="$B $C -DLW_TB_SYS_HP_PS=25000";;
     R21) D="$B $C -DLW_TB_SYS_HP_PS=23281";;
