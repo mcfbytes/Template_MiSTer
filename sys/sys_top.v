@@ -310,6 +310,14 @@ wire       io_osd_vga   = io_ss1 & ~io_ss2;
 	`endif
 `endif
 
+// UIO_SET_VIDEO (0x20) reply: bit 0 pixel repetition, bit 1 VRR, bits 2+ a scaler feature compiled out.
+// A set bit means the feature is absent, so a framework without these bits reads as complete.
+`ifdef MISTER_DISABLE_DOWNSCALE
+	wire scaler_no_downscale = 1;
+`else
+	wire scaler_no_downscale = 0;
+`endif
+
 reg        cfg_custom_t = 0;
 reg  [5:0] cfg_custom_p1;
 reg [31:0] cfg_custom_p2;
@@ -395,7 +403,7 @@ always@(posedge clk_sys) begin
 				areset <= 1;
 				io_dout_sys <= 'b11;
 			end
-			if(io_din[7:0] == 'h20) io_dout_sys <= 'b11;
+			if(io_din[7:0] == 'h20) io_dout_sys <= {13'd0, scaler_no_downscale, 2'b11};
 `ifdef MISTER_DISABLE_ADAPTIVE
 			if(io_din[7:0] == 'h2B) io_dout_sys <= {fb_en, sl_r, 4'b0110};
 `else
@@ -731,6 +739,9 @@ wire         bob_deint;
 	`endif
 	`ifdef MISTER_DOWNSCALE_NN
 		.DOWNSCALE_NN("true"),
+	`endif
+	`ifdef MISTER_DISABLE_DOWNSCALE
+		.DOWNSCALE("false"),
 	`endif
 		.FRAC(8),
 `ifdef MENU_CORE
