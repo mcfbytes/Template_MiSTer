@@ -64,6 +64,9 @@ set_global_assignment -name SEED 1
 # remove the scaler's downscale path: the HDMI window must be at least the core's picture size
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
 
+# remove the scaled picture on the analog output (vga_scaler=1); no effect with MISTER_DUAL_SDRAM
+#set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_SCALER=1"
+
 # disable adaptive scanline filtering
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 
