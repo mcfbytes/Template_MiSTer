@@ -1971,6 +1971,14 @@ task lw_row(input integer r, input integer k); lw_row_f(r, k, 0); endtask
 task spi_w(input [15:0] v);
 	begin io_din = v; io_strobe = 1; @(negedge clk_sys); io_strobe = 0; @(negedge clk_sys); end
 endtask
+// one UIO command and two data words on the link
+task spi_cmd3(input [15:0] c, input [15:0] a, input [15:0] b);
+	begin
+		@(negedge clk_sys); io_enable = 1;
+		spi_w(c); spi_w(a); spi_w(b);
+		io_enable = 0; @(negedge clk_sys);
+	end
+endtask
 task spi_osd_begin(input [7:0] cmd);
 	begin
 		@(negedge clk_sys); io_osd = 1;
@@ -2940,6 +2948,9 @@ task dm_build;
 			dm_entry(e, 1, 32'h00010001, 32'h40000, 32'h40000, 0, 0, 0);           // PAD 1.1
 			dm[16 + 32 * e + 8] = 32'h040F000C; dm[16 + 32 * e + 9] = 32'h20000000;   // K0-K7: the opcode bitmap
 			dm[16 + 32 * e + 16] = 32'h00100018;                                       // K8 {spinner FIFO, slots}
+`ifdef MISTER_DISABLE_SPI_PAD
+			dm[16 + 32 * e + 17] = 32'd1;                                              // K9: no link pad arm
+`endif
 			e = e + 1;
 		end
 		if (TB_SEC) begin
@@ -5915,6 +5926,42 @@ initial begin
 	rd("scratch byte lane", SCR, dg(32'hA5C35A5A));
 
 `ifdef MISTER_LW_PAD
+	$display("-- pads over the link: the eight pad opcodes taken, or with MISTER_DISABLE_SPI_PAD ignored");
+	begin : link_pads
+	reg [31:0] j0, j1, j25;
+	reg [15:0] a0, r0;
+	j0 = joy0; j1 = joy1; j25 = joy2 | joy3 | joy4 | joy5; a0 = ana0; r0 = rana0;
+	spi_cmd3(16'h0002, 16'h1111, 16'h2222);
+	spi_cmd3(16'h0003, 16'h3333, 16'h4444);
+	spi_cmd3(16'h0010, 16'h5555, 16'h6666);
+	spi_cmd3(16'h0011, 16'h7777, 16'h0888);
+	spi_cmd3(16'h0012, 16'h0999, 16'h0AAA);
+	spi_cmd3(16'h0013, 16'h0BBB, 16'h0CCC);
+	spi_cmd3(16'h001A, 16'h0000, 16'h1D1D);
+	spi_cmd3(16'h003D, 16'h0000, 16'h2E2E);
+	settle;
+`ifdef MISTER_DISABLE_SPI_PAD
+	check("link 0x02 ignored: joystick_0 unchanged", joy0, j0);
+	check("link 0x03 ignored: joystick_1 unchanged", joy1, j1);
+	check("link 0x10-0x13 ignored: joystick_2-5 unchanged", joy2 | joy3 | joy4 | joy5, j25);
+	check("link 0x1A ignored: left analog_0 unchanged", {16'd0, ana0}, {16'd0, a0});
+	check("link 0x3D ignored: right analog_0 unchanged", {16'd0, rana0}, {16'd0, r0});
+	check("link pads ignored: no output holds a value the link sent",
+	      joy0 === 32'h22221111 || joy1 === 32'h44443333 || joy2 === 32'h66665555 || joy5 === 32'h0CCC0BBB ||
+	      ana0 === 16'h1D1D || rana0 === 16'h2E2E, 0);
+	rd("PAD K9 bit 0: the link's pad arms are not built", 21'h40084, 32'd1);
+`else
+	check("link 0x02 taken: joystick_0", joy0, 32'h22221111);
+	check("link 0x03 taken: joystick_1", joy1, 32'h44443333);
+	check("link 0x10 taken: joystick_2", joy2, 32'h66665555);
+	check("link 0x11 taken: joystick_3", joy3, 32'h08887777);
+	check("link 0x12 taken: joystick_4", joy4, 32'h0AAA0999);
+	check("link 0x13 taken: joystick_5", joy5, 32'h0CCC0BBB);
+	check("link 0x1A taken: left analog_0", {16'd0, ana0}, 32'h00001D1D);
+	check("link 0x3D taken: right analog_0", {16'd0, rana0}, 32'h00002E2E);
+	rd("PAD K9: 0, the link's pad arms built", 21'h40084, 32'd0);
+`endif
+	end
 	$display("-- pads");
 	axi_write(pad_addr(8'h02, 0), 32'h8001F00F, 4'hF); settle;
 	check("joystick_0", joy0, 32'h8001F00F);

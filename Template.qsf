@@ -68,6 +68,10 @@ set_global_assignment -name SEED 1
 # remove the scaled picture on the analog output (vga_scaler=1); safe for published cores; no effect with MISTER_DUAL_SDRAM
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_SCALER=1"
 
+# compile out the SPI link's pad commands. AREA-CRITICAL BUILDS ONLY, never a default: a stock HPS binary has no pad input;
+# needs MISTER_LW and MISTER_LW_PAD (pads then come only over the LW PAD block)
+#set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_PAD=1"
+
 # disable adaptive scanline filtering
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 
