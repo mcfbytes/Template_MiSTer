@@ -344,17 +344,54 @@ A core that builds an OCRAM tier ships only with a timing report in which no fai
 removal path starts or ends in the master or in any `ocram_*` module. A failing path in the master can leave a
 transaction unfinished, which is the danger the gate exists for.
 
+## Measured performance
+
+Measured on a DE10-Nano, 2026-11-22..24 (milestones M0-M7). The full records live in the greenfield rewrite's
+`harness/rig/ocram-m*-measured.md`.
+
+There are three different rates here, and they are easy to mix up:
+
+| path | what limits it | measured |
+|---|---|---|
+| fabric -> on-chip RAM (this master, single-beat AXI3, 32-bit) | bridge latency, flat: 9 `clk_100m` cycles a read, 10 a write | ~36 MB/s reads (8.9 M words/s), ~32 MB/s writes (8.07 M words/s) |
+| CPU -> on-chip RAM (the host's own loads and stores) | the A9's mapping and instruction choice | `STR` 72.5 ns/word (~55 MB/s); `STM` x8 37.8 ns/word (~105 MB/s); `LDM` x8 13.9 ns/word (~290 MB/s, reads) |
+| host -> ring -> consumer, end to end | the consumer's clock-domain handshake | ~6.3 M words/s (~25 MB/s), the same on strongly-ordered and write-combined maps |
+
+- `STR` stores one register; `STM`/`LDM` store/load several consecutive registers in one instruction, so the bus
+  can burst. A host should write payloads with multi-register stores (a `memcpy`), not a word-at-a-time loop.
+- The CPU outruns the fabric by 2-4x, so a write-combined mapping buys nothing today: the fabric is the bottleneck.
+- The handshake: each word read at `clk_100m` crosses into the consumer's `clk_sys` through a holding register and
+  a toggle, two flip-flops each way (`lw_xfer`). That round trip is ~640 ns a word, against 90 ns for the read itself,
+  and it is most of a row's ~41 us. Crossing several words at once, or a small dual-clock FIFO, is the obvious
+  next step; read bursts would then amortize the 90 ns latency as well. Neither is built.
+- The region is ~60 KB at most and is used as rings: the rate is how fast a stream flows through, the size is how
+  far a producer can run ahead. Per job:
+
+| job | size | over OCRAM | over SPI |
+|---|---|---|---|
+| one OSD row | 256 B | ~41-49 us | ~0.86 ms |
+| full 16-row OSD repaint | 4 KB | ~0.64 ms | ~14-18 ms |
+| one CD sector | 2,352 B | ~100 us | — |
+| PSX 2x CD-ROM stream | 150 sectors/s | ~1.4 % of the path's time | — |
+
+- Cost (Quartus 17.0.2, seed 1, Template): the floor (master, poller, control page) is 158 ALMs and 0 M10K;
+  `MISTER_OCRAM_OSD` adds 399 ALMs and 0 M10K (the consumer 338.5, the master's port 57.5). That is about five
+  times the first estimate, and the handshake above is most of it. The bridge itself is free hard silicon: stock
+  `sys/sysmem.sv` already instantiates the `fpga2hps` atom, unused (`port_size_config` `2'b11`); this tier sets
+  `2'b00` (32-bit).
+- Verified on the rig: secure and non-secure transactions both pass; 10^9 fabric-written words read with 0 errors
+  (M4); 10^9 host-written words consumed with 0 errors, plus 2x10^8 on each write-combined variant (M7); 1,000/1,000
+  quiesced reloads clean, while a raw bridge reset with RUN high strands the master (M5, which is why the stop proof
+  precedes every bridge reset); the OSD drawn over the ring is visually identical to the same bytes over SPI for
+  three patterns, with no tearing seen.
+
 ## What is not verified
 
-- **Nothing here has been built, fitted or run.** Every cost is an estimate.
-- That the bridge reaches the on-chip RAM with secure, non-cacheable single-beat transactions. The HPS manual says
-  the bridge has "full visibility into the HPS address space" and that the RAM is always in the peripheral region
-  that every bridge master sees; the connectivity table itself was not checked, and U-Boot marks the RAM non-secure.
-- The atom's `port_size_config` value for the 32-bit width.
-- The bridge's latency and throughput, and what its traffic costs other HPS masters.
-- Whether a transaction in flight at a bridge reset can hold the HPS interconnect. The rule above assumes it can.
-- The on-chip RAM's ECC state after boot. The protocol reads only words the other side has published, and stores
-  full words only.
-- That a warm reset boots once `warmramgrp.enable` is cleared.
-- The GPO and GPI bit numbers are proposals, and the static checks of `tb/` that pin today's GPI terms and interrupt
-  lines change with the floor.
+- Write-combined ordering with the ring part-full (every torture run kept it full).
+- What this traffic costs the other HPS masters (a loaded run lost 3.5 %, not attributed).
+- Read bursts and a multi-word crossing: designed in prose only.
+- A greenfield host driving a real core's menu over the ring on hardware (the probe has; the host path is in diagnosis).
+- A stock Main host.
+- A warm reset with `warmramgrp.enable` cleared: stock U-Boot hangs on a hardware warm reset with or without this
+  tier, so every restore is a cold reboot.
+- The GPO and GPI bit numbers (GPO 28 RUN, GPI 26 present, GPO 25 the test freeze) are provisional, POC rows.
