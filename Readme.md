@@ -45,10 +45,26 @@ MISTER_SMALL_VBUF        | Sets a smaller video buffer for the ASCAL
 MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
 MISTER_FB_PALETTE        | Framebuffer palette
+MISTER_DISABLE_DOWNSCALE | Removes Ascal's downscale path (see below)
+MISTER_DISABLE_VGA_SCALER| Removes the scaled picture on the analog output (see below)
 MISTER_LW                | LW bridge framework: the lightweight-bridge window beside hps_io (docs/LW_BRIDGE.md)
 LW_DIAG                  | LW window diagnostics readable (debug builds only)
 MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot (with MISTER_LW_SECTOR_FRAME, MISTER_LW_BLKSZ, MISTER_LW_CARD*)
 
+
+#### Optional scaler features
+Some macros remove a scaler feature to save FPGA resources. Each one sets a bit in the reply to the `UIO_SET_VIDEO` (0x20) command, so the HPS binary can tell the feature is missing. A clear bit means the feature is present.
+
+Macro                     | 0x20 reply bit | Saves (Quartus 17.0.2, one fit)  | Lost
+--------------------------|----------------|----------------------------------|---------------------------------
+MISTER_DISABLE_DOWNSCALE  | 2              | about 270 ALMs, 5 M10K, 6 DSP    | any HDMI picture smaller than the core's output
+MISTER_DISABLE_VGA_SCALER | 3              | about 1,000 ALMs, 0 M10K (one fit)| `vga_scaler=1` and the framebuffer on the analog output
+
+**Policy.** MISTER_DISABLE_VGA_SCALER may ship in a published core. MISTER_DISABLE_DOWNSCALE is for area-critical builds only: it is the core author's choice, never a default, and never enabled just because it fits.
+
+**MISTER_DISABLE_DOWNSCALE is not safe with a stock HPS binary that does not read bit 2.** Without the downscale path the scaler cannot shrink a picture: if the HDMI output window is smaller than the core's picture (for example `video_mode` 640x480 with a 704-pixel-wide core, or a small `vscale_mode` result) the picture is broken. Stock Main does not read bit 2, so a published core that sets it breaks under stock Main whenever the window is smaller than the picture. Enable it only in a core whose output always fits the usual 720p/1080p windows, and say so in the core's release notes.
+
+**MISTER_DISABLE_VGA_SCALER is safe with any HPS binary.** The analog output shows the core's native picture, as with `vga_scaler=0`, and a core's `VGA_SCALER` request has no effect. It has no effect with MISTER_DUAL_SDRAM: dual SDRAM boards use the analog pins for the second SDRAM, so that build never had the scaled analog output, and bit 3 stays clear.
 
 # Quartus version
 Cores must be developed in **Quartus v17.0.x**. It's recommended to have updates, so it will be **v17.0.2**. Newer versions won't give any benefits to FPGA used in MiSTer, however they will introduce incompatibilities in project settings and it will make harder to maintain the core and collaborate with others. **So please stick to good old 17.0.x version.** You may use either Lite or Standard license.
