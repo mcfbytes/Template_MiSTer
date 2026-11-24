@@ -483,6 +483,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_copyv : unsigned(0 TO 14);
 	SIGNAL o_adrs : unsigned(31 DOWNTO 0); -- Avalon address
 	SIGNAL o_adrs_pre : natural RANGE 0 TO 2**24-1;
+	SIGNAL o_vaadr : unsigned(23 DOWNTO 0) :=(OTHERS =>'0'); -- o_vacpt * o_stride, accumulated
 	SIGNAL o_stride : unsigned(13 DOWNTO 0);
 	SIGNAL o_adrsa,o_adrsb,o_rline : std_logic;
 	SIGNAL o_ad,o_ad1,o_ad2,o_ad3 : natural RANGE 0 TO 2*BLEN-1;
@@ -2139,12 +2140,14 @@ BEGIN
 						o_vacc     <=o_vacc_ini;
 						o_vacc_next<=o_vacc_ini + 2*o_ivsize;
 						o_vacpt <=x"001";
+						o_vaadr <=resize(o_stride,24);
 						o_vacptl<="01";
 						vcarry_v:=false;
 					END IF;
 
 					IF vcarry_v THEN
 						o_vacpt<=o_vacpt+1;
+						o_vaadr<=o_vaadr + o_stride;
 					END IF;
 					IF vcarry_v AND o_prim THEN
 						o_vacptl<=o_vacptl+1;
@@ -2204,18 +2207,14 @@ BEGIN
 			-- To counteract the severe vibrating/motion with bob deinterlacing, we need to offset one field
 			-- by a half-line. This is done by only reading the first line of the 'even' frame once
 
-			IF o_inter='1' AND o_bob_deint='1' THEN
-				IF o_iwfl(o_obuf0)='0' THEN
-					IF o_vacpt=0 OR o_rline='1' THEN
-						o_adrs_pre <= to_integer(o_vacpt) * to_integer(o_stride);
-					ELSE
-						o_adrs_pre <= (to_integer(o_vacpt)-1) * to_integer(o_stride);
-					END IF;
-				ELSE
-					o_adrs_pre <= to_integer(o_vacpt(11 DOWNTO 1) & "0") * to_integer(o_stride);
-				END IF;
+			-- o_vacpt * o_stride, held in o_vaadr; a bob line that reads o_vacpt-1, or o_vacpt
+			-- with its low bit cleared, is one stride back
+			IF o_inter='1' AND o_bob_deint='1' AND
+				((o_iwfl(o_obuf0)='0' AND o_vacpt/=0 AND o_rline='0') OR
+				 (o_iwfl(o_obuf0)='1' AND o_vacpt(0)='1')) THEN
+				o_adrs_pre<=to_integer(o_vaadr - o_stride);
 			ELSE
-				o_adrs_pre<=to_integer(o_vacpt) * to_integer(o_stride);
+				o_adrs_pre<=to_integer(o_vaadr);
 			END IF;
 
 			IF o_adrsa='1' THEN
