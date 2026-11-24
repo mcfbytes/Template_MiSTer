@@ -250,6 +250,8 @@ end
 assign writedata_master    = writedata_slave;
 assign readdata_slave      = readdata_master;
 assign readdatavalid_slave = readdatavalid_master;
-assign waitrequest_slave   = waitrequest_master;
+// The bus belongs to this module until termination ends: a user master that
+// leaves reset sooner must wait, or it would take these beats for its own.
+assign waitrequest_slave   = waitrequest_master | terminating;
 
 endmodule
