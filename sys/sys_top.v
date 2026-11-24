@@ -308,6 +308,16 @@ wire       io_osd_vga   = io_ss1 & ~io_ss2;
 	`else
 		wire vga_scaler   = cfg[2] | vga_force_scaler;
 	`endif
+	`ifdef MISTER_DISABLE_VGA_SCALER
+		wire vgas_en      = 0;
+		wire scaler_no_vga = 1;
+	`else
+		wire vgas_en      = vga_fb | vga_scaler;
+		wire scaler_no_vga = 0;
+	`endif
+`else
+	// Dual SDRAM boards have no analog output, so MISTER_DISABLE_VGA_SCALER has nothing to remove.
+	wire scaler_no_vga = 0;
 `endif
 
 // UIO_SET_VIDEO (0x20) reply: bit 0 pixel repetition, bit 1 VRR, bits 2+ a scaler feature compiled out.
@@ -403,7 +413,7 @@ always@(posedge clk_sys) begin
 				areset <= 1;
 				io_dout_sys <= 'b11;
 			end
-			if(io_din[7:0] == 'h20) io_dout_sys <= {13'd0, scaler_no_downscale, 2'b11};
+			if(io_din[7:0] == 'h20) io_dout_sys <= {12'd0, scaler_no_vga, scaler_no_downscale, 2'b11};
 `ifdef MISTER_DISABLE_ADAPTIVE
 			if(io_din[7:0] == 'h2B) io_dout_sys <= {fb_en, sl_r, 4'b0110};
 `else
@@ -1354,7 +1364,7 @@ assign HDMI_TX_D  = hdmi_out_d;
 	`ifndef MISTER_DEBUG_NOHDMI
 		cyclonev_clkselect vga_clk_sw
 		( 
-			.clkselect({1'b1, ~vga_fb & ~vga_scaler}),
+			.clkselect({1'b1, ~vgas_en}),
 			.inclk({clk_vid, hdmi_clk_out, 2'b00}),
 			.outclk(vga_tx_clk)
 		);
@@ -1480,7 +1490,11 @@ reg  [39:0] PhaseInc;
 	wire VGA_DISABLE;
 	wire [23:0] vgas_o;
 	wire vgas_hs, vgas_vs, vgas_cs, vgas_de;
-	`ifndef MISTER_DEBUG_NOHDMI
+	`ifdef MISTER_DISABLE_VGA_SCALER
+		assign {vgas_o, vgas_hs, vgas_vs, vgas_cs, vgas_de} = 0;
+	`elsif MISTER_DEBUG_NOHDMI
+		assign {vgas_o, vgas_hs, vgas_vs, vgas_cs, vgas_de} = 0;
+	`else
 		vga_out vga_scaler_out
 		(
 			.clk(clk_hdmi),
@@ -1496,8 +1510,6 @@ reg  [39:0] PhaseInc;
 			.csync_o(vgas_cs),
 			.de_o(vgas_de)
 		);
-	`else
-		assign {vgas_o, vgas_hs, vgas_vs, vgas_cs, vgas_de} = 0;
 	`endif
 
 	wire [23:0] vga_o, vga_o_t;
@@ -1523,8 +1535,6 @@ reg  [39:0] PhaseInc;
 	`else
 		assign {vga_o, vga_hs, vga_vs, vga_cs, vga_de } =  {vga_o_t, vga_hs_t, vga_vs_t, vga_cs_t, vga_de_t } ;
 	`endif
-
-	wire vgas_en = vga_fb | vga_scaler;
 
 	wire cs1 = vgas_en ? vgas_cs : vga_cs;
 	wire de1 = vgas_en ? vgas_de : vga_de;
