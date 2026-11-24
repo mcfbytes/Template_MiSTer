@@ -61,10 +61,11 @@ set_global_assignment -name SEED 1
 # disable bilinear filtering when downscaling
 #set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
 
-# remove the scaler's downscale path: the HDMI window must be at least the core's picture size
+# remove the scaler's downscale path. AREA-CRITICAL BUILDS ONLY, the core author's choice, never a default:
+# stock Main does not read the 0x20 reply bit, so the picture breaks whenever the HDMI window is smaller than the core's picture
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
 
-# remove the scaled picture on the analog output (vga_scaler=1); no effect with MISTER_DUAL_SDRAM
+# remove the scaled picture on the analog output (vga_scaler=1); safe for published cores; no effect with MISTER_DUAL_SDRAM
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_SCALER=1"
 
 # disable adaptive scanline filtering

@@ -54,7 +54,9 @@ Macro                     | 0x20 reply bit | Saves (Quartus 17.0.2, one fit)  | 
 MISTER_DISABLE_DOWNSCALE  | 2              | about 270 ALMs, 5 M10K, 6 DSP    | any HDMI picture smaller than the core's output
 MISTER_DISABLE_VGA_SCALER | 3              | about 150 ALMs, 1 M10K (estimate) | `vga_scaler=1` and the framebuffer on the analog output
 
-**MISTER_DISABLE_DOWNSCALE is not safe with a stock HPS binary that does not read bit 2.** Without the downscale path the scaler cannot shrink a picture: if the HDMI output window is smaller than the core's picture (for example `video_mode` 640x480 with a 704-pixel-wide core, or a small `vscale_mode` result) the picture is broken. Enable it only in a core whose output always fits the usual 720p/1080p windows, and say so in the core's release notes.
+**Policy.** MISTER_DISABLE_VGA_SCALER may ship in a published core. MISTER_DISABLE_DOWNSCALE is for area-critical builds only: it is the core author's choice, never a default, and never enabled just because it fits.
+
+**MISTER_DISABLE_DOWNSCALE is not safe with a stock HPS binary that does not read bit 2.** Without the downscale path the scaler cannot shrink a picture: if the HDMI output window is smaller than the core's picture (for example `video_mode` 640x480 with a 704-pixel-wide core, or a small `vscale_mode` result) the picture is broken. Stock Main does not read bit 2, so a published core that sets it breaks under stock Main whenever the window is smaller than the picture. Enable it only in a core whose output always fits the usual 720p/1080p windows, and say so in the core's release notes.
 
 **MISTER_DISABLE_VGA_SCALER is safe with any HPS binary.** The analog output shows the core's native picture, as with `vga_scaler=0`, and a core's `VGA_SCALER` request has no effect. It has no effect with MISTER_DUAL_SDRAM: dual SDRAM boards use the analog pins for the second SDRAM, so that build never had the scaled analog output, and bit 3 stays clear.
 
