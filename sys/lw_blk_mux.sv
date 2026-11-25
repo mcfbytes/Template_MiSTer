@@ -73,14 +73,24 @@ endmodule
 `endif
 `ifdef MISTER_OCRAM_MOUNT0_SLOT
 `define LW_SAVE_MUX_BUILT
-`define LW_SAVE_MUX_DIN
 `endif
 `ifdef MISTER_OCRAM_MOUNT1_SLOT
 `ifndef LW_SAVE_MUX_BUILT
 `define LW_SAVE_MUX_BUILT
 `endif
+`endif
+// LW_SAVE_MUX_DIN: the OCRAM mount slots are built (a mount macro with MISTER_OCRAM and its SECTOR tier), so the
+// LBA field carries core_din under the ack; a mount macro left in a build without them changes nothing here.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_SAVE_MUX_DIN
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
 `ifndef LW_SAVE_MUX_DIN
 `define LW_SAVE_MUX_DIN
+`endif
+`endif
 `endif
 `endif
 `ifdef LW_SAVE_MUX_BUILT
