@@ -238,6 +238,11 @@ wire  [7:0] lw_op    = HPS_BUS[93:86];
 wire  [7:0] lw_idx   = HPS_BUS[85:78];
 wire [31:0] lw_dat   = HPS_BUS[77:46];
 assign HPS_BUS[375] = 1'b1;
+`ifdef MISTER_LW_KBM
+// MISTER_LW_KBM (PROVISIONAL): a key frame store holds the frame's bytes as ps2_key_raw would, last byte lowest
+wire        lw_pressed  = (lw_dat[15:8] != 8'hf0);
+wire        lw_extended = (~lw_pressed ? (lw_dat[23:16] == 8'he0) : (lw_dat[15:8] == 8'he0));
+`endif
 `endif
 
 `ifdef LW_EVT_X
@@ -302,6 +307,18 @@ ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
 `ifndef MISTER_LW_PAD
 spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();
 `endif
+`endif
+// MISTER_LW_KBM (PROVISIONAL) puts the keys, the mouse and the analog triggers on the LW PAD block, so it needs that
+// block; a PS2DIV core's keys and mouse are byte streams into its PS/2 devices, which a store cannot feed.
+`ifdef MISTER_LW_KBM
+`ifndef MISTER_LW_PAD
+lw_kbm_needs_MISTER_LW_PAD lw_kbm_guard();
+`endif
+generate
+	if (PS2DIV != 0) begin : lw_kbm_ps2div
+		lw_kbm_on_a_PS2DIV_core guard();
+	end
+endgenerate
 `endif
 // MISTER_DISABLE_SPI_BLK compiles out the link's block arms (0x16-0x18). Every slot below VDNUM is on a mailbox block
 // tier (BLK_TIER: the OCRAM SECTOR and mount slots; the LW SECTOR family is not counted) or named in
@@ -876,6 +893,28 @@ always@(posedge clk_sys) begin : uio_block
 					 4: joystick_r_analog_4 <= lw_dat[15:0];
 					 5: joystick_r_analog_5 <= lw_dat[15:0];
 				endcase
+`ifdef MISTER_LW_KBM
+			// the key frame, formed and toggled as the link's frame end forms it; the mouse's extension, then its
+			// packet with bit 24's toggle; a trigger pair, a level
+			'h05: if(!lw_idx) begin
+					ps2_key <= {~ps2_key[10], lw_pressed, lw_extended, lw_dat[7:0]};
+					if(lw_dat == 'hE012E07C) ps2_key[9:0] <= 'h37C; // prnscr pressed
+					if(lw_dat == 'h7CE0F012) ps2_key[9:0] <= 'h17C; // prnscr released
+					if(lw_dat == 'hF014F077) ps2_key[9:0] <= 'h377; // pause  pressed
+				end
+			'h04: case(lw_idx)
+					0: ps2_mouse <= {~ps2_mouse[24], lw_dat[23:0]};
+					1: ps2_mouse_ext <= lw_dat[15:0];
+				endcase
+			'h46: case(lw_idx)
+					0: {joystick_rt_analog_0, joystick_lt_analog_0} <= lw_dat[15:0];
+					1: {joystick_rt_analog_1, joystick_lt_analog_1} <= lw_dat[15:0];
+					2: {joystick_rt_analog_2, joystick_lt_analog_2} <= lw_dat[15:0];
+					3: {joystick_rt_analog_3, joystick_lt_analog_3} <= lw_dat[15:0];
+					4: {joystick_rt_analog_4, joystick_lt_analog_4} <= lw_dat[15:0];
+					5: {joystick_rt_analog_5, joystick_lt_analog_5} <= lw_dat[15:0];
+				endcase
+`endif
 		endcase
 	end
 `endif

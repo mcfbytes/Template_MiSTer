@@ -243,6 +243,11 @@ localparam TB_PADB = 1;
 `else
 localparam TB_PADB = 0;
 `endif
+`ifdef MISTER_LW_KBM
+localparam TB_KBM = 1;
+`else
+localparam TB_KBM = 0;
+`endif
 `ifdef MISTER_LW_EVT
 localparam TB_EVTB = 1;
 `else
@@ -1288,7 +1293,7 @@ task pad_hold_cases;
 			end
 		for (r = 0; r < 20; r = r + 1) axi_write(pad_addr(8'h1A, 8'hAF), 32'h00000040 + r, 4'hF);   // spinner_2
 		axi_read(PADB, 0, s1, dl0, nb);
-		check("T-PAD1: STAT counts the 4 spinner stores past the FIFO", s1, s0 + 32'd4);
+		check("T-PAD1: STAT counts the 4 spinner stores past the FIFO", s1, s0 + 32'd4 + (TB_KBM ? 32'h00100000 : 0));
 		check("T-PAD1: no register moves while clk_sys is stopped",
 		      {joy0, joy1, joy2, joy3, joy4, joy5, lstk, rstk, pdl, spn} === r0, 1);
 		sys_run = 1;
@@ -1312,6 +1317,269 @@ task pad_hold_cases;
 		check("T-PAD1: STAT holds its count after the restart", v, s0 + 32'd4);
 	end
 endtask
+
+`ifdef MISTER_LW_KBM
+// MISTER_LW_KBM (arm K): hps_io's key, mouse and trigger outputs, read through
+// the hierarchy; each toggle of ps2_key[10] and ps2_mouse[24] logged on clk_sys, with the value it came with.
+wire [10:0] tb_key  = hps_io.ps2_key;
+wire [24:0] tb_mse  = hps_io.ps2_mouse;
+wire [15:0] tb_mext = hps_io.ps2_mouse_ext;
+wire [95:0] tb_trig = {hps_io.joystick_rt_analog_5, hps_io.joystick_lt_analog_5, hps_io.joystick_rt_analog_4,
+                       hps_io.joystick_lt_analog_4, hps_io.joystick_rt_analog_3, hps_io.joystick_lt_analog_3,
+                       hps_io.joystick_rt_analog_2, hps_io.joystick_lt_analog_2, hps_io.joystick_rt_analog_1,
+                       hps_io.joystick_lt_analog_1, hps_io.joystick_rt_analog_0, hps_io.joystick_lt_analog_0};
+reg   [9:0] key_log [0:255];
+reg  [39:0] mse_log [0:255];          // {ps2_mouse_ext, ps2_mouse[23:0]} at the toggle
+integer     n_key = 0, n_mse = 0;
+reg         key_t = 0, mse_t = 0;
+always @(negedge clk_sys) begin
+	if (tb_key[10] !== key_t) begin key_log[n_key % 256] = tb_key[9:0]; n_key = n_key + 1; key_t = tb_key[10]; end
+	if (tb_mse[24] !== mse_t) begin
+		mse_log[n_mse % 256] = {tb_mext, tb_mse[23:0]}; n_mse = n_mse + 1; mse_t = tb_mse[24];
+	end
+end
+
+// The key frames: the bytes the link sends, the store's word (the last four bytes, the last lowest) and ps2_key[9:0]
+// as the link's frame end forms it: {pressed, extended, code}, or the three special frames' own codes.
+localparam KF_N = 8;
+function [63:0] kf_bytes(input integer i);   // up to 8 bytes, first byte highest; kf_len(i) of them
+	case (i)
+		0: kf_bytes = 64'h1C;                   // make
+		1: kf_bytes = 64'hF01C;                 // break
+		2: kf_bytes = 64'hE074;                 // extended make
+		3: kf_bytes = 64'hE0F074;               // extended break
+		4: kf_bytes = 64'hE012E07C;             // print screen, make
+		5: kf_bytes = 64'hE0F07CE0F012;         // print screen, break
+		6: kf_bytes = 64'hE11477E1F014F077;     // pause
+		default: kf_bytes = 64'hE01F;           // extended make, another code
+	endcase
+endfunction
+function integer kf_len(input integer i);
+	kf_len = (i == 0) ? 1 : (i == 1 || i == 2 || i == 7) ? 2 : (i == 3) ? 3 : (i == 4) ? 4 : (i == 5) ? 6 : 8;
+endfunction
+function [9:0] kf_key(input integer i);
+	case (i)
+		0: kf_key = 10'h21C; 1: kf_key = 10'h01C; 2: kf_key = 10'h374; 3: kf_key = 10'h174;
+		4: kf_key = 10'h37C; 5: kf_key = 10'h17C; 6: kf_key = 10'h377; default: kf_key = 10'h31F;
+	endcase
+endfunction
+
+// one key frame on the link: 0x05, then a word per byte
+task spi_key(input integer i);
+	integer b;
+	reg [63:0] by;
+	begin
+		by = kf_bytes(i);
+		@(negedge clk_sys); io_enable = 1;
+		spi_w(16'h0005);
+		for (b = kf_len(i) - 1; b >= 0; b = b - 1) spi_w({8'h00, by[8 * b +: 8]});
+		io_enable = 0; repeat (4) @(negedge clk_sys);
+	end
+endtask
+// one mouse packet on the link: 0x04 and its three words
+task spi_mouse(input [15:0] w1, input [15:0] w2, input [15:0] w3);
+	begin
+		@(negedge clk_sys); io_enable = 1;
+		spi_w(16'h0004); spi_w(w1); spi_w(w2); spi_w(w3);
+		io_enable = 0; repeat (4) @(negedge clk_sys);
+	end
+endtask
+
+localparam TB_SPIKBM = 1;               // the link's 0x04, 0x05 and 0x46 arms are built
+
+// K1: every key frame on the link and as a store, ps2_key identical; two mouse packets with their extension; the six
+// trigger pairs.
+task kbm_k1;
+	reg  [9:0] kl;
+	reg [39:0] ml;
+	reg [95:0] t0;
+	reg [15:0] tl, ts;
+	integer i, n0, m0, np;
+	begin
+		$display("-- K1: PAD K0 lists 0x04 and 0x05, K2 lists 0x46, K8 is unchanged");
+		rd("PAD K0: 0x02, 0x03, 0x04, 0x05, 0x10-0x13, 0x1A", 21'h40060, 32'h040F003C);
+		rd("PAD K1: 0x3D", 21'h40064, 32'h20000000);
+		rd("PAD K2: 0x46", 21'h40068, 32'h00000040);
+		rd("PAD K8: {16, 24}", 21'h40080, 32'h00100018);
+		$display("-- K1: every key frame over the link and as a store at 0x05 index 0, ps2_key the same");
+		for (i = 0; i < KF_N; i = i + 1) begin
+			n0 = n_key; kl = tb_key[9:0];
+			spi_key(i);
+			settle;
+			if (TB_SPIKBM) begin
+				check($sformatf("K1 frame %0d over the link: one toggle", i), n_key - n0, 1);
+				check($sformatf("K1 frame %0d over the link: ps2_key", i), {22'd0, tb_key[9:0]}, {22'd0, kf_key(i)});
+				kl = tb_key[9:0];
+			end
+			else begin
+				check($sformatf("K1 frame %0d over the link: no toggle", i), n_key - n0, 0);
+				check($sformatf("K1 frame %0d over the link: ps2_key unchanged", i), {22'd0, tb_key[9:0]}, {22'd0, kl});
+				kl = kf_key(i);
+			end
+			n0 = n_key;
+			axi_write(pad_addr(8'h05, 8'h00), kf_bytes(i), 4'hF);
+			settle;
+			check($sformatf("K1 frame %0d as a store: one toggle", i), n_key - n0, 1);
+			check($sformatf("K1 frame %0d as a store: ps2_key as the link forms it", i), {22'd0, tb_key[9:0]},
+			      {22'd0, kl});
+		end
+		$display("-- K1: two mouse packets over the link, then as stores: the extension at index 1, the packet at 0");
+		for (i = 0; i < 2; i = i + 1) begin
+			// {ext, packet}: 0xCAFE, 0x7F8009 from words 7E09 0A80 0C7F; 0x9501, 0x040302 from 0102 0503 0904
+			m0 = n_mse; ml = {tb_mext, tb_mse[23:0]};
+			if (i == 0) spi_mouse(16'h7E09, 16'h0A80, 16'h0C7F); else spi_mouse(16'h0102, 16'h0503, 16'h0904);
+			settle;
+			if (TB_SPIKBM) begin
+				check($sformatf("K1 mouse %0d over the link: one toggle", i), n_mse - m0, 1);
+				check($sformatf("K1 mouse %0d over the link: packet", i), {8'd0, tb_mse[23:0]},
+				      i == 0 ? 32'h007F8009 : 32'h00040302);
+				check($sformatf("K1 mouse %0d over the link: extension", i), {16'd0, tb_mext}, i == 0 ? 32'hCAFE : 32'h9501);
+			end
+			else begin
+				check($sformatf("K1 mouse %0d over the link: no toggle", i), n_mse - m0, 0);
+				check($sformatf("K1 mouse %0d over the link: packet and extension unchanged", i),
+				      {tb_mext, tb_mse[23:0]} === ml, 1);
+			end
+			// the stores, to a cleared pair first so the values cannot be the link's left over
+			axi_write(pad_addr(8'h04, 8'h01), 32'h00000000, 4'hF);
+			axi_write(pad_addr(8'h04, 8'h00), 32'h00000000, 4'hF);
+			settle;
+			m0 = n_mse;
+			axi_write(pad_addr(8'h04, 8'h01), i == 0 ? 32'hFFFFCAFE : 32'h00009501, 4'hF);
+			settle;
+			check($sformatf("K1 mouse %0d: the extension's store toggles nothing", i), n_mse - m0, 0);
+			check($sformatf("K1 mouse %0d: the extension lands", i), {16'd0, tb_mext}, i == 0 ? 32'hCAFE : 32'h9501);
+			axi_write(pad_addr(8'h04, 8'h00), i == 0 ? 32'hFF7F8009 : 32'h00040302, 4'hF);
+			settle;
+			check($sformatf("K1 mouse %0d: the packet's store toggles once", i), n_mse - m0, 1);
+			check($sformatf("K1 mouse %0d: at the toggle, the packet and its extension as the link leaves them", i),
+			      mse_log[(n_mse - 1) % 256] === (i == 0 ? 40'hCAFE7F8009 : 40'h9501040302), 1);
+		end
+		$display("-- K1: the stores at no key are ignored (0x05 index 1, 0x04 index 2, 0x46 index 6 and 8)");
+		np = n_padwe;
+		axi_write(pad_addr(8'h05, 8'h01), 32'h0000001C, 4'hF);
+		axi_write(pad_addr(8'h04, 8'h02), 32'h00123456, 4'hF);
+		axi_write(pad_addr(8'h46, 8'h06), 32'h00005A5A, 4'hF);
+		axi_write(pad_addr(8'h46, 8'h08), 32'h00005A5A, 4'hF);
+		settle;
+		check("K1: stores at no key: nothing crosses", n_padwe - np, 0);
+		$display("-- K1: the six trigger pairs over the link, then as stores at 0x46 index 0-5");
+		for (i = 0; i < 6; i = i + 1) begin
+			t0 = tb_trig; tl = 16'h1100 + 16'h2211 * i; ts = 16'h0C0D + 16'h1010 * i;
+			spi_cmd3(16'h0046, i, tl);
+			settle;
+			if (TB_SPIKBM)
+				check($sformatf("K1 trigger %0d over the link: {rt, lt}", i), {16'd0, tb_trig[16 * i +: 16]}, {16'd0, tl});
+			else
+				check($sformatf("K1 trigger %0d over the link: unchanged", i), tb_trig === t0, 1);
+			t0 = tb_trig;
+			axi_write(pad_addr(8'h46, i), {16'hFFFF, ts}, 4'hF);
+			settle;
+			check($sformatf("K1 trigger %0d as a store: {rt, lt}", i), {16'd0, tb_trig[16 * i +: 16]}, {16'd0, ts});
+			check($sformatf("K1 trigger %0d as a store: the other pairs unchanged", i),
+			      (tb_trig & ~(96'hFFFF << (16 * i))) === (t0 & ~(96'hFFFF << (16 * i))), 1);
+		end
+		$display("-- K1: a trigger is a level: 50 stores with clk_sys stopped cross once, the last");
+		sys_run = 0; repeat (20) @(negedge clk);
+		np = n_padwe; n0 = n_key;
+		axi_write(pad_addr(8'h02, 8'h00), 32'h00000077, 4'hF);   // the word in flight
+		for (i = 0; i < 50; i = i + 1) axi_write(pad_addr(8'h46, 8'h02), 32'h00000100 + i, 4'hF);
+		sys_run = 1; repeat (slow(300)) @(negedge clk);
+		check("K1: the trigger pair crossed once, behind the word in flight", n_padwe - np, 2);
+		check("K1: trigger 2 holds the last store", {16'd0, tb_trig[32 +: 16]}, 32'h00000131);
+		check("K1: no key toggled", n_key - n0, 0);
+	end
+endtask
+
+// K2's key events: make and break of codes 0x10 up, alternately (a break is 0xF0 then the code)
+function [31:0] k2_raw(input integer i);
+	k2_raw = i[0] ? 32'h0000F010 + i : 32'h00000010 + i;
+endfunction
+function [9:0] k2_key(input integer i);
+	k2_key = i[0] ? 10'h010 + i : 10'h210 + i;
+endfunction
+
+// K2: the FIFO at its level. A host that does not pace drops what finds the FIFO full, counted; one that paces by
+// STAT's level loses nothing, its events arriving in store order.
+task kbm_k2;
+	reg [31:0] s0, s1, dl0;
+	integer i, n0, m0, nb, bad, waits, full_seen, nk, nm, t;
+	begin
+		$display("-- K2: a host that does not pace: 20 key stores with clk_sys stopped, 16 queued, 4 dropped");
+		axi_read(PADB, 0, s0, dl0, nb);
+		check("K2: STAT level 0 at rest", {27'd0, s0[20:16]}, 0);
+		sys_run = 0; repeat (20) @(negedge clk);
+		n0 = n_key;
+		axi_write(pad_addr(8'h02, 8'h00), 32'h00000078, 4'hF);   // the word in flight
+		repeat (40) @(negedge clk);
+		for (i = 0; i < 20; i = i + 1) axi_write(pad_addr(8'h05, 8'h00), k2_raw(i), 4'hF);
+		axi_read(PADB, 0, s1, dl0, nb);
+		check("K2: STAT level 16, the FIFO full", {27'd0, s1[20:16]}, 16);
+		check("K2: STAT drops counts the 4 stores past the FIFO", {16'd0, s1[15:0]}, {16'd0, s0[15:0] + 16'd4});
+		sys_run = 1;
+		t = 0; while (n_key - n0 < 16 && t < slow(20000)) begin @(negedge clk); t = t + 1; end
+		settle;
+		check("K2: 16 keys delivered", n_key - n0, 16);
+		bad = 0;
+		for (i = 0; i < 16; i = i + 1) if (key_log[(n0 + i) % 256] !== k2_key(i)) bad = bad + 1;
+		check("K2: the first 16 in store order", bad, 0);
+		axi_read(PADB, 0, s1, dl0, nb);
+		check("K2: STAT after the drain: level 0, the drops held", s1, {11'd0, 5'd0, s0[15:0] + 16'd4});
+
+		$display("-- K2: a host that paces by STAT: 40 events (keys, and every fifth a mouse packet), none dropped");
+		axi_read(PADB, 0, s0, dl0, nb);
+		sys_run = 0; repeat (20) @(negedge clk);
+		n0 = n_key; m0 = n_mse; nk = 0; nm = 0; waits = 0; full_seen = 0;
+		axi_write(pad_addr(8'h02, 8'h00), 32'h00000079, 4'hF);   // the word in flight
+		repeat (40) @(negedge clk);
+		fork
+			begin : pacer
+				integer e, need;
+				reg [31:0] st;
+				for (e = 0; e < 40; e = e + 1) begin
+					need = (e % 5 == 4) ? 2 : 1;
+					axi_read(PADB, 0, st, dl0, nb);
+					while (5'd16 - st[20:16] < need) begin
+						waits = waits + 1;
+						if (st[20:16] == 5'd16) full_seen = 1;
+						axi_read(PADB, 0, st, dl0, nb);
+					end
+					if (need == 2) begin
+						axi_write(pad_addr(8'h04, 8'h01), 32'h00001000 + nm, 4'hF);
+						axi_write(pad_addr(8'h04, 8'h00), 32'h00200000 + nm, 4'hF);
+						nm = nm + 1;
+					end
+					else begin
+						axi_write(pad_addr(8'h05, 8'h00), k2_raw(nk), 4'hF);
+						nk = nk + 1;
+					end
+				end
+			end
+			begin : clock
+				t = 0;
+				while (!full_seen && t < 100000) begin @(negedge clk); t = t + 1; end
+				repeat (200) @(negedge clk);
+				sys_run = 1;
+			end
+		join
+		t = 0;
+		while ((n_key - n0 < nk || n_mse - m0 < nm) && t < slow(20000)) begin @(negedge clk); t = t + 1; end
+		settle;
+		check("K2: the pacing host met a full FIFO and waited", full_seen && waits > 0, 1);
+		check("K2: 32 keys delivered", n_key - n0, 32);
+		check("K2: 8 mouse packets delivered", n_mse - m0, 8);
+		bad = 0;
+		for (i = 0; i < 32; i = i + 1) if (key_log[(n0 + i) % 256] !== k2_key(i)) bad = bad + 1;
+		check("K2: every key in store order", bad, 0);
+		bad = 0;
+		for (i = 0; i < 8; i = i + 1)
+			if (mse_log[(m0 + i) % 256] !== {16'h1000 + i[15:0], 24'h200000 + i[23:0]}) bad = bad + 1;
+		check("K2: every mouse packet with its own extension, in store order", bad, 0);
+		axi_read(PADB, 0, s1, dl0, nb);
+		check("K2: STAT: level 0, no drop", s1, {11'd0, 5'd0, s0[15:0]});
+	end
+endtask
+`endif
 `endif
 
 // The host's first two drain steps on a CAUSE word: read it, store the value back (write-one-to-clear).
@@ -2949,6 +3217,7 @@ task dm_build;
 		if (TB_PAD) begin
 			dm_entry(e, 1, 32'h00010001, 32'h40000, 32'h40000, 0, 0, 0);           // PAD 1.1
 			dm[16 + 32 * e + 8] = 32'h040F000C; dm[16 + 32 * e + 9] = 32'h20000000;   // K0-K7: the opcode bitmap
+			if (TB_KBM) begin dm[16 + 32 * e + 8] = 32'h040F003C; dm[16 + 32 * e + 10] = 32'h00000040; end
 			dm[16 + 32 * e + 16] = 32'h00100018;                                       // K8 {spinner FIFO, slots}
 `ifdef MISTER_DISABLE_SPI_PAD
 			dm[16 + 32 * e + 17] = 32'd1;                                              // K9: no link pad arm
@@ -6035,7 +6304,7 @@ initial begin
 	check("paddle_1 (idx {pdsp=1,stick=15})", {24'd0, pdl1}, 32'h000000C8);
 	axi_write(pad_addr(8'h02, 1), 32'h11111111, 4'hF); settle;
 	check("op 02 idx 1 dropped", joy0, 32'h8001F00F);
-	axi_write(pad_addr(8'h05, 0), 32'h22222222, 4'hF); settle;
+	axi_write(pad_addr(TB_KBM ? 8'h47 : 8'h05, 0), 32'h22222222, 4'hF); settle;
 	check("unhonoured op dropped", joy0, 32'h8001F00F);
 	axi_write(pad_addr(8'h02, 0), 32'h0000A0A0, 4'hF);
 	axi_write(pad_addr(8'h03, 0), 32'h0000B0B0, 4'hF);
@@ -6231,6 +6500,10 @@ initial begin
 	check("left analog_0: the last of 10 lands on restart", {16'd0, ana0}, 32'h0000000A);
 	check("right analog_0: the last of 10 lands on restart", {16'd0, rana0}, 32'h00000014);
 	pad_hold_cases;
+`endif
+`ifdef MISTER_LW_KBM
+	kbm_k1;
+	kbm_k2;
 `endif
 
 `ifndef MISTER_LW_SECTOR_SLOT
