@@ -2157,6 +2157,61 @@ task case17;
 	end
 endtask
 
+// 28. non-OKAY responses on the walker's reads and its tail store
+task case28;
+	integer r, b, n3, mr0, mw0;
+	begin
+		$display("-- SLVERR on the head read, a payload word, a header and the tail store: each is retried, the rows land");
+		reset_floor;
+		osd_clear;
+		start_session(0, 0, 0, 16'h0A1C, ok);
+		osd_bind_now(16'h0A1C, ok);
+		osd_head = 0; n3 = ROWS / 3; mr0 = m_rd_err; mw0 = m_wr_err;
+		for (r = 0; r < ROWS; r = r + 1) begin make_row(r); spi_row(r); end
+		for (b = 0; b < 3; b = b + 1) begin
+			case (b)
+			0: begin inj_rd_addr = H_IDX2; inj_rd_en = 1; inj_wr_addr = C_IDX2; inj_wr_en = 1; end
+			1: begin inj_rd_addr = OSD_BASE + (((osd_head + 5) & (OSD_WORDS - 1)) << 2); inj_rd_en = 1; end
+			default: begin inj_rd_addr = OSD_BASE + (((osd_head + 65) & (OSD_WORDS - 1)) << 2); inj_rd_en = 1; end
+			endcase
+			for (r = b * n3; r < ((b == 2) ? ROWS : (b + 1) * n3); r = r + 1) osd_publish_row(r);
+			osd_publish;
+			osd_wait_tail(osd_head[15:0], 10000, ok);
+			check($sformatf("batch %0d: C_IDX[2] reaches the head past the error", b), ok, 1);
+			check($sformatf("batch %0d: every injected error was answered", b), {inj_rd_en, inj_wr_en}, 2'b00);
+		end
+		check("the monitor saw the three read errors", m_rd_err - mr0, 3);
+		check("the monitor saw the write error", m_wr_err - mw0, 1);
+		osd_compare(bad);
+		check("osd B's buffer equals osd A's, byte for byte", bad, 0);
+		peek(C_STATE, v); check("an error response is not a fault", {v[10], v[18]}, 2'b00);
+	end
+endtask
+
+// 29. a full ring: the head exactly the ring's size ahead of the tail is served, not a fault
+task case29;
+	integer r;
+	begin
+		$display("-- a full OSD ring (%0d words) in one head store: served, C_IDX[2] = the head, no fault", OSD_WORDS);
+		reset_floor;
+		osd_clear;
+		start_session(0, 0, 0, 16'h0A1D, ok);
+		osd_bind_now(16'h0A1D, ok);
+		osd_head = 0;
+		for (r = 0; r < ROWS; r = r + 1) begin make_row(r); spi_row(r); end
+		for (r = 0; r < OSD_WORDS / 65; r = r + 1) osd_publish_row(r % ROWS);
+		osd_hdr(8'h77, 8'd0, OSD_WORDS - 1 - 65 * (OSD_WORDS / 65));   // an unknown kind fills the rest
+		while (osd_head < OSD_WORDS) osd_word(32'h5A5A_5A5A);
+		check("the records fill the ring exactly", osd_head, OSD_WORDS);
+		osd_publish;
+		osd_wait_tail(OSD_WORDS, 20000, ok);
+		check("C_IDX[2] reaches the head", ok, 1);
+		peek(C_STATE, v); check("a full ring is not a fault", {v[10], v[18]}, 2'b00);
+		osd_compare(bad);
+		check("osd B's buffer equals osd A's, byte for byte", bad, 0);
+	end
+endtask
+
 // 18. the guard
 task case18;
 	integer wc;
@@ -4910,6 +4965,8 @@ initial begin
 	case15;
 	case16;
 	case17;
+	case28;
+	case29;
 	case18;
 	case19;
 	case20;
