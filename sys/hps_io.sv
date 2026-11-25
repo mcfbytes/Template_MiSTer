@@ -339,6 +339,43 @@ lw_tier_needs_MISTER_LW osd_guard();
 ocram_sector_needs_MISTER_LW ocram_sector_guard();
 `endif
 `endif
+// An OCRAM tier macro without the floor, MISTER_OCRAM: the build stops here, naming the guard.
+`ifndef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+ocram_tier_needs_MISTER_OCRAM ocram_osd_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+ocram_tier_needs_MISTER_OCRAM ocram_sector_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+ocram_tier_needs_MISTER_OCRAM ocram_mount0_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+ocram_tier_needs_MISTER_OCRAM ocram_mount1_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_FIO
+ocram_tier_needs_MISTER_OCRAM ocram_fio_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_DIAG
+ocram_tier_needs_MISTER_OCRAM ocram_diag_floor_guard();
+`endif
+`endif
+// The LW SECTOR block reports MISTER_LW_BLKSZ (default 2) as the slot's block size, so it must be this instance's
+// BLKSZ, or the build stops here.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef MISTER_LW_BLKSZ
+localparam integer LW_BLKSZ_DECL = `MISTER_LW_BLKSZ;
+`else
+localparam integer LW_BLKSZ_DECL = 2;
+`endif
+generate
+	if (LW_BLKSZ_DECL != BLKSZ) begin : lw_blksz
+		lw_blksz_differs_from_hps_io guard();
+	end
+endgenerate
+`endif
+`endif
 // LW_OCRAM_CFG_HPS: the OCRAM floor's macros as localparams (ocram_cfg.vh), for its tiers' checks below.
 `ifdef MISTER_OCRAM
 `define LW_OCRAM_CFG_HPS

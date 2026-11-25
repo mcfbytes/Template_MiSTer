@@ -156,6 +156,11 @@ reg clk = 0;            // clk_100m
 reg clk_run = 1;        // 0 = clk_100m stopped (low)
 always #5 clk = clk_run ? ~clk : 1'b0;
 
+// hps_io below is BLKSZ 3, and checks the LW SECTOR block's MISTER_LW_BLKSZ against it
+`ifndef MISTER_LW_BLKSZ
+`define MISTER_LW_BLKSZ 3
+`endif
+
 // clk_sys: half period LW_TB_SYS_HP_PS (default 33.8688 MHz), stretched by 50 ppm so its phase against clk_100m
 // sweeps at every rate, 100 MHz included. Edges are placed from an accumulated real time, so the 1 ps
 // precision does not round the offset away.
