@@ -244,15 +244,25 @@ localparam [255:0] LANE_OPS = (256'd1 << 8'h01) | (256'd1 << 8'h1C) | (256'd1 <<
 localparam [31:0] LANE_CAPS = 32'h0000_0003;
 
 // PAD kind words K0-K7: the honoured-opcode bitmap; K8 {spinner FIFO depth, keyed slots}; K9 bit 0: the link's
-// pad arm is not built (MISTER_DISABLE_SPI_PAD in hps_io.sv), so the pads have no path but this block.
+// pad arm is not built (MISTER_DISABLE_SPI_PAD in hps_io.sv), so the pads have no path but this block; K9 bit 1
+// (PROVISIONAL): the link's key, mouse and trigger arms are not built (MISTER_DISABLE_SPI_KBM). MISTER_LW_KBM adds
+// 0x04, 0x05 (K0 bits 4, 5) and 0x46 (K2 bit 6); K8 is unchanged (its FIFO depth is the event FIFO's).
 `ifdef MISTER_DISABLE_SPI_PAD
-localparam [31:0] PAD_K9    = 32'd1;
+localparam [31:0] PAD_K9_P  = 32'd1;
 `else
-localparam [31:0] PAD_K9    = 32'd0;
+localparam [31:0] PAD_K9_P  = 32'd0;
+`endif
+`ifdef MISTER_DISABLE_SPI_KBM
+localparam [31:0] PAD_K9    = PAD_K9_P | 32'd2;
+`else
+localparam [31:0] PAD_K9    = PAD_K9_P;
 `endif
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
                              (256'd1 << 8'h12) | (256'd1 << 8'h13) |
+`ifdef MISTER_LW_KBM
+                             (256'd1 << 8'h04) | (256'd1 << 8'h05) | (256'd1 << 8'h46) |
+`endif
                              (256'd1 << 8'h1A) | (256'd1 << 8'h3D);
 
 // The header's read/write words, as word indices of the directory page.

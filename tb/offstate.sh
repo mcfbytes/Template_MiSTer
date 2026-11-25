@@ -15,6 +15,10 @@
 #   1e. hps_io.sv with MISTER_LW, the OCRAM SECTOR and mount slots and MISTER_DISABLE_SPI_BLK gives the uio_block of
 #      the same build without it less exactly the link's block arms (0x16, 0x17, 0x18: the command word's and the
 #      data words'), under each of those macro sets.
+#   1f. hps_io.sv with MISTER_LW, MISTER_LW_PAD, MISTER_LW_KBM and MISTER_DISABLE_SPI_KBM gives the uio_block of the
+#      same build without it less exactly the link's key, mouse and trigger arms (0x04, 0x05, 0x46) and their
+#      frame-end steps and registers (ps2skip, atrig_idx, the key and mouse toggles, the clear of ps2_key_raw), token
+#      for token as a multiset, and no ps2_key_raw anywhere in the file, under each of those macro sets.
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
 #      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without every one of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
@@ -58,7 +62,7 @@ if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ] || [ ! -f "$UP/Template.sv
 fi
 command -v iverilog >/dev/null 2>&1 || { echo "FAILED: no iverilog on PATH"; exit 1; }
 exec python3 -I - "$UP" "$O" <<'EOF'
-import difflib, os, re, subprocess, sys
+import collections, difflib, os, re, subprocess, sys
 UP, O = sys.argv[1], sys.argv[2]
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
@@ -232,6 +236,80 @@ for label, defs in sets:
           gone.count('begin') == gone.count('end'),
           'sys/hps_io.sv [SPI_BLK, %s]: uio_block is not the build\'s less the arms %s: removed %s, other edits %s'
           % (label, ' '.join(BLKARMS), ' '.join(blabels(['end'] + gone)), other))
+
+print('-- hps_io.sv with MISTER_DISABLE_SPI_KBM: the uio_block without it less exactly the key, mouse and trigger arms')
+# the text MISTER_DISABLE_SPI_KBM removes from uio_block, as built without it; compared as a multiset of tokens
+KBMGONE = tokens("""
+	reg  [7:0] atrig_idx;
+	reg        ps2skip = 0;
+		if(cmd == 4 && !ps2skip) ps2_mouse[24] <= ~ps2_mouse[24];
+		if(cmd == 5 && !ps2skip) begin
+			ps2_key <= {~ps2_key[10], pressed, extended, ps2_key_raw[7:0]};
+			if(ps2_key_raw == 'hE012E07C) ps2_key[9:0] <= 'h37C;
+			if(ps2_key_raw == 'h7CE0F012) ps2_key[9:0] <= 'h17C;
+			if(ps2_key_raw == 'hF014F077) ps2_key[9:0] <= 'h377;
+		end
+		ps2skip <= 0;
+			if(io_din == 5) ps2_key_raw <= 0;
+				'h04: begin
+							if(PS2DIV) begin
+								mouse_data <= io_din[7:0];
+								mouse_we   <= 1;
+							end
+							if(&io_din[15:8]) ps2skip <= 1;
+							if(~&io_din[15:8] && ~ps2skip && !byte_cnt[MAX_W:2]) begin
+								case(byte_cnt[1:0])
+									1: ps2_mouse[7:0]   <= io_din[7:0];
+									2: ps2_mouse[15:8]  <= io_din[7:0];
+									3: ps2_mouse[23:16] <= io_din[7:0];
+								endcase
+								case(byte_cnt[1:0])
+									1: ps2_mouse_ext[7:0]  <= {io_din[14], io_din[14:8]};
+									2: ps2_mouse_ext[11:8] <= io_din[11:8];
+									3: ps2_mouse_ext[15:12]<= io_din[11:8];
+								endcase
+							end
+						end
+				'h05: begin
+							if(&io_din[15:8]) ps2skip <= 1;
+							if(~&io_din[15:8] & ~ps2skip) ps2_key_raw[31:0] <= {ps2_key_raw[23:0], io_din[7:0]};
+							if(PS2DIV) begin
+								kbd_data <= io_din[7:0];
+								kbd_we <= 1;
+							end
+						end
+				'h46: case(byte_cnt)
+							1: atrig_idx <= io_din[7:0];
+							2: case(atrig_idx)
+									0: {joystick_rt_analog_0, joystick_lt_analog_0} <= io_din;
+									1: {joystick_rt_analog_1, joystick_lt_analog_1} <= io_din;
+									2: {joystick_rt_analog_2, joystick_lt_analog_2} <= io_din;
+									3: {joystick_rt_analog_3, joystick_lt_analog_3} <= io_din;
+									4: {joystick_rt_analog_4, joystick_lt_analog_4} <= io_din;
+									5: {joystick_rt_analog_5, joystick_lt_analog_5} <= io_din;
+								endcase
+						endcase
+""")
+for label, defs in sets:
+    kbd = ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_KBM']
+    mine, e1 = pp('sys/hps_io.sv', kbd + ['MISTER_DISABLE_SPI_KBM'] + defs)
+    base, e2 = pp('sys/hps_io.sv', kbd + defs)
+    if not check(mine is not None and base is not None, 'sys/hps_io.sv [SPI_KBM, %s]: preprocessor error %s%s' %
+                 (label, e1, e2)):
+        continue
+    check('ps2_key_raw' in base and 'ps2_key_raw' not in mine,
+          'sys/hps_io.sv [SPI_KBM, %s]: ps2_key_raw is not in the build without it, or is in the build with it' % label)
+    a_, b_ = uio_block(mine), uio_block(base)
+    if not check(a_ is not None and b_ is not None, 'sys/hps_io.sv [SPI_KBM, %s]: no uio_block' % label):
+        continue
+    ops = difflib.SequenceMatcher(None, b_, a_, autojunk=False).get_opcodes()
+    gone = sum((b_[i1:i2] for tg, i1, i2, _, _ in ops if tg == 'delete'), [])
+    other = [tg for tg, _, _, _, _ in ops if tg not in ('equal', 'delete')]
+    extra = sorted((collections.Counter(gone) - collections.Counter(KBMGONE)).elements())
+    kept = sorted((collections.Counter(KBMGONE) - collections.Counter(gone)).elements())
+    check(not other and not extra and not kept,
+          'sys/hps_io.sv [SPI_KBM, %s]: uio_block is not the build\'s less the key, mouse and trigger arms: also '
+          'removed %s, not removed %s, other edits %s' % (label, ' '.join(extra[:12]), ' '.join(kept[:12]), other))
 
 lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
 OCM = 'hps_ocram_master.sv'

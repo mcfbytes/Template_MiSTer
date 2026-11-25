@@ -26,6 +26,16 @@
 #   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
 #   P  LW_DIAG=0 with MISTER_DISABLE_SPI_PAD: the link's eight pad opcodes (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D) are
 #      ignored and the LW PAD block's are taken; PAD K9 bit 0 reads 1 (the other arms prove the link's are taken)
+#   K  LW_DIAG=0 with every tier but the lane and MISTER_LW_KBM (keys, mouse and analog triggers as PAD stores), seed
+#      1: K1, PAD K0 0x040F003C, K2 0x40 and K8 0x00100018; every key frame (make, break, extended make and break,
+#      print screen made and broken, pause) on the link (0x05) and as a store at 0x05 index 0, ps2_key the same and
+#      toggled once each; two mouse packets on the link (0x04) and as stores (the extension at index 1 toggling
+#      nothing, the packet at index 0 toggling once), the packet and its extension the link's; the six trigger pairs
+#      on the link (0x46) and as stores, each landing alone; stores at no key ignored; a trigger a level (50 stores
+#      with clk_sys stopped cross once). K2, the event FIFO: with clk_sys stopped a host that does not pace queues
+#      16 of 20 key stores (STAT level 16, drops + 4) and the 16 arrive in order; a host that paces by STAT's level
+#      (one entry a key, two a mouse packet) meets the full FIFO, waits, and its 32 keys and 8 packets all arrive in
+#      store order with no drop. And verilator --lint-only -Wall on lw_pad.sv with MISTER_LW_KBM, which must be silent
 #   X  each tier macro without MISTER_LW: the compile of hps_io fails, naming lw_tier_needs_MISTER_LW (and
 #      compiles without the macro, and with MISTER_LW); and each unservable SECTOR geometry: the compile of the
 #      window fails, naming lw_sector_unservable_geometry (and the servable edges compile); and the Template's
@@ -40,7 +50,9 @@
 #      MISTER_DISABLE_SPI_BLK_UNUSED, or with a tier slot named in it (spi_blk_off_needs_a_block_tier,
 #      spi_blk_off_slot_without_a_tier, spi_blk_off_unused_slot_on_a_tier), or with a tier slot at or above VDNUM
 #      (spi_blk_off_tier_slot_outside_vdnum); and the OCRAM mount slots with MISTER_OCRAM_BLKSZ (default 2) not
-#      hps_io's BLKSZ (ocram_blksz_differs_from_hps_io), each with its legal neighbours
+#      hps_io's BLKSZ (ocram_blksz_differs_from_hps_io), each with its legal neighbours; and the
+#      key tier's: MISTER_LW_KBM without MISTER_LW_PAD (lw_kbm_needs_MISTER_LW_PAD) or on a core with PS2DIV
+#      (lw_kbm_on_a_PS2DIV_core), MISTER_DISABLE_SPI_KBM without MISTER_LW_KBM (spi_kbm_off_needs_MISTER_LW_KBM)
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -96,7 +108,10 @@
 #      MISTER_DISABLE_SPI_BLK (0x16 reads 0 with requests raised, 0x17 and 0x18 raise no ack and no strobe, the
 #      commit mark reads 0 on every cycle, present) and without it (the same words show the arms alive); and
 #      six runs that each break one of the core's obligations, each named by hps_io's simulation checks (a mount
-#      request of more than one block among them, with and without MISTER_DISABLE_SPI_BLK)
+#      request of more than one block among them, with and without MISTER_DISABLE_SPI_BLK).
+#      And the removal MISTER_DISABLE_SPI_KBM: lw_tb.sv's short tier run with MISTER_LW_KBM and it, PAD K9 bit 1
+#      reads 1, arm K's K1 with the link's 0x04, 0x05 and 0x46 changing nothing and the stores landing as the link's
+#      frames would, and K2 as in arm K
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -104,7 +119,7 @@
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y K}
 O=${LW_TB_OUT:-tb/out}
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
@@ -349,6 +364,33 @@ ocram() {
   else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
 
+# kbmk LOG: arm K, lw_tb.sv's full run with MISTER_LW_KBM (seed 1), then verilator on lw_pad.sv with it.
+kbmk() {
+  : > "$1"; n=0; f=0
+  D="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_OSD -DMISTER_LW_SECTOR_SLOT=1"
+  D="$D -DMISTER_LW_KBM"
+  echo "-- lw_tb compiles (MISTER_LW_KBM)" >> "$1"
+  if iverilog -g2012 $D -I sys -o "$O/kbmK.vvp" $TBF > "$O/kbmK.err" 2>&1; then
+    echo "pass lw_tb: compiles" >> "$1"; n=$((n + 1))
+    vvp -n "$O/kbmK.vvp" +lw_seed=1 > "$O/kbmK.log" 2>&1
+    echo "== seed 1 kbm" >> "$1"; cat "$O/kbmK.log" >> "$1"
+    grep -Eq '^(PASSED|FAILED): [0-9]' "$O/kbmK.log" || echo "FAIL lw_tb: gave no result" >> "$1"
+  else
+    f=$((f + 1)); echo "FAIL lw_tb: does not compile" >> "$1"; head -20 "$O/kbmK.err" | sed 's/^/   /' >> "$1"
+  fi
+  echo "-- verilator --lint-only -Wall on lw_pad.sv with MISTER_LW_KBM, which must be silent" >> "$1"
+  if command -v verilator >/dev/null 2>&1; then
+    if ! verilator --lint-only -Wall -DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM --top-module lw_pad -Isys \
+         sys/lw_pad.sv sys/lw_cdc.sv > "$O/kbmV.log" 2>&1 || [ -s "$O/kbmV.log" ]; then
+      f=$((f + 1)); echo "FAIL verilator: lw_pad (MISTER_LW_KBM)" >> "$1"; head -20 "$O/kbmV.log" | sed 's/^/   /' >> "$1"
+    else echo "pass verilator: no warning" >> "$1"; n=$((n + 1)); fi
+  else
+    echo "SKIPPED verilator: not on PATH" >> "$1"
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
+}
+
 # rmy LOG: arm Y, the two removals. Each shape compiles once and runs under every seed (blkoff_tb once); the
 # violation runs are judged by the one hps_io line each must print, not by their own result.
 rmy() {
@@ -364,6 +406,18 @@ rmy() {
     grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_lw.log" || echo "FAIL lw_tb: gave no result" >> "$1"
   else
     f=$((f + 1)); echo "FAIL lw_tb: does not compile" >> "$1"; head -20 "$O/rmY_lw.err" | sed 's/^/   /' >> "$1"
+  fi
+  # lw_tb.sv's short tier run, the key tier with MISTER_DISABLE_SPI_KBM
+  YK="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_KBM"
+  YK="$YK -DMISTER_DISABLE_SPI_KBM"
+  echo "-- lw_tb compiles (the tier run with MISTER_DISABLE_SPI_KBM)" >> "$1"
+  if iverilog -g2012 $YK -I sys -o "$O/rmY_kbm.vvp" $TBF > "$O/rmY_kbm.err" 2>&1; then
+    echo "pass lw_tb: compiles (kbm)" >> "$1"; n=$((n + 1))
+    vvp -n "$O/rmY_kbm.vvp" > "$O/rmY_kbm.log" 2>&1
+    echo "== seed 1 kbm" >> "$1"; cat "$O/rmY_kbm.log" >> "$1"
+    grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_kbm.log" || echo "FAIL lw_tb kbm: gave no result" >> "$1"
+  else
+    f=$((f + 1)); echo "FAIL lw_tb: does not compile (kbm)" >> "$1"; head -20 "$O/rmY_kbm.err" | sed 's/^/   /' >> "$1"
   fi
   # ocram_tb.sv: the OSD shape with MISTER_DISABLE_SPI_OSD, the mount shape with both removals
   OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
@@ -614,6 +668,40 @@ ok|-|the mount slots with MISTER_DISABLE_SPI_BLK at BLKSZ 3, VDNUM 4, slot 0 nam
 ok|-|MISTER_OCRAM_BLKSZ 3 and hps_io's BLKSZ 2 with the SECTOR tier alone (no mount slot)|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_BLKSZ=3
 ok|-|the mount macros and MISTER_OCRAM_BLKSZ 3 without MISTER_OCRAM, hps_io's BLKSZ 2|-DMISTER_LW -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_BLKSZ=3
 EOG
+  # the key tier's guards: MISTER_LW_KBM needs the PAD tier and refuses a PS2DIV core; MISTER_DISABLE_SPI_KBM needs it.
+  # No PS2DIV neighbour that compiles: stock hps_io with PS2DIV set does not compile under Icarus, so a PS2DIV case
+  # can only be a refusal.
+  cat > "$O/lw_xk_top.sv" <<'EOS'
+module lw_xk_top;
+`ifdef XK_PS2DIV
+hps_io #(.CONF_STR("X;"), .PS2DIV(`XK_PS2DIV)) hps_io();
+`else
+hps_io #(.CONF_STR("X;")) hps_io();
+`endif
+endmodule
+EOS
+  while IFS='|' read -r want guard what d; do
+    echo "-- $what" >> "$1"
+    iverilog -g2012 $d -I sys -s lw_xk_top -o "$O/lw_xk.vvp" "$O/lw_xk_top.sv" sys/hps_io.sv > "$O/lw_xk.err" 2>&1
+    r=$?; n=$((n + 1)); g=$(grep -c "$guard" "$O/lw_xk.err")
+    if [ "$want" = bad ]; then
+      if [ $r -ne 0 ] && [ "$g" -gt 0 ]; then echo "pass $what: stops, naming $guard" >> "$1"
+      else f=$((f + 1)); echo "FAIL $what: status $r, $guard $g times in the errors" >> "$1"; fi
+    elif [ $r -eq 0 ]; then echo "pass $what: compiles" >> "$1"
+    else f=$((f + 1)); echo "FAIL $what: does not compile" >> "$1"
+      grep -v ': warning: ' "$O/lw_xk.err" | head -5 | sed 's/^/   /' >> "$1"; fi
+  done <<'EOG'
+bad|lw_kbm_needs_MISTER_LW_PAD|MISTER_LW_KBM alone|-DMISTER_LW_KBM
+bad|lw_kbm_needs_MISTER_LW_PAD|MISTER_LW_KBM with MISTER_LW and no MISTER_LW_PAD|-DMISTER_LW -DMISTER_LW_KBM
+bad|lw_tier_needs_MISTER_LW|MISTER_LW_KBM with MISTER_LW_PAD and no MISTER_LW|-DMISTER_LW_PAD -DMISTER_LW_KBM
+ok|-|MISTER_LW_KBM with MISTER_LW_PAD|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM
+bad|lw_kbm_on_a_PS2DIV_core|MISTER_LW_KBM on a core with PS2DIV|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DXK_PS2DIV=2000
+bad|spi_kbm_off_needs_MISTER_LW_KBM|MISTER_DISABLE_SPI_KBM alone|-DMISTER_DISABLE_SPI_KBM
+bad|spi_kbm_off_needs_MISTER_LW_KBM|MISTER_DISABLE_SPI_KBM with MISTER_LW_PAD, no MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_DISABLE_SPI_KBM
+ok|-|MISTER_DISABLE_SPI_KBM with MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_KBM
+ok|-|both pad removals with both pad tiers|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_PAD -DMISTER_DISABLE_SPI_KBM
+bad|lw_kbm_on_a_PS2DIV_core|MISTER_DISABLE_SPI_KBM on a core with PS2DIV|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_KBM -DXK_PS2DIV=2000
+EOG
   echo "-- no tier macro" >> "$1"
   iverilog -g2012 -I sys -s lw_x_top -o "$O/lw_x.vvp" "$O/lw_x_top.sv" sys/hps_io.sv > "$O/lw_x.err" 2>&1
   r=$?; n=$((n + 1))
@@ -862,6 +950,15 @@ for g in $ARMS; do
     rmy "$O/rmY.log"
     grep -v "^pass " "$O/rmY.log" | grep -v '^== seed'
     V=$(verdict Y "$O/rmY.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = K ]; then
+    echo "== arm K: MISTER_LW_KBM, the keys, the mouse and the triggers on the PAD block; verilator lint"
+    kbmk "$O/kbm_tbK.log"
+    grep -v "^pass " "$O/kbm_tbK.log" | grep -v '^== seed'
+    V=$(verdict K "$O/kbm_tbK.log") || rc=1
     R="$R$V
 "
     continue
