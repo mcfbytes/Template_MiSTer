@@ -37,7 +37,7 @@
 # Upstream's tree is read with git into $LW_TB_OUT/upstream. Where git cannot reach the repository (the
 # container tb/run.sh starts), run "tb/offstate.sh --extract" outside first; tb/run.sh does.
 # Output: "-- " headings, a FAIL line per failed check, then PASSED/FAILED with the counts (tb/run.sh's verdict).
-UPSTREAM=e901a9f
+UPSTREAM=d6324f2
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}; UP="$O/upstream"
 if git rev-parse --verify -q "$UPSTREAM^{commit}" >/dev/null 2>&1; then
