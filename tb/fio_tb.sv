@@ -162,24 +162,18 @@ wire [DW:0] do_a, do_b;
 wire [31:0] fx_a, fx_b;
 
 // the block ports' arrays, idle
-wire [31:0] z_lba [1];
-wire  [5:0] z_cnt [1];
-wire [DW:0] z_din [1];
-assign z_lba[0] = 0;
-assign z_cnt[0] = 0;
-assign z_din[0] = 0;
 
 hps_io #(.CONF_STR("FIO;;"), .WIDE(WIDE)) io_a
 (
 	.clk_sys(clk_sys), .HPS_BUS(bus_a),
-	.sd_lba(z_lba), .sd_blk_cnt(z_cnt), .sd_rd(1'b0), .sd_wr(1'b0), .sd_buff_din(z_din), .ioctl_wait(wait_a), .ioctl_din({(DW+1){1'b0}}),
+	.sd_rd(1'b0), .sd_wr(1'b0), .ioctl_wait(wait_a), .ioctl_din({(DW+1){1'b0}}),
 	.ioctl_download(dl_a), .ioctl_index(ix_a), .ioctl_wr(wr_a), .ioctl_addr(ad_a), .ioctl_dout(do_a),
 	.ioctl_file_ext(fx_a)
 );
 hps_io #(.CONF_STR("FIO;;"), .WIDE(WIDE)) io_b
 (
 	.clk_sys(clk_sys), .HPS_BUS(bus_b),
-	.sd_lba(z_lba), .sd_blk_cnt(z_cnt), .sd_rd(1'b0), .sd_wr(1'b0), .sd_buff_din(z_din), .ioctl_wait(wait_b), .ioctl_din({(DW+1){1'b0}}),
+	.sd_rd(1'b0), .sd_wr(1'b0), .ioctl_wait(wait_b), .ioctl_din({(DW+1){1'b0}}),
 	.ioctl_download(dl_b), .ioctl_index(ix_b), .ioctl_wr(wr_b), .ioctl_addr(ad_b), .ioctl_dout(do_b),
 	.ioctl_file_ext(fx_b)
 );

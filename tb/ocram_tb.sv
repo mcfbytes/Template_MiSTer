@@ -2923,19 +2923,13 @@ wire [45:0] fbus;
 assign fbus[45:38] = 8'd0;
 assign fbus[35:33] = {m_sel[1], m_sel[0], m_strobe};
 assign fbus[31:16] = m_din;
-wire [31:0] fz_lba [1];
-wire  [5:0] fz_cnt [1];
-wire [15:0] fz_din [1];
-assign fz_lba[0] = 0;
-assign fz_cnt[0] = 0;
-assign fz_din[0] = 0;
 wire        io_dl, io_wr;
 wire [15:0] io_ix, io_do;
 wire [26:0] io_ad;
 hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) fio_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(fbus), .ioctl_wait(f_wait), .ioctl_din(16'd0),
-	.sd_lba(fz_lba), .sd_blk_cnt(fz_cnt), .sd_rd(1'b0), .sd_wr(1'b0), .sd_buff_din(fz_din),
+	.sd_rd(1'b0), .sd_wr(1'b0),
 	.ioctl_download(io_dl), .ioctl_index(io_ix), .ioctl_wr(io_wr), .ioctl_addr(io_ad), .ioctl_dout(io_do)
 );
 
