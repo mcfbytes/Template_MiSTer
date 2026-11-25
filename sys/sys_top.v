@@ -310,6 +310,11 @@ wire [10:0] ocram_m_n;
 wire [31:0] ocram_m_lba, ocram_m_wd;
 wire        ocram_rq_post, ocram_rq_start;
 wire [31:0] ocram_rq_lba;
+`ifdef MISTER_OCRAM_EVT
+// The events tier (MISTER_OCRAM_EVT): the master's ask and hps_ocram_evt's offer.
+wire        ocram_e_ask, ocram_e_v;
+wire [41:0] ocram_e_d;
+`endif
 // The download tier: the mark line (f2h_irq[12]), the ring's tail and its fault and mid levels; constants without it.
 wire        ocram_mline, ocram_c0_ffault, ocram_c0_fmid;
 wire [15:0] ocram_fio_tail;
@@ -1087,6 +1092,15 @@ hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_
 	.c0_ffault(ocram_c0_ffault),
 	.c0_fmid(ocram_c0_fmid),
 	.mark_line(ocram_mline),
+`ifdef MISTER_OCRAM_EVT
+	.e_ask(ocram_e_ask),
+	.e_v(ocram_e_v),
+	.e_d(ocram_e_d),
+`else
+	.e_ask(),
+	.e_v(1'b0),
+	.e_d(42'd0),
+`endif
 
 	.awid(ocram_awid),
 	.awaddr(ocram_awaddr),
@@ -2674,6 +2688,24 @@ lw_sys_window #(
 `endif
 `ifdef LW_OSD_PORTS
 `undef LW_OSD_PORTS
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_EVT
+// The OCRAM events tier's port (MISTER_OCRAM_EVT, which needs MISTER_LW: hps_io stops the build otherwise):
+// hps_io's offer on HPS_BUS[374:333] to the master, and the take on HPS_BUS[382], which nothing else drives.
+`ifdef MISTER_LW
+wire        ocram_e_take;
+hps_ocram_evt ocram_evt
+(
+	.clk(clk_100m), .ask(ocram_e_ask), .e_v(ocram_e_v), .e_d(ocram_e_d),
+	.clk_sys(clk_sys), .o_d(lw_bus[374:333]), .take(ocram_e_take)
+);
+assign lw_bus[382] = ocram_e_take;
+`else
+assign ocram_e_v = 1'b0;
+assign ocram_e_d = 42'd0;
+`endif
 `endif
 `endif
 // The link front (lw_link, sys/lw_lane.sv): the link's own selects, strobe and ack, or the player's while it plays a

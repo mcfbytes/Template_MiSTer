@@ -44,6 +44,11 @@
 // hps_io, two osds) takes each UIO and OSD frame's words over the link, and the cases compare it with the mailbox
 // side (fio_link's hps_io and two osds on the player's OSD selects): the UIO strobe streams, hps_io's and the osds'
 // registers, the toggles at each frame's end; frames outside the mask or with arg[6:2] set are skipped by length.
+// With MISTER_OCRAM_EVT (arm I, beside the SECTOR tier, MISTER_LW for hps_io's wide bus) a real hps_io gives the
+// events tier's port through hps_ocram_evt, and a twin hps_io on the same core inputs is polled over its own link:
+// each STATUS, INFO, UPLOAD and RUMBLE record against the twin's reply; nothing while C_BIND bit 8 is clear; the
+// causes standing at the bind; a STATUS torn by a second transfer abandoned; a REQUEST owed with a STATUS first.
+// With MISTER_DISABLE_SPI_EVT (arm Y) the link's replies read 0 and the records are held to the driven values.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -224,9 +229,21 @@ localparam RMO_B = 1;
 `else
 localparam RMO_B = 0;
 `endif
+// the events tier (MISTER_OCRAM_EVT): C_CAPS bit 11; its removal MISTER_DISABLE_SPI_EVT: bit 18
+`ifdef MISTER_OCRAM_EVT
+localparam EVT_B = 1;
+`else
+localparam EVT_B = 0;
+`endif
+`ifdef MISTER_DISABLE_SPI_EVT
+localparam RME_B = 1;
+`else
+localparam RME_B = 0;
+`endif
 localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0) |
                                (FIO_B ? 32'h2 : 32'h0) | (SEC_B ? 32'h400 : 32'h0) | (MNT_B ? 32'h1 : 32'h0)
-                               | (RMB_B ? 32'h1_0000 : 32'h0) | (RMO_B ? 32'h2_0000 : 32'h0);
+                               | (RMB_B ? 32'h1_0000 : 32'h0) | (RMO_B ? 32'h2_0000 : 32'h0)
+                               | (EVT_B ? 32'h800 : 32'h0) | (RME_B ? 32'h4_0000 : 32'h0);
 localparam [31:0] C_K8_EXP   = {ROWS16, 16'd256};
 
 localparam integer M_NORMAL = 0, M_SECURE_REFUSE = 1, M_NEVER = 2;
@@ -303,6 +320,13 @@ wire        p_own, p_hold, p_strobe;
 wire  [3:0] p_sel;
 wire [15:0] p_din;
 wire        l_busy_m, l_wait_m;
+// the events tier's port: the master's ask, hps_ocram_evt's offer (constants without MISTER_OCRAM_EVT)
+wire        e_ask, e_v;
+wire [41:0] e_d;
+`ifndef MISTER_OCRAM_EVT
+assign e_v = 1'b0;
+assign e_d = 42'd0;
+`endif
 // the SECTOR slot's core side (the window's xsec nets): the bench's consumer model drives the request
 reg         x_reset = 1'b0, x_hps_ack = 1'b0, x_req = 1'b0, x_commit = 1'b0;
 reg  [31:0] x_lba = 32'd0;
@@ -340,6 +364,7 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 	.sec_ask(sec_ask), .evt_stop(evt_stop), .c0_sfault(c0_sfault), .c0_smid(c0_smid), .c0_sbind(c0_sbind),
 	.c0_wide(c0_wide), .rq_post(rq_post), .rq_lba(rq_lba), .rq_start(rq_start),
 	.f_tail(f_tail), .c0_ffault(c0_ffault), .c0_fmid(c0_fmid), .mark_line(mark_out),
+	.e_ask(e_ask), .e_v(e_v), .e_d(e_d),
 	.c0_mfault(c0_mfault), .c0_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
 	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
 	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst),
@@ -934,6 +959,10 @@ reg [31:0] rq_lba_log [0:255];
 // mount REQUESTs' {arg, LBA}, the last WRITE's arg, LBA and words
 integer    ev_n = 0;
 reg [15:0] ev_log [0:1023];
+// the events tier's records as the host takes them: {kind, arg} and up to four payload words each
+integer    evd_n = 0, evd_published = 0, evd_abandoned = 0;
+reg [15:0] evd_ka [0:1023];
+reg [31:0] evd_w [0:4095];
 integer    bind_n = 0;
 reg  [7:0] bind_log [0:255];
 integer    mrq_n = 0;
@@ -1146,6 +1175,10 @@ always @(posedge clk) begin
 		bind_val = wdata[7:0];
 	end
 
+`ifdef MISTER_OCRAM_EVT
+	// a STATUS record the master abandoned (its head never stored): its words are forgotten
+	if (dut.ev_abandon) begin rec_writes = 0; evd_abandoned = evd_abandoned + 1; end
+`endif
 	// the event-ring accounting from the stores the master makes
 	if (awvalid && !awv_d) begin
 		if (in_evt(awaddr[15:0])) begin
@@ -1193,6 +1226,12 @@ always @(posedge clk) begin
 						merr("a WRITE header word");
 				end else if (SEC_B && rec_kind_m == 8'h27) begin
 					if (wdata[15:0] !== 16'd0) merr("a BIND header's length");
+				end else if (EVT_B && rec_kind_m == 8'h20) begin
+					if (wdata !== 32'h2000_0004) merr("a STATUS header word");
+				end else if (EVT_B && (rec_kind_m == 8'h28 || rec_kind_m == 8'h29)) begin
+					if (wdata[15:0] !== 16'd0) merr("an INFO or UPLOAD header's length");
+				end else if (EVT_B && rec_kind_m == 8'h2A) begin
+					if (wdata[15:0] !== 16'd1 || wdata[23:16] > 8'd5) merr("a RUMBLE header word");
 				end else merr("an EVT header of an unknown kind");
 				if (SEC_B && bind_owed) begin
 					if (rec_kind_m != 8'h27) merr("a record between a C_BIND store and its BIND");
@@ -1224,6 +1263,8 @@ always @(posedge clk) begin
 					wr_ack_at_pub = |xm_ack;
 				end
 				else if (rec_kind_m == 8'h27) bind_published = bind_published + 1;
+				else if (EVT_B && (rec_kind_m == 8'h20 || rec_kind_m == 8'h28 || rec_kind_m == 8'h29 ||
+				                   rec_kind_m == 8'h2A)) evd_published = evd_published + 1;
 				else verdict_published = verdict_published + 1;
 				b = (pub_head - (tail_seen & 16'hFFFF)) & 16'hFFFF;
 				if (b <= EVT_WORDS && b > m_deepest) m_deepest = b;
@@ -1296,6 +1337,13 @@ task evt_take(output integer got);
 					check("a BIND record: its length", hdr[15:0], 16'd0);
 					if (bind_n < 256) bind_log[bind_n] = hdr[23:16];
 					bind_n = bind_n + 1;
+				end else if (EVT_B && (kind == 8'h20 || kind == 8'h28 || kind == 8'h29 || kind == 8'h2A)) begin
+					if (evd_n < 1024) begin
+						evd_ka[evd_n] = hdr[31:16];
+						for (i = 0; i < 4; i = i + 1)
+							evd_w[evd_n * 4 + i] = (i < len) ? evt_word(host_tail + 1 + i[15:0]) : 32'd0;
+					end
+					evd_n = evd_n + 1;
 				end else begin
 					check("EVT record: a known kind", kind, 8'h23);
 				end
@@ -3027,6 +3075,326 @@ task sec_case17;
 endtask
 `endif
 
+`ifdef MISTER_OCRAM_EVT
+////////////////////////  the events tier's cases (arm I)  ////////////////////////
+
+// A real hps_io (the wide bus: MISTER_LW) on the event port through hps_ocram_evt, and a twin hps_io on the same
+// core inputs that the bench polls over its own link: each record is compared with the twin's link reply (the
+// 0x29 words, the 0x36 byte, the 0x3C index, the 0x?3F level). With MISTER_DISABLE_SPI_EVT the twin's replies read
+// 0, and the records are compared with the values the core drove.
+reg [127:0] e_sin = 128'd0;
+reg         e_sset = 1'b0, e_ireq = 1'b0, e_ureq = 1'b0;
+reg   [7:0] e_info = 8'd0, e_uidx = 8'd0;
+reg  [15:0] e_r0 = 16'd0, e_r1 = 16'd0, e_r2 = 16'd0, e_r3 = 16'd0, e_r4 = 16'd0, e_r5 = 16'd0;
+reg         e_uio = 1'b0, e_stb = 1'b0, t_uio = 1'b0, t_stb = 1'b0;
+reg  [15:0] e_din = 16'd0, t_din = 16'd0;
+wire        e_take;
+wire [383:0] ebus, tbus2;
+assign (weak0, weak1) ebus[383:46] = 338'd0;
+assign (weak0, weak1) tbus2[383:46] = 338'd0;
+assign ebus[45:38] = 8'd0;
+assign tbus2[45:38] = 8'd0;
+assign ebus[35:33] = {1'b0, e_uio, e_stb};
+assign tbus2[35:33] = {1'b0, t_uio, t_stb};
+assign ebus[31:16] = e_din;
+assign tbus2[31:16] = t_din;
+assign ebus[382] = e_take;
+hps_io #(.CONF_STR("EVT;;"), .WIDE(1)) ev_io
+(
+	.clk_sys(clk_sys), .HPS_BUS(ebus), .ioctl_wait(1'b0), .ioctl_din(16'd0), .sd_rd(1'b0), .sd_wr(1'b0),
+	.status_in(e_sin), .status_set(e_sset), .info_req(e_ireq), .info(e_info),
+	.ioctl_upload_req(e_ureq), .ioctl_upload_index(e_uidx),
+	.joystick_0_rumble(e_r0), .joystick_1_rumble(e_r1), .joystick_2_rumble(e_r2),
+	.joystick_3_rumble(e_r3), .joystick_4_rumble(e_r4), .joystick_5_rumble(e_r5)
+);
+hps_io #(.CONF_STR("EVT;;"), .WIDE(1)) tw_eio
+(
+	.clk_sys(clk_sys), .HPS_BUS(tbus2), .ioctl_wait(1'b0), .ioctl_din(16'd0), .sd_rd(1'b0), .sd_wr(1'b0),
+	.status_in(e_sin), .status_set(e_sset), .info_req(e_ireq), .info(e_info),
+	.ioctl_upload_req(e_ureq), .ioctl_upload_index(e_uidx),
+	.joystick_0_rumble(e_r0), .joystick_1_rumble(e_r1), .joystick_2_rumble(e_r2),
+	.joystick_3_rumble(e_r3), .joystick_4_rumble(e_r4), .joystick_5_rumble(e_r5)
+);
+hps_ocram_evt u_evt
+(
+	.clk(clk), .ask(e_ask), .e_v(e_v), .e_d(e_d), .clk_sys(clk_sys), .o_d(ebus[374:333]), .take(e_take)
+);
+
+// the core's causes: a status transfer, a notice, an upload request
+task e_status(input [127:0] v);
+	begin
+		@(negedge clk_sys); e_sin = v; e_sset = 1'b1;
+		repeat (3) @(negedge clk_sys); e_sset = 1'b0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+task e_info_edge(input [7:0] v);
+	begin
+		@(negedge clk_sys); e_info = v; e_ireq = 1'b1;
+		repeat (3) @(negedge clk_sys); e_ireq = 1'b0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+task e_upload_edge(input [7:0] v);
+	begin
+		@(negedge clk_sys); e_uidx = v; e_ureq = 1'b1;
+		repeat (3) @(negedge clk_sys); e_ureq = 1'b0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+
+// a link transaction on one hps_io's UIO select (tw 1: the twin): the opcode word, then n words of 0; e_rep[m] is
+// io_dout after word m's strobe, as the HPS reads it at the word's acknowledge
+reg  [15:0] e_rep [0:15];
+task e_txn(input tw, input [15:0] op, input integer n);
+	integer m;
+	begin
+		@(negedge clk_sys); if (tw) t_uio = 1'b1; else e_uio = 1'b1;
+		repeat (2) @(negedge clk_sys);
+		for (m = 0; m <= n; m = m + 1) begin
+			if (tw) begin t_din = (m == 0) ? op : 16'd0; t_stb = 1'b1; end
+			else begin e_din = (m == 0) ? op : 16'd0; e_stb = 1'b1; end
+			@(negedge clk_sys); t_stb = 1'b0; e_stb = 1'b0;
+			repeat (3) @(negedge clk_sys);
+			e_rep[m] = tw ? tw_eio.io_dout : ev_io.io_dout;
+		end
+		@(negedge clk_sys); t_uio = 1'b0; e_uio = 1'b0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+
+// the host: take every published record; wait for n more of the events tier's, at most us microseconds
+task e_drain;
+	integer got;
+	begin got = 1; while (got) evt_take(got); end
+endtask
+task e_wait(input integer n, input integer us, output integer ok1);
+	integer t, got;
+	begin
+		t = 0;
+		while (evd_n < n && t < us * 20) begin
+			evt_take(got);
+			if (!got) begin repeat (5) @(posedge clk); t = t + 1; end
+		end
+		ok1 = evd_n >= n;
+	end
+endtask
+// the record i the host took: its kind's index from the first, or -1
+function integer e_find(input integer from, input [7:0] kind, input [7:0] arg, input integer use_arg);
+	integer i;
+	begin
+		e_find = -1;
+		for (i = evd_n - 1; i >= from; i = i - 1)
+			if (evd_ka[i][15:8] == kind && (!use_arg || evd_ka[i][7:0] == arg)) e_find = i;
+	end
+endfunction
+function [31:0] e_word(input integer i, input integer w);
+	e_word = (i >= 0) ? evd_w[i * 4 + w] : 32'hDEAD_BEEF;
+endfunction
+// the twin's 0x29 status words, as the link reads them: {A, stflg}, then eight halves
+reg [127:0] tw_st;
+reg   [3:0] tw_flg;
+task tw_status;
+	integer j;
+	begin
+		e_txn(1, 16'h0029, 8);
+		tw_flg = e_rep[0][3:0];
+		for (j = 0; j < 8; j = j + 1) tw_st[j * 16 +: 16] = e_rep[1 + j];
+	end
+endtask
+
+task evt_session(input [15:0] nonce, input bind);
+	begin
+		sec_session(nonce, 0);
+		e_drain;
+		if (bind) begin
+			poke(H_BIND, 32'h0000_0100);
+			wait_word(C_BIND, 32'h0000_0101, 2000, ok);
+			check("C_BIND bit 8 is stored once H_BIND bit 8 is read", ok, 1);
+		end
+	end
+endtask
+
+// I1. nothing posted while bit 8 is clear; at the bind, the causes standing are posted, each against its link poll
+task evt_case1;
+	integer n0, i, ok1, b0;
+	reg [127:0] s1;
+	begin
+		$display("-- I1: C_BIND bit 8; nothing posted unbound; the causes standing at the bind, each against its link poll");
+		e_r0 = 16'd0; e_r1 = 16'd0; e_r2 = 16'd0; e_r3 = 16'd0; e_r4 = 16'd0; e_r5 = 16'd0;
+		evt_session(16'h0E01, 0);
+		n0 = evd_n;
+		s1 = {$random(seed), $random(seed), $random(seed), $random(seed)};
+		e_status(s1);
+		e_info_edge(8'h5A);
+		e_upload_edge(8'h07);
+		e_r2 = 16'hA55A;
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain;
+		check("I1: no record of the events tier with C_BIND bit 8 clear", evd_n - n0, 0);
+		check("I1: C_BIND bit 8 clear", mem[C_BIND >> 2][8], 0);
+		// the twin's link polls of the same causes
+		tw_status;
+		if (!RME_B) begin
+			check("I1: the twin's 0x29 flag word", {16'd0, e_rep[0]}, {24'd0, 4'hA, tw_flg});
+			check("I1: the twin's status words are the transfer", tw_st !== s1, 0);
+		end
+		else check("I1: 0x29 reads 0 with MISTER_DISABLE_SPI_EVT", {16'd0, e_rep[0]} | (tw_st !== 128'd0), 0);
+		e_txn(1, 16'h0036, 0);
+		check("I1: the twin's 0x36 byte", e_rep[0], RME_B ? 16'd0 : 16'h005A);
+		e_txn(1, 16'h003C, 0);
+		check("I1: the twin's 0x3C word", e_rep[0], RME_B ? 16'd0 : 16'h0701);
+		e_txn(1, 16'h023F, 0);
+		check("I1: the twin's 0x23F level", e_rep[0], RME_B ? 16'd0 : 16'hA55A);
+		// the bind
+		b0 = bind_n;
+		poke(H_BIND, 32'h0000_0100);
+		wait_word(C_BIND, 32'h0000_0101, 2000, ok1);
+		check("I1: C_BIND bit 8 is stored", ok1, 1);
+		e_wait(n0 + 4, 2000, ok1);
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain;
+		check("I1: a BIND record follows the store", bind_n - b0 >= 1, 1);
+		check("I1: four records: STATUS, INFO, UPLOAD, RUMBLE pad 2", evd_n - n0, 4);
+		i = e_find(n0, 8'h20, 8'd0, 0);
+		check("I1: the STATUS standing at the bind is its first", i >= 0, 1);
+		check("I1: STATUS word 0", e_word(i, 0), s1[31:0]);
+		check("I1: STATUS word 1", e_word(i, 1), s1[63:32]);
+		check("I1: STATUS word 2", e_word(i, 2), s1[95:64]);
+		check("I1: STATUS word 3", e_word(i, 3), s1[127:96]);
+		if (!RME_B) check("I1: STATUS against the link's 0x29 words",
+		                  {e_word(i, 3), e_word(i, 2), e_word(i, 1), e_word(i, 0)} !== tw_st, 0);
+		check("I1: INFO's byte (the 0x36 reply)", e_find(n0, 8'h28, 8'h5A, 1) >= 0, 1);
+		check("I1: UPLOAD's index (the 0x3C reply)", e_find(n0, 8'h29, 8'h07, 1) >= 0, 1);
+		i = e_find(n0, 8'h2A, 8'd2, 1);
+		check("I1: RUMBLE pad 2", i >= 0, 1);
+		check("I1: RUMBLE pad 2's level (the 0x23F reply)", e_word(i, 0), 32'h0000_A55A);
+		check("I1: no RUMBLE for a pad at level 0", e_find(n0, 8'h2A, 8'd0, 1), -1);
+		if (RME_B) begin
+			// the removal: the link's event replies read 0 on the tier's own hps_io too
+			e_txn(0, 16'h0029, 2);
+			check("I1: ev_io's 0x29 reads 0 (MISTER_DISABLE_SPI_EVT)", {e_rep[0], e_rep[1]}, 32'd0);
+			e_txn(0, 16'h003F, 0);
+			check("I1: ev_io's 0x3F reads 0 (MISTER_DISABLE_SPI_EVT)", e_rep[0], 16'd0);
+		end
+	end
+endtask
+
+// I2. while bound: each change once, against the twin's link poll; a level back to 0 is a record too
+task evt_case2;
+	integer n0, i, ok1;
+	reg [127:0] s2;
+	begin
+		$display("-- I2: changes while bound, each against its link poll");
+		n0 = evd_n;
+		s2 = {$random(seed), $random(seed), $random(seed), $random(seed)};
+		e_status(s2);
+		e_wait(n0 + 1, 2000, ok1);
+		i = e_find(n0, 8'h20, 8'd0, 0);
+		check("I2: a STATUS for the transfer", i >= 0, 1);
+		tw_status;
+		check("I2: STATUS words, the transfer", {e_word(i, 3), e_word(i, 2), e_word(i, 1), e_word(i, 0)} !== s2, 0);
+		if (!RME_B) check("I2: STATUS against the link's 0x29 words",
+		                  {e_word(i, 3), e_word(i, 2), e_word(i, 1), e_word(i, 0)} !== tw_st, 0);
+		n0 = evd_n;
+		e_r0 = 16'h1234;
+		e_wait(n0 + 1, 2000, ok1);
+		e_txn(1, 16'h003F, 0);
+		i = e_find(n0, 8'h2A, 8'd0, 1);
+		check("I2: RUMBLE pad 0 set", e_word(i, 0), 32'h0000_1234);
+		if (!RME_B) check("I2: RUMBLE pad 0 against the link's 0x3F", e_word(i, 0), {16'd0, e_rep[0]});
+		n0 = evd_n;
+		e_r0 = 16'h0000;
+		e_wait(n0 + 1, 2000, ok1);
+		i = e_find(n0, 8'h2A, 8'd0, 1);
+		check("I2: RUMBLE pad 0 back to 0", (i >= 0) ? e_word(i, 0) : 32'hFFFF_FFFF, 32'd0);
+		n0 = evd_n;
+		e_info_edge(8'hC3);
+		e_wait(n0 + 1, 2000, ok1);
+		e_txn(1, 16'h0036, 0);
+		check("I2: INFO's byte", e_find(n0, 8'h28, 8'hC3, 1) >= 0, 1);
+		check("I2: the twin's 0x36 byte", e_rep[0], RME_B ? 16'd0 : 16'h00C3);
+		n0 = evd_n;
+		e_upload_edge(8'h3E);
+		e_wait(n0 + 1, 2000, ok1);
+		check("I2: UPLOAD's index", e_find(n0, 8'h29, 8'h3E, 1) >= 0, 1);
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain;
+		check("I2: nothing more (the levels and the flag unchanged)", evd_n - n0, 1);
+	end
+endtask
+
+// I3. a STATUS torn by a second transfer while it is written is not published; the second is, whole
+task evt_case3;
+	integer n0, a0, i, t, ok1;
+	reg [127:0] s3, s4;
+	begin
+		$display("-- I3: a STATUS whose flag moves while it is written is abandoned");
+		n0 = evd_n; a0 = evd_abandoned;
+		s3 = {$random(seed), $random(seed), $random(seed), $random(seed)};
+		s4 = ~s3;
+		e_status(s3);
+		t = 0;
+		while (!(dut.st_wait && dut.rec_k == 11'd2) && t < 200000) begin @(posedge clk); t = t + 1; end
+		check("I3: the first STATUS is open, word 0 written", t < 200000, 1);
+		e_status(s4);
+		e_wait(n0 + 1, 2000, ok1);
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain;
+		check("I3: one STATUS published", evd_n - n0, 1);
+		check("I3: the torn one was abandoned", evd_abandoned - a0, 1);
+		i = e_find(n0, 8'h20, 8'd0, 0);
+		check("I3: the one published is the second transfer, whole",
+		      {e_word(i, 3), e_word(i, 2), e_word(i, 1), e_word(i, 0)} !== s4, 0);
+	end
+endtask
+
+// I4. a new session: the levels last published are 0 again, and the status standing is its first STATUS
+task evt_case4;
+	integer n0, ok1;
+	begin
+		$display("-- I4: each hello: the last published level 0, the standing transfer its first STATUS");
+		evt_session(16'h0E02, 1);
+		n0 = evd_n;
+		e_wait(n0 + 2, 2000, ok1);
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain;
+		check("I4: STATUS and RUMBLE pad 2 again, nothing else", evd_n - n0, 2);
+		check("I4: STATUS", e_find(n0, 8'h20, 8'd0, 0) >= 0, 1);
+		check("I4: RUMBLE pad 2 at its level", e_word(e_find(n0, 8'h2A, 8'd2, 1), 0), 32'h0000_A55A);
+	end
+endtask
+
+// I5. order: a REQUEST owed with a STATUS goes first. The host's tail is shown one word short of a full ring while
+// both become owed, then the real tail: both fit in the same cycle.
+task evt_case5;
+	integer t, e0, ok1, h;
+	reg [127:0] s5;
+	begin
+		$display("-- I5: a REQUEST and a STATUS owed together: the REQUEST first");
+		e_drain;
+		h = mem[C_IDX3 >> 2];
+		mem[H_IDX3 >> 2] = {16'd0, h[15:0] - 16'd2047};
+		repeat (8 << POLLC) @(posedge clk);
+		s5 = {$random(seed), $random(seed), $random(seed), $random(seed)};
+		core_ask(32'h0000_0E05);
+		e_status(s5);
+		t = 0;
+		while (!(dut.rq_post && dut.ev_have && dut.ev_rec) && t < 400000) begin @(posedge clk); t = t + 1; end
+		check("I5: a REQUEST and a STATUS are owed, neither fits", t < 400000, 1);
+		e0 = ev_n;
+		mem[H_IDX3 >> 2] = {16'd0, host_tail};
+		t = 0;
+		while (ev_n < e0 + 2 && t < 200000) begin evt_take(ok1); if (!ok1) @(posedge clk); t = t + 1; end
+		check("I5: the first record is the REQUEST", {16'd0, ev_log[e0]}, 32'h0000_2100);
+		check("I5: then the STATUS", {16'd0, ev_log[e0 + 1]}, 32'h0000_2000);
+		core_drop;
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain;
+	end
+endtask
+`endif
+
 `ifdef OCRAM_TB_MNT
 // The mount slots: two block-device cores on the window's save-slot nets, the host's mount ring
 reg  [15:0] mbuf1 [0:2047];
@@ -4297,6 +4665,13 @@ initial begin
 	sec_case15;
 	sec_case16;
 	sec_case17;
+`endif
+`ifdef MISTER_OCRAM_EVT
+	evt_case1;
+	evt_case2;
+	evt_case3;
+	evt_case4;
+	evt_case5;
 `endif
 `ifdef OCRAM_TB_MNT
 	mnt_case1;

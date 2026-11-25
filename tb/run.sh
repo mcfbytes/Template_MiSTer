@@ -93,7 +93,9 @@
 #      OSD rows from the mailbox and the blocks from rings 0 and 4 pass as in arm O); tb/blkoff_tb.sv with
 #      MISTER_DISABLE_SPI_BLK (0x16 reads 0 with requests raised, 0x17 and 0x18 raise no ack and no strobe, the
 #      commit mark reads 0 on every cycle, present) and without it (the same words show the arms alive); and four
-#      runs that each break one of the core's obligations, each named by hps_io's simulation check
+#      runs that each break one of the core's obligations, each named by hps_io's simulation check; and arm I's
+#      events shape with MISTER_DISABLE_SPI_EVT, every seed: C_CAPS bit 18 in the hello's exact word, the link's
+#      0x29, 0x36, 0x3C and 0x?3F replies 0, the records as in arm I
 #   U  the UIO and OSD frames on ring 1 (MISTER_OCRAM_UIO, the lean profile's U1; arm X has its guard):
 #      tb/ocram_tb.sv's download shape with MISTER_OCRAM_UIO, every seed, plain and with the crossing models, at
 #      33.8688 and 20 MHz, and once with MISTER_DEBUG_NOHDMI: C_K[9] exact (mask 0x000F, 0x000B without HDMI) and
@@ -103,6 +105,15 @@
 #      into two osds each (no sel-2 strobe without HDMI); a capture frame and a tagged frame skipped by length, no
 #      fault; and every download case of arm O's shape in the same run. Then verilator lints the master, the walker
 #      and the player with the macro, with and without MISTER_DEBUG_NOHDMI
+#   I  the events tier's records (MISTER_OCRAM_EVT, the lines design's E1; arm X has its guards, arm Y its removal):
+#      tb/ocram_tb.sv's SECTOR shape with MISTER_LW and MISTER_OCRAM_EVT, a real hps_io on the event port through
+#      hps_ocram_evt and a twin hps_io polled over its own link, every seed, plain and with the crossing models, at
+#      33.8688 and 20 MHz: C_CAPS bit 11 in the hello's exact word; nothing posted while C_BIND bit 8 is clear, then
+#      a BIND record and the causes standing at the bind (the status transfer its first STATUS); each STATUS, INFO,
+#      UPLOAD and RUMBLE against the twin's 0x29, 0x36, 0x3C and 0x?3F reply, a level back to 0 included; a STATUS
+#      torn by a second transfer abandoned and the second published whole; each hello's levels from 0; a REQUEST
+#      owed with a STATUS first; and every SECTOR case of arm O's shape in the same run. Then verilator lints the
+#      master and hps_ocram_evt with the macro, and with MISTER_DISABLE_SPI_EVT
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -391,6 +402,20 @@ rmy() {
       f=$((f + 1)); echo "FAIL ocram_tb: does not compile ($c)" >> "$1"; head -20 "$O/rmY_$c.err" | sed 's/^/   /' >> "$1"
     fi
   done
+  # ocram_tb.sv: arm I's events shape with MISTER_DISABLE_SPI_EVT (C_CAPS bit 18 in the hello's exact word; the
+  # link's 0x29, 0x36, 0x3C, 0x?3F replies read 0; the records arrive, held to the values the core drove)
+  echo "-- ocram_tb compiles (evt, MISTER_DISABLE_SPI_EVT)" >> "$1"
+  if iverilog -g2012 $ID -DMISTER_DISABLE_SPI_EVT -DOCRAM_TB_SYS_HP_PS=14762 -I sys -s ocram_tb -o "$O/rmY_evt.vvp" $IB \
+       > "$O/rmY_evt.err" 2>&1; then
+    echo "pass ocram_tb: compiles (evt)" >> "$1"; n=$((n + 1))
+    for s in ${LW_TB_SEEDS:-1 2 3}; do vvp -n "$O/rmY_evt.vvp" +lw_seed=$s > "$O/rmY_evt.$s.log" 2>&1 & done; wait
+    for s in ${LW_TB_SEEDS:-1 2 3}; do
+      echo "== seed $s evt" >> "$1"; cat "$O/rmY_evt.$s.log" >> "$1"
+      grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_evt.$s.log" || echo "FAIL ocram_tb $s evt: gave no result" >> "$1"
+    done
+  else
+    f=$((f + 1)); echo "FAIL ocram_tb: does not compile (evt)" >> "$1"; head -20 "$O/rmY_evt.err" | sed 's/^/   /' >> "$1"
+  fi
   # blkoff_tb.sv: hps_io with MISTER_DISABLE_SPI_BLK, and without it (the control)
   YB="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
   YB="$YB -DMISTER_OCRAM_MOUNT_FRAME=256"
@@ -471,6 +496,55 @@ uarm() {
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
              > "$O/uioV_${t}_$vn.log" 2>&1 || [ -s "$O/uioV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/uioV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
+        fi
+      done
+    done
+    if [ $vok -eq 1 ]; then echo "pass verilator: no warning" >> "$1"; n=$((n + 1))
+    else f=$((f + 1)); fi
+  else
+    echo "SKIPPED verilator: not on PATH" >> "$1"
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
+}
+
+# iarm LOG: arm I. tb/ocram_tb.sv's SECTOR shape with the events tier, each shape compiled once, run under every
+# seed, plain and with the crossing models; then verilator on the master and the port with the macro.
+IB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
+ID="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
+ID="$ID -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_EVT"
+iarm() {
+  : > "$1"; n=0; f=0
+  for m in plain cdc; do
+    for c in evt33 evt20; do
+      case $c in evt33) D="$ID -DOCRAM_TB_SYS_HP_PS=14762";; evt20) D="$ID -DOCRAM_TB_SYS_HP_PS=25000";; esac
+      d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      echo "-- the bench compiles ($c, $m)" >> "$1"
+      if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/evtI_${c}_$m.vvp" $IB > "$O/evtI_${c}_$m.err" 2>&1; then
+        echo "pass bench: compiles ($c, $m)" >> "$1"; n=$((n + 1))
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          vvp -n "$O/evtI_${c}_$m.vvp" +lw_seed=$s > "$O/evtI_${c}_$m.$s.log" 2>&1 &
+        done; wait
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          echo "== seed $s $c $m" >> "$1"; cat "$O/evtI_${c}_$m.$s.log" >> "$1"
+          grep -Eq '^(PASSED|FAILED): [0-9]' "$O/evtI_${c}_$m.$s.log" || echo "FAIL bench $s $c $m: gave no result" >> "$1"
+        done
+      else
+        f=$((f + 1)); echo "FAIL bench: does not compile ($c, $m)" >> "$1"; head -20 "$O/evtI_${c}_$m.err" | sed 's/^/   /' >> "$1"
+      fi
+    done
+  done
+  echo "-- verilator --lint-only -Wall on the master and hps_ocram_evt with MISTER_OCRAM_EVT" >> "$1"
+  if command -v verilator >/dev/null 2>&1; then
+    vok=1
+    for VS in "evt:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_EVT" \
+              "evtall:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_EVT" \
+              "evtoff:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_EVT -DMISTER_DISABLE_SPI_EVT"; do
+      vn=${VS%%:*}; VF=${VS#*:}
+      for t in hps_ocram_master hps_ocram_evt; do
+        if ! verilator --lint-only -Wall $VF --top-module $t -Isys sys/hps_ocram_master.sv sys/lw_cdc.sv \
+             > "$O/evtV_${t}_$vn.log" 2>&1 || [ -s "$O/evtV_${t}_$vn.log" ]; then
+          vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/evtV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
       done
     done
@@ -631,6 +705,15 @@ bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO alone|-DMISTER_OCRAM_UIO
 bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO with the floor and no download tier|-DMISTER_OCRAM -DMISTER_OCRAM_UIO -DXO_MASTER
 bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO and MISTER_OCRAM_FIO without the floor|-DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO
 ok|-|MISTER_OCRAM_UIO with the download tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4
+bad|ocram_evt_needs_MISTER_LW|MISTER_OCRAM_EVT without MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT
+bad|evt_on_two_tiers|MISTER_OCRAM_EVT beside MISTER_LW_EVT|-DMISTER_LW -DMISTER_LW_EVT -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT
+bad|ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_EVT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_EVT
+bad|ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_EVT without the floor|-DMISTER_LW -DMISTER_OCRAM_EVT
+bad|ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT|the master with MISTER_OCRAM_EVT and no SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_EVT -DXO_MASTER
+ok|-|MISTER_OCRAM_EVT with the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT -DXO_MASTER
+bad|spi_evt_off_needs_MISTER_OCRAM_EVT|MISTER_DISABLE_SPI_EVT alone|-DMISTER_DISABLE_SPI_EVT
+bad|spi_evt_off_needs_MISTER_OCRAM_EVT|MISTER_DISABLE_SPI_EVT with MISTER_LW_EVT only|-DMISTER_LW -DMISTER_LW_EVT -DMISTER_DISABLE_SPI_EVT
+ok|-|MISTER_DISABLE_SPI_EVT with the OCRAM events tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT -DMISTER_DISABLE_SPI_EVT -DXO_MASTER
 ok|-|MISTER_OCRAM_UIO with the download tier, no HDMI osd|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_DEBUG_NOHDMI -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4
 bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT0_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT0_SLOT=2
 bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT1_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT1_SLOT=3
@@ -912,6 +995,15 @@ for g in $ARMS; do
     rmy "$O/rmY.log"
     grep -v "^pass " "$O/rmY.log" | grep -v '^== seed'
     V=$(verdict Y "$O/rmY.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = I ]; then
+    echo "== arm I: tb/ocram_tb.sv with MISTER_OCRAM_EVT: the events tier's records against their link polls"
+    iarm "$O/evtI.log"
+    grep -v "^pass " "$O/evtI.log" | grep -v '^== seed'
+    V=$(verdict I "$O/evtI.log") || rc=1
     R="$R$V
 "
     continue

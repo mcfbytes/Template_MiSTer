@@ -61,7 +61,8 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM_MOUNT0_SLOT`, `MISTER_OCRAM_MOUNT1_SLOT`, `MISTER_OCRAM_MOUNT_FRAME` (1-1,020, default 128) (PROVISIONAL) | two mount slots (block slot index 1, 2) through `lw_save_mux`: reads from ring 0, writes as WRITE records | `MISTER_OCRAM_SECTOR_SLOT` (`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), so `MISTER_LW`; not `MISTER_LW_SECTOR_SLOT` | 195-205 ALMs (ESTIMATED) |
 | `MISTER_DISABLE_SPI_OSD` (PROVISIONAL, test-only) | removes `osd.v`'s SPI row writes (`0x20`); declared by C_CAPS bit 17 | `MISTER_OCRAM_OSD` or `MISTER_LW_OSD` (`spi_osd_off_needs_an_osd_tier`) | -36 ALMs (ESTIMATED) |
 | `MISTER_DISABLE_SPI_BLK` (PROVISIONAL, test-only), `MISTER_DISABLE_SPI_BLK_UNUSED` (a slot mask, default 0) | removes `hps_io`'s block arms (`0x16`-`0x18`) and ties the commit mark to 0; declared by C_CAPS bit 16 | every slot below VDNUM on the SECTOR or a mount slot, or in the mask, never both (`spi_blk_off_needs_a_block_tier`, `spi_blk_off_slot_without_a_tier`, `spi_blk_off_unused_slot_on_a_tier`); the LW SECTOR family is not counted | -60 ALMs (ESTIMATED) |
-| `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
+| `MISTER_OCRAM_EVT` (PROVISIONAL) | `hps_io`'s core->host flags as STATUS, INFO, UPLOAD and RUMBLE records on the EVT ring, bound by H_BIND bit 8; declared by C_CAPS bit 11 | `MISTER_OCRAM_SECTOR_SLOT` (`ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT`), `MISTER_LW` (`ocram_evt_needs_MISTER_LW`), never `MISTER_LW_EVT` (`evt_on_two_tiers`) | 90-110 ALMs (ESTIMATED) |
+| `MISTER_DISABLE_SPI_EVT` (PROVISIONAL, test-only) | removes `hps_io`'s event replies (`0x29`, `0x36`, `0x3C`, `0x?3F`); declared by C_CAPS bit 18 | `MISTER_OCRAM_EVT` (`spi_evt_off_needs_MISTER_OCRAM_EVT`) | -40 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
 | `MISTER_OCRAM_CONFSTR` | the configuration string as one record after the hello | `MISTER_OCRAM_EVT` | 30-50 ALMs |
@@ -197,7 +198,7 @@ replaces the firewall").
 | `0x30` + 4*r* | H_MARK[*r*] | host | a host-to-core ring's mark, where its descriptor declares a line: `[31]` armed, `[15:0]` an index. Only H_MARK[1] (`0x34`) is built (PROVISIONAL) |
 | `0x80` | C_HELLO | fabric | the master's state, below; in a session, the echo of H_HELLO, stored last |
 | `0x84` | C_VERSION | fabric | `{major, minor}` of the layout |
-| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; `[10]` the master posts a BIND record after every C_BIND store (PROVISIONAL); `[11]` reserved; `[16]` the link's block arms are not built (`MISTER_DISABLE_SPI_BLK`), `[17]` nor its OSD row writes (`MISTER_DISABLE_SPI_OSD`), `[18]` held (PROVISIONAL); the rest 0 |
+| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; `[10]` the master posts a BIND record after every C_BIND store (PROVISIONAL); `[11]` the events tier's records (`MISTER_OCRAM_EVT`, PROVISIONAL); `[16]` the link's block arms are not built (`MISTER_DISABLE_SPI_BLK`), `[17]` nor its OSD row writes (`MISTER_DISABLE_SPI_OSD`), `[18]` nor its event replies (`MISTER_DISABLE_SPI_EVT`) (PROVISIONAL); the rest 0 |
 | `0x8C` | C_STATE | fabric | `[7:0]` hellos taken since configuration; `[12:8]` ring *r* is stopped on a fault; `[20:16]` ring *r* ended the session before this one mid-record |
 | `0x90` + 4*r* | C_IDX[*r*] | fabric | its tail of a host-to-core ring, its head of a core-to-host ring |
 | `0xA4` | C_BIND | fabric | the binds in effect: H_BIND's bits, bit 0 = the SECTOR slot's mux is on the mailbox side, bits 1, 2 = each mount slot's is (PROVISIONAL). Stored at every change; a bind or its drop has taken effect when this word shows it |
@@ -309,7 +310,10 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 | OSD | `0x01` ROW, `arg` = row | 64 words: the row's 256 bytes | written into `osd_buffer` as the LW OSDBUF writer does, under the same guard |
 | SECTOR | `0x10` FRAME, `arg` = `{blk_cnt[5:0], k[1:0]}`, 0 | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
 | mount | `0x10` FRAME, `arg` = `{blk_cnt[5:0], k[1:0]}`, k 1 or 2 | the LBA, then the block's `(blk_cnt + 1) << (BLKSZ + 5)` words | played into slot k if it answers its standing read with that LBA and length (PROVISIONAL) |
-| EVT | `0x20` STATUS | four words | a status transfer landed, whole |
+| EVT | `0x20` STATUS, `arg` 0, `len` 4 | `status_req`, `[31:0]` first | a status transfer landed, whole (PROVISIONAL) |
+| EVT | `0x28` INFO, `arg` = the info byte, `len` 0 | none | the core raised `info_req` (PROVISIONAL) |
+| EVT | `0x29` UPLOAD, `arg` = `ioctl_upload_index`, `len` 0 | none | the core raised `ioctl_upload_req` (PROVISIONAL) |
+| EVT | `0x2A` RUMBLE, `arg` = pad (0-5), `len` 1 | `{16'd0, level}` | a pad's rumble level differs from the last posted (PROVISIONAL) |
 | EVT | `0x21` REQUEST, `arg` = `{blk_cnt[5:0], k[1:0]}` | the LBA | the bound slot's request stands and the ring holds no answer, including a request that already stood when the bind arrived |
 | EVT | `0x26` WRITE, `arg` = `{blk_cnt[5:0], k[1:0]}`, `len` = 1 + n | the LBA, then the block's n words | mount slot k's write, read from the core's buffer; its head store is the publish (PROVISIONAL) |
 | EVT | `0x27` BIND, `arg` = C_BIND[7:0], `len` 0 | none | posted after every C_BIND store (PROVISIONAL) |
@@ -326,6 +330,14 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   both directions: the frame's length is C_K[4]'s.
 - **BIND `0x27`:** `arg` = C_BIND[7:0], no payload. Posted after every C_BIND store, under the rule that holds the
   bit-0 drop behind a record in flight. A REQUEST read before a BIND record that shows its slot's bit clear is void.
+- **The events tier's records (`MISTER_OCRAM_EVT`, PROVISIONAL).** Each cause is latched in `hps_io` on its edge,
+  bound or not, as the link's `0x29`/`0x36`/`0x3C` replies latch it; a record is posted only while C_BIND bit 8 is
+  stored 1, so a cause standing at the bind is its first record. STATUS is one transfer, whole: a later transfer
+  replaces an unposted one, and a STATUS whose flag moves while it is written is abandoned (its head never stored)
+  and the later one posted. A RUMBLE is posted while a pad's level differs from the last posted, which is 0 at each
+  hello. They go behind an owed BIND, REQUEST or WRITE. The fabric reads one offer at a time from `hps_io`'s port
+  (`hps_ocram_evt`, a 42-bit word), so a STATUS is four offers; an INFO or UPLOAD taken in the cycles before a
+  session ends can be lost, and a host re-reads the status at each hello.
 - **The mount slots** each keep the SECTOR slot's rule: a request that already stands when its bind arrives is that
   bind's first REQUEST. A host that has stopped polling GET_SDSTAT relies on it.
 - **Ring 1:** no bind bit. A published LFRAME is played; nothing is taken from the link.
@@ -560,7 +572,9 @@ share the master at record granularity, so two running together split one budget
 - What this traffic costs the other HPS masters (a loaded run lost 3.5 %, not attributed).
 - Read bursts and a multi-word crossing: designed in prose only.
 - The SECTOR tier, the mount slots and `hps_ocram_rx.sv`: benched only (`tb/ocram_tb.sv`, `tb/sfeed_tb.sv`), not
-  fitted, not run on hardware. The UIO and OSD frames (`MISTER_OCRAM_UIO`) the same: arm U only.
+  fitted, not run on hardware. The UIO and OSD frames (`MISTER_OCRAM_UIO`) the same: arm U only. The events tier
+  (`MISTER_OCRAM_EVT`, arm I) and `MISTER_DISABLE_SPI_EVT` (arm Y) the same; `sys_top`'s port wiring is not
+  simulated, only the master, `hps_ocram_evt` and `hps_io`.
 - A greenfield host driving a real core's menu over the ring on hardware (the probe has; the host path is in diagnosis).
 - A stock Main host.
 - A warm reset with `warmramgrp.enable` cleared: stock U-Boot hangs on a hardware warm reset with or without this
