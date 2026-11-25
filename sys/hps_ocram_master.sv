@@ -898,6 +898,7 @@ assign p_start = 1'b0, p_wtake = 1'b0, e_free = 16'd0;
 localparam [1:0] EK_STATUS = 2'd0, EK_INFO = 2'd1, EK_UPLOAD = 2'd2, EK_RUMBLE = 2'd3;
 reg         ev_have = 1'b0;            // an offer is in e_d and not spent
 reg         ev_wait = 1'b0;            // an offer is asked for and not yet in
+reg         ev_void = 1'b0;            // the offer in flight was asked for by an ended session: dropped on arrival
 reg   [1:0] rec_ek_q = EK_STATUS;      // the events record's kind
 reg   [2:0] rec_pad_q = 3'd0;          // a RUMBLE's pad
 reg   [3:0] st_flag_q = 4'd0;          // the STATUS being written: its stflg
@@ -1404,10 +1405,15 @@ always @(posedge clk) begin
 	// the events tier's offers: one asked for at a time; spent into a record, or at once when it needs none
 	ev_abandon <= 1'b0;
 	if (e_ask) ev_wait <= 1'b1;
-	if (e_v) begin ev_wait <= 1'b0; ev_have <= 1'b1; end
+	if (e_v) begin ev_wait <= 1'b0; ev_have <= !ev_void; ev_void <= 1'b0; end
 	else if (w_start[S_EV] || (w_wtake[S_EV] && st_wait)) ev_have <= 1'b0;
 	else if (ev_have && ev_bound && !st_open && !ev_rec) ev_have <= 1'b0;
 	if (ev_drop) ev_abandon <= 1'b1;
+	// a session's end spends the offer in hand, and voids the one in flight: none is posted in the next session
+	if (run_ended || hello_start) begin
+		ev_have <= 1'b0;
+		if ((ev_wait && !e_v) || e_ask) ev_void <= 1'b1;
+	end
 	if (hello_start) begin
 		st_last_q  <= 4'd0;
 		rum_last_q <= 96'd0;
