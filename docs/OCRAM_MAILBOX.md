@@ -438,8 +438,12 @@ PROVISIONAL.
   `lw_save_mux`, whose LBA field carries the buffer word while the slot's mux and ack are up. The master posts WRITE
   `{0x26, {blk_cnt, k}, 1 + n}`, the LBA and the n words, behind a room check of n + 2 words; the ack falls once the
   head store has landed. With no room the WRITE waits, its ack up.
-- **A WRITE holds the walker** from its accept to the ack's fall, so rings 1, 2 and 4 wait up to one block (1,020
-  words at most) behind it.
+- **The read latency is the core's:** the feeder samples `core_din` GAP `clk_sys` cycles after it drives the address,
+  so the buffer must show the word within GAP - 1 cycles of `core_addr` (one registered read stage at the default
+  GAP of 2); a slower buffer needs a larger `MISTER_OCRAM_SECTOR_GAP`.
+- **A WRITE holds the walker** from the launch of its head to the ack's fall: through the wait for n + 2 free EVT words
+  and then the block, so rings 1, 2 and 4 wait behind it for as long as the EVT ring stays short of room, plus up to
+  one block (1,020 words at most).
 - **The record writer** posts every record one at a time: a REQUEST or WRITE starts only while its slot's C_BIND
   bit is stored 1 and no C_BIND store or BIND is owed; a C_BIND store waits for a record in flight.
 - **A fault** on ring 0 (C_STATE bit 8) drops both mount binds; a session that ends mid-record sets bit 16 at the
@@ -461,10 +465,11 @@ walker serves it in every session.
   mask is served: 1 (the FPGA select, the file-I/O block), and with `MISTER_OCRAM_UIO` also 0, 2 and 3 (below). A
   record of any other kind, a `sel` outside the mask, a non-zero `arg[6:2]` or a zero length is skipped by its
   length, silently: it is not a fault, and nothing of it reaches the link, so a host gates what it sends on C_K[9]
-  (and on C_CAPS for the bits above `sel`). A length past the head stops the ring on a fault (C_STATE bit 9); a
+  (and on C_CAPS for the bits above `sel`). A head more than the ring ahead, or a length past the head, stops the ring on a fault (C_STATE bit 9); a
   session that ends mid-record sets bit 17 at the next hello.
-- **The walker** reads H_IDX[1] in its session poll and serves ring 1 at record granularity, in turn with rings 2
-  and 4. Each header and ring word crosses to `clk_sys`; after the record's last word is answered it stores C_IDX[1].
+- **The walker** reads H_IDX[1] once it has caught up with the last head it read, and on each poll tick, and serves
+  ring 1 at record granularity, in turn with rings 0, 2 and 4. An LFRAME holds it for the whole play, so those rings
+  wait through every `ioctl_wait` the core raises. Each header and ring word crosses to `clk_sys`; after the record's last word is answered it stores C_IDX[1].
 - **The player** (`clk_sys`) plays a frame as the LW lane's player does, through `lw_link`: it takes the link's nets
   only between link transactions (no select up, the I/O view on), raises the select, strobes each link word GAP
   cycles apart, holds the next strobe while `ioctl_wait` (or the link's own wait) is up, and drops the select
