@@ -101,7 +101,12 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                ('ocram-osd-diag', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_DIAG']),
                ('ocram-lw-all', ['MISTER_OCRAM', 'MISTER_LW'] + [d for _, d in TIER_MACROS]),
                ('ocram-osd-lw-all', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_LW'] +
-                                    [d for _, d in TIER_MACROS])]
+                                    [d for _, d in TIER_MACROS]),
+               # the SECTOR tier needs MISTER_LW (its HPS_BUS bits) and excludes the LW SECTOR block and DIAG
+               ('ocram-sec-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=1', 'MISTER_LW']),
+               ('ocram-osd-sec-lw-pad', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
+                                         'MISTER_OCRAM_SECTOR_FRAME=588', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
+                                         'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD', 'MISTER_DISABLE_SPI_PAD'])]
 OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
 CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
@@ -112,6 +117,8 @@ GPI = {25: ('lw_present', 'hps_lw_bridge', 'present'), 24: ('lw_idle', 'hps_lw_b
 # the EVT ring's line: framework ordinal 4 -> f2h_irq[7 + 4], the master's line output
 OCRAM_LINE, OCRAM_LINE_PORT = 11, 'line'
 OCMACS = ['MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD']
+# the SECTOR tier's text (its REQUEST writer is the EVT writer of a build without DIAG)
+OCMACS_SEC = ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
 
 if args[:1] == ['--configs']:
     for n, d in CONFIGS:
@@ -428,7 +435,7 @@ for name, defs in CONFIGS:
 
 # ---- The crossing structure: every crossing register in sys/lw_cdc.sv's cells, every source named ----
 LWALL = ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE', 'MISTER_LW_OSD',
-         'LW_DIAG=1', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD']
+         'LW_DIAG=1', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
 CDC = 'sys/lw_cdc.sv'
 CELLREG = ('lws0_', 'lws1_', 'lwa0_', 'lwa1_', 'lwq_', 'lwsrc_', 'lwtg_')
 CELLSYNC = {'lws0_q', 'lws1_q', 'lwa0_q', 'lwa1_q'}
@@ -448,8 +455,9 @@ PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit c_wide
            'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
-           'hps_ocram_osd': ('clk_sys', 'sel view'),
-           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide')}
+           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide'),
+           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide xsec_en '
+                                        'xsec_ack xsec_wr xsec_dat xsec_adr')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
 # piece leaves it to the pull-down. Only these nets, each assigned exactly this select, are exempt; every other bit
 # of hps_lw is on clk_sys and crosses through a cell.
@@ -866,7 +874,7 @@ for n, nets in sorted(PRESENCE.items()):
 print('crossing structure: %d lw_sync instances, %d source registers, %d enable links, %d listed reads across '
       'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
 check(nfence == 4, 'enable links: %d lw_fence instances, not one each in lw_sector, lw_osd, lw_lane and '
-      'hps_ocram_osd' % nfence)
+      'hps_ocram_rx' % nfence)
 
 # ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
 print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')
@@ -907,48 +915,51 @@ check(lq == ['clk'] and 'line' not in OM['comb'],
 
 # ---- hps_ocram_*: every address is {16'hFFFF, off}; off a control localparam, an EVT word or a consumer's
 # ---- ring word from a localparam base and a masked index ----
-print('-- hps_ocram_master.sv and hps_ocram_osd.sv: the constant upper address half, every offset bounded')
+print('-- hps_ocram_master.sv and hps_ocram_rx.sv: the constant upper address half, every offset bounded')
 OTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS)))
-ODTXT = ' '.join(tokens(pp('sys/hps_ocram_osd.sv', OCMACS)))
-ALLT = OTXT + ' ' + ODTXT
-CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_IDX2': 0x18, 'H_IDX3': 0x1c, 'H_IDX4': 0x20,
-        'C_HELLO': 0x80, 'C_VERSION': 0x84, 'C_CAPS': 0x88, 'C_STATE': 0x8c, 'C_IDX2': 0x98,
+OSTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS_SEC)))
+ODTXT = ' '.join(tokens(pp('sys/hps_ocram_rx.sv', OCMACS_SEC)))
+ALLT = OTXT + ' ' + OSTXT + ' ' + ODTXT
+CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX2': 0x18, 'H_IDX3': 0x1c,
+        'H_IDX4': 0x20, 'C_HELLO': 0x80, 'C_VERSION': 0x84, 'C_CAPS': 0x88, 'C_STATE': 0x8c, 'C_IDX2': 0x98,
         'C_IDX3': 0x9c, 'C_IDX4': 0xa0, 'C_BIND': 0xa4, 'C_RING2': 0xb8, 'C_RING3': 0xbc,
-        'C_RING4': 0xc0, 'C_K8': 0xf0}
+        'C_RING4': 0xc0, 'C_K0': 0xd0, 'C_K1': 0xd4, 'C_K2': 0xd8, 'C_K4': 0xe0, 'C_K5': 0xe4, 'C_K8': 0xf0}
 LITS = dict(re.findall(r"localparam \[ 15 : 0 \] (\w+) = 16'h([0-9A-Fa-f]+) ;", ALLT))
 for n_, v_ in sorted(CTRL.items()):
     check(int(LITS.get(n_, '-1'), 16) == v_ and v_ < 0x100,
           'hps_ocram_*: %s is not 16''h%02X below 0x100' % (n_, v_))
 for b_, w_, bv, wv in (('EVT_BASE', 'EVT_WORDS', 0x4000, 2048), ('TS_BASE', 'TS_WORDS', 0x7000, 8192),
-                       ('OSD_BASE', 'OSD_WORDS', 0x2000, 2048)):
+                       ('OSD_BASE', 'OSD_WORDS', 0x2000, 2048), ('SEC_BASE', 'SEC_WORDS', 0x7000, 8192)):
     M_ = re.search(r"localparam \[ 15 : 0 \] %s = 16'd(\d+) ;" % w_, ALLT)
     ew = int(M_.group(1)) if M_ else -1
     check(int(LITS.get(b_, '-1'), 16) == bv and ew == wv,
           'hps_ocram_*: %s/%s are not 16''h%04X/%d' % (b_, w_, bv, wv))
     check(ew > 0 and bv + 4 * ew <= 0xF000,
           'hps_ocram_*: %s + 4*%s (%s) is not below 0xF000' % (b_, w_, bv + 4 * ew if ew > 0 else '?'))
-for r_ in ('araddr', 'awaddr'):
-    check(len(re.findall(r"assign %s = \{ 16'hFFFF , off_q \} ;" % r_, OTXT)) == 1 and
-          len(re.findall(r"\b%s = " % r_, OTXT)) == 1,
-          'hps_ocram_master: %s is not one {16''hFFFF, off_q} assignment' % r_)
-check(re.findall(r"off_q < = (\w+) ;", OTXT) == ['t_off'],
-      'hps_ocram_master: off_q has another source than t_off: %s' % re.findall(r"off_q < = (\w+) ;", OTXT))
-TSRC = re.findall(r"(?<![A-Za-z0-9_])t_off = (hj_off \( hj_k \)|[A-Za-z_]\w*) ;", OTXT)
-check(TSRC and len(re.findall(r"(?<![A-Za-z0-9_])t_off = ", OTXT)) == len(TSRC) and
-      set(TSRC) <= set(CTRL) | {'evt_off', 'c0_off', 'c1_off', 'hj_off ( hj_k )'},
-      'hps_ocram_master: an offset that is not a control localparam, evt_off, a consumer offset or hj_off: %s'
-      % ' '.join(sorted(set(TSRC))))
-check(set(re.findall(r"hj_off = (\w+) ;", OTXT)) <= set(CTRL),
-      'hps_ocram_master: hj_off returns a value that is not a control localparam')
-check(len(re.findall(r"wire \[ 15 : 0 \] evt_off = EVT_BASE \+ \( \( evt_index & \( EVT_WORDS - 1 \) \) < < 2 \) ;", OTXT)) == 1
-      and len(re.findall(r"evt_off = ", OTXT)) == 1,
-      'hps_ocram_master: evt_off is not one EVT_BASE + ((index & (EVT_WORDS-1)) << 2) assignment')
-check(len(re.findall(r"wire \[ 15 : 0 \] evt_index = head_q \+ \{ 10'd0 , rec_k \} ;", OTXT)) == 1,
-      'hps_ocram_master: evt_index is not head_q + rec_k')
+for OT_, OWHO in ((OTXT, 'DIAG'), (OSTXT, 'SECTOR')):
+    for r_ in ('araddr', 'awaddr'):
+        check(len(re.findall(r"assign %s = \{ 16'hFFFF , off_q \} ;" % r_, OT_)) == 1 and
+              len(re.findall(r"\b%s = " % r_, OT_)) == 1,
+              'hps_ocram_master (%s): ' % OWHO + '%s is not one {16''hFFFF, off_q} assignment' % r_)
+    check(re.findall(r"off_q < = (\w+) ;", OT_) == ['t_off'],
+          'hps_ocram_master (%s): ' % OWHO + 'off_q has another source than t_off: %s' % re.findall(r"off_q < = (\w+) ;", OT_))
+    TSRC = re.findall(r"(?<![A-Za-z0-9_])t_off = (hj_off \( hj_k \)|[A-Za-z_]\w*) ;", OT_)
+    check(TSRC and len(re.findall(r"(?<![A-Za-z0-9_])t_off = ", OT_)) == len(TSRC) and
+          set(TSRC) <= set(CTRL) | {'evt_off', 'c0_off', 'c1_off', 'hj_off ( hj_k )'},
+          'hps_ocram_master (%s): ' % OWHO + 'an offset that is not a control localparam, evt_off, a consumer offset or hj_off: %s'
+          % ' '.join(sorted(set(TSRC))))
+    check(set(re.findall(r"hj_off = (\w+) ;", OT_)) <= set(CTRL),
+          'hps_ocram_master (%s): ' % OWHO + 'hj_off returns a value that is not a control localparam')
+    check(len(re.findall(r"wire \[ 15 : 0 \] evt_off = EVT_BASE \+ \( \( evt_index & \( EVT_WORDS - 1 \) \) < < 2 \) ;", OT_)) == 1
+          and len(re.findall(r"evt_off = ", OT_)) == 1,
+          'hps_ocram_master (%s): ' % OWHO + 'evt_off is not one EVT_BASE + ((index & (EVT_WORDS-1)) << 2) assignment')
+    check(len(re.findall(r"wire \[ 15 : 0 \] evt_index = head_q \+ \{ 10'd0 , rec_k \} ;", OT_)) == 1,
+          'hps_ocram_master (%s): ' % OWHO + 'evt_index is not head_q + rec_k')
 # The consumers' own offsets: a control localparam or a ring word, hdr_off/pay1_off/pay2_off, each one
 # base + ((index & (words - 1)) << 2) of a localparam base and the ring's size.
 def consumer_offsets(text, who):
     src = re.findall(r"req_off < = (\w+) ;", text)
+    check(len(src) == len(re.findall(r"req_off < = ", text)), '%s: a req_off assignment that is not one name' % who)
     named = set(re.findall(r"wire \[ 15 : 0 \] (\w+) = [A-Za-z_]\w* \+ \( \( \w+ & \( \w+ - 1 \) \) < < 2 \) ;",
                            text))
     check(src and set(src) <= set(CTRL) | named,
@@ -960,18 +971,21 @@ def ring_wires(text, base, words, who):
                          % (base, words), text))
     check(got, '%s: no %s + ((index & (%s - 1)) << 2) ring word' % (who, base, words))
     return got
-osd_named = consumer_offsets(ODTXT, 'hps_ocram_osd')
-check(osd_named == ring_wires(ODTXT, 'OSD_BASE', 'OSD_WORDS', 'hps_ocram_osd'),
-      'hps_ocram_osd: an offset wire is not an OSD_BASE ring word: %s' % (osd_named ^
-      ring_wires(ODTXT, 'OSD_BASE', 'OSD_WORDS', 'hps_ocram_osd')))
+rx_named = consumer_offsets(ODTXT, 'hps_ocram_rx')
+rx_rings = ring_wires(ODTXT, 'OSD_BASE', 'OSD_WORDS', 'hps_ocram_rx') | \
+           ring_wires(ODTXT, 'SEC_BASE', 'SEC_WORDS', 'hps_ocram_rx')
+check(rx_named == rx_rings, 'hps_ocram_rx: an offset wire is not an OSD_BASE or SEC_BASE ring word: %s'
+      % (rx_named ^ rx_rings))
 ts_named = consumer_offsets(OTXT, 'hps_ocram_tsink') - {'evt_off'}
 check(ts_named == ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink'),
       'hps_ocram_tsink: an offset wire is not a TS_BASE ring word: %s' % (ts_named ^
       ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink')))
 # the generate-time guards: a span above 0xF000 or a control constant above 0xFF stops elaboration
-for pat, who in ((r"OSD_BASE \+ OSD_WORDS \* 4 > 16'hF000", 'hps_ocram_osd'),
-                 (r"H_IDX2 > = 16'h0100", 'hps_ocram_osd'),
-                 (r"C_IDX2 > = 16'h0100", 'hps_ocram_osd'),
+for pat, who in ((r"OSD_BASE \+ OSD_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"SEC_BASE \+ SEC_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"H_IDX2 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"C_IDX2 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"H_SECTOR > = 16'h0100", 'hps_ocram_master'),
                  (r"TS_BASE \+ TS_WORDS \* 4 > 16'hF000", 'hps_ocram_tsink'),
                  (r"H_IDX4 > = 16'h0100", 'hps_ocram_tsink'),
                  (r"C_IDX4 > = 16'h0100", 'hps_ocram_tsink'),

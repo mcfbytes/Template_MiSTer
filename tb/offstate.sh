@@ -14,7 +14,7 @@
 #      0x1A, 0x3D), under each of those macro sets.
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
-#      without its tier macro; sys/lw_cdc.sv, which serves either floor, is empty with neither and present
+#      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without both of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
 #      with MISTER_LW or MISTER_OCRAM.
 #   3. Every framework-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro), or
 #      `ifdef MISTER_OCRAM, first; `default_nettype none first inside it, `default_nettype wire last. Each macro
@@ -59,7 +59,12 @@ STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/em
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
         'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE', 'lw_osd.sv': 'MISTER_LW_OSD'}
 # the OCRAM tiers: the floor's macro instead of MISTER_LW
-OTIER = {'hps_ocram_osd.sv': 'MISTER_OCRAM_OSD'}
+OTIER = {}
+# files built under either of two tier macros: (floor, [tier macros], local macro); empty without the floor or
+# without both tiers, opened as the floor, then each tier defining the local macro, then the local macro's guard
+EITHER = {'hps_ocram_rx.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_OCRAM_RX_BUILT'),
+          'lw_blk_mux.sv': ('MISTER_LW', ['MISTER_LW_SECTOR_SLOT', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_BLK_MUX_BUILT')}
+TIER.pop('lw_blk_mux.sv')
 checks = fails = 0
 
 def check(ok, what):
@@ -212,6 +217,12 @@ for x in lw:
         check(t is not None and len(t) > 0, '%s: empty with MISTER_OCRAM' % f)
         continue
     runs = [(label, defs) for label, defs in sets]
+    if x in EITHER:
+        fl, tm, _ = EITHER[x]
+        runs += [(fl + ' without ' + ' or '.join(tm) + ', ' + label, [fl] + defs) for label, defs in sets]
+        for m in tm:
+            t, e = pp(f, [fl, m + '=1'])
+            check(t is not None and len(t) > 0, '%s: empty with %s and %s' % (f, fl, m))
     if x in TIER:
         runs += [('MISTER_LW without ' + TIER[x] + ', ' + label, ['MISTER_LW'] + defs) for label, defs in sets]
     if x in OTIER:
@@ -238,6 +249,12 @@ for x in lw:
         tail = ['`default_nettype', 'wire', '`endif', '`undef', 'MISTER_OCRAM_MARK',
                 '`undef', 'MISTER_OCRAM_POLL']
         scan = True
+    elif x in EITHER:
+        fl, tm, lm = EITHER[x]
+        head = ['`ifdef', fl] + sum([['`ifdef', m, '`define', lm, '`endif'] for m in tm], []) + \
+               ['`ifdef', lm, '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`undef', lm, '`endif']
+        scan = False
     elif x in OTIER:
         head = ['`ifdef', 'MISTER_OCRAM', '`ifdef', OTIER[x], '`default_nettype', 'none']
         tail = ['`default_nettype', 'wire', '`endif', '`endif']
@@ -380,7 +397,9 @@ if check(up is not None and up.startswith('Template;;') and up.count('T[0],Reset
                                               'MISTER_LW_LANE', 'MISTER_LW_OSD'],
              'S1,IMG,Block image;J,Colour,Read block;'),
             ('MISTER_LW, SECTOR on slot 3', ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=3'],
-             'S3,IMG,Block image;J,Colour,Read block;')]:
+             'S3,IMG,Block image;J,Colour,Read block;'),
+            ('MISTER_LW, the OCRAM SECTOR tier on slot 2', ['MISTER_LW', 'MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=2'],
+             'S2,IMG,Block image;J,Colour,Read block;')]:
         want = up if not extra else lw_up.replace('T[0],Reset;', extra + 'T[0],Reset;', 1)
         got, e = conf_str(defs)
         check(got == want, 'Template.sv [%s]: CONF_STR %s, expected %s %s' % (label, got, want, e))

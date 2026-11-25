@@ -149,6 +149,11 @@ endtask
 
 task sys_cycles(input integer n); repeat (n) @(posedge clk_sys); #1; endtask
 
+`ifdef MISTER_LW_SECTOR_SLOT
+`define LW_TB_ANY_SECTOR
+`elsif MISTER_OCRAM_SECTOR_SLOT
+`define LW_TB_ANY_SECTOR
+`endif
 `ifdef MISTER_LW
 // HPS_BUS[383:46]: a net with no source reads 0, as synthesis ties it; a bit any piece drives overrides the pull.
 assign (weak0, weak1) dut.lw_bus = 338'd0;
@@ -157,7 +162,7 @@ assign (weak0, weak1) dut.lw_bus = 338'd0;
 // them. With SECTOR the Template's block reader drives the requests.
 assign (weak0, weak1) dut.emu.hps_io.info_req = 1'b0;
 assign (weak0, weak1) dut.emu.hps_io.ioctl_upload_req = 1'b0;
-`ifndef MISTER_LW_SECTOR_SLOT
+`ifndef LW_TB_ANY_SECTOR
 assign (weak0, weak1) dut.emu.hps_io.sd_rd = 1'b0;
 assign (weak0, weak1) dut.emu.hps_io.sd_wr = 1'b0;
 `endif
@@ -178,6 +183,12 @@ localparam TB_SEC = 1, TB_SLOT = `MISTER_LW_SECTOR_SLOT;
 `else
 localparam TB_SEC = 0;
 `endif
+// The OCRAM mailbox's SECTOR feeder drives the same bus bits through the window, which lists no SECTOR entry.
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam TB_XSEC = 1;
+`else
+localparam TB_XSEC = 0;
+`endif
 `ifdef MISTER_LW_OSD
 localparam TB_OSD = 1;
 `else
@@ -192,7 +203,8 @@ localparam TB_LANE = 0;
 // The bits of HPS_BUS[383:46] some piece drives in this configuration (bit i - 46 of the mask is bus bit i): every
 // to-core bit [131:46]; with PAD hps_io's presence bit [375]; with EVT the event pulses [239:237], the status
 // hold [371:240], the event levels [374:372] and [376]; with SECTOR hps_io's commit mark [380] and [381], and the
-// Template's block reader: its mux's {lba, req, ack, reset} [166:132] and presence bit [377].
+// Template's block reader: its mux's {lba, req, ack, reset} [166:132] and presence bit [377]; the same with the
+// OCRAM SECTOR tier.
 function [383:46] bus_driven;
 	reg [383:0] m;
 	begin
@@ -200,7 +212,7 @@ function [383:46] bus_driven;
 		m[131:46] = '1;
 		if (TB_PAD) m[375] = 1'b1;
 		if (TB_EVT) begin m[374:237] = '1; m[376] = 1'b1; end
-		if (TB_SEC) begin m[381:380] = 2'b11; m[166:132] = '1; m[377] = 1'b1; end
+		if (TB_SEC || TB_XSEC) begin m[381:380] = 2'b11; m[166:132] = '1; m[377] = 1'b1; end
 		bus_driven = m[383:46];
 	end
 endfunction
@@ -460,9 +472,9 @@ initial begin
 
 `ifdef MISTER_OCRAM_OSD
 	$display("-- osd: the OCRAM writer's bytes reach each osd, and the mux takes the LW writer when it is quiet");
-	force dut.ocram_osd.we = 1'b1;
-	force dut.ocram_osd.addr = 13'h0A5A;
-	force dut.ocram_osd.dbyte = 8'hC3;
+	force dut.ocram_rx.we = 1'b1;
+	force dut.ocram_rx.addr = 13'h0A5A;
+	force dut.ocram_rx.dbyte = 8'hC3;
 	#1;
 	check("vga_osd {lw_we, lw_addr, lw_byte} from the OCRAM writer",
 	      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte}, {1'b1, 13'h0A5A, 8'hC3});
@@ -470,7 +482,7 @@ initial begin
 	check("hdmi_osd {lw_we, lw_addr, lw_byte} from the OCRAM writer",
 	      {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_byte}, {1'b1, 13'h0A5A, 8'hC3});
 `endif
-	force dut.ocram_osd.we = 1'b0; #1;
+	force dut.ocram_rx.we = 1'b0; #1;
 `ifdef LW_OSD_PORTS
 	force dut.lw_sys_window.osd_we = 1'b1;
 	force dut.lw_sys_window.osd_addr = 13'h15A5;
@@ -480,7 +492,7 @@ initial begin
 	      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte}, {1'b1, 13'h15A5, 8'h3C});
 	release dut.lw_sys_window.osd_we; release dut.lw_sys_window.osd_addr; release dut.lw_sys_window.osd_byte;
 `endif
-	release dut.ocram_osd.we; release dut.ocram_osd.addr; release dut.ocram_osd.dbyte;
+	release dut.ocram_rx.we; release dut.ocram_rx.addr; release dut.ocram_rx.dbyte;
 `endif
 
 	$display("-- the link: selects, data and acknowledge as the stock decode makes them");
@@ -537,7 +549,8 @@ initial begin
 	check("SECTOR listed: built, the block reader's mux and hps_io's commit mark present", dut.lw_sys_window.has_sec,
 	      TB_SEC);
 	check("SECTOR's wired slots: the primary alone", dut.lw_sys_window.wired, TB_SEC ? 3'b001 : 3'b000);
-	check("hps_io's commit mark present exactly when SECTOR is built", dut.lw_sys_window.pres_cmt, TB_SEC);
+	check("hps_io's commit mark present exactly when a SECTOR feeder is built", dut.lw_sys_window.pres_cmt,
+	      TB_SEC | TB_XSEC);
 	lw_read(21'h4000C, d);
 	check("COUNT: PAD, SECTOR, OSDBUF, EVT and LANE as built", d, TB_PAD + TB_SEC + TB_EVT + TB_OSD + TB_LANE);
 	lw_read(21'h80000, d); check("the PAD block's first word", d, TB_PAD ? 32'd0 : 32'hDEADBEEF);
@@ -698,3 +711,5 @@ initial begin #2000000 $display("FAILED: timeout"); $finish; end
 endmodule
 
 `default_nettype wire
+
+`undef LW_TB_ANY_SECTOR

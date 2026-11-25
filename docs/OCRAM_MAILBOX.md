@@ -5,13 +5,15 @@ A proposed third path between the HPS and a core, beside the GPO/GPI ("SPI") lin
 **on-chip RAM** (OCRAM, physical `0xFFFF0000`), and the core fetches them as an AXI master on the Cyclone V
 **FPGA-to-HPS bridge**, whose atom `sys/` already instantiates with no port connected.
 
-**Status: the floor and the OSD tier are built, for test cores only.** `MISTER_OCRAM` builds the bridge master,
-the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake;
-`MISTER_OCRAM_OSD` builds the OSD consumer, which writes the OSD ring's rows into every `osd`'s `osd_buffer`
-through the LW OSDBUF writer's port. `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters,
-the GPO 27/26 test knobs, the GPO 25 freeze knob and the host-to-fabric torture sink (below). Nothing else in
-this document is built: no SECTOR, EVT, LANE or PAD tier. No figure below is measured, and several facts the
-floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
+**Status: the floor, the OSD tier and the SECTOR tier are built, for test cores only.** `MISTER_OCRAM` builds the
+bridge master, the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake.
+`MISTER_OCRAM_OSD` and `MISTER_OCRAM_SECTOR_SLOT` each build their half of `sys/hps_ocram_rx.sv`, one walker for both
+host-to-core rings: the OSD half writes the OSD ring's rows into every `osd`'s `osd_buffer` through the LW OSDBUF
+writer's port, and the SECTOR half plays block frames into one `hps_io` slot and posts its REQUEST records ("The
+SECTOR tier as built"). `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters, the GPO 27/26
+test knobs, the GPO 25 freeze knob and the host-to-fabric torture sink (below); it cannot be built with the SECTOR
+tier. Nothing else in this document is built: no EVT, LANE or PAD tier. The SECTOR tier is benched, not yet fitted
+or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
 core and host authors can read both paths side by side and say which they would build.
 
 - **The core sees nothing new.** OSD rows land in the same `osd_buffer`, blocks arrive as the same
@@ -50,7 +52,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 |---|---|---|---|
 | `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, the core-to-host ring's writer and its interrupt line, one GPI bit | - | 180-260 ALMs, no block memory |
 | `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor | 60-80 ALMs |
-| `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor | 180-230 ALMs |
+| `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor and `MISTER_LW` (it drives the LW sector bits of `HPS_BUS`); not `MISTER_OCRAM_DIAG`, not `MISTER_LW_SECTOR_SLOT` | about 130 ALMs beside the OSD tier, about 250 alone |
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
@@ -59,13 +61,17 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM_POLL` | the idle poll period, as a power of two of `clk_100m` cycles (default 12: 41 us) | the floor | - |
 | `MISTER_OCRAM_DIAG` | test-core diagnostics: MARK records with the latency counters (below), and the GPO 27/26 knobs | the floor | test cores only |
 
-**Three set menus** a `.qsf` could carry as commented blocks:
+**The set menu.** Move bulk to the mailbox and pads to the LW window; leave status and events on the link unless a
+measurement says otherwise, because each of them costs more fabric off the link than on it. Every cost is
+ESTIMATED unless marked fitted.
 
-| set | macros | for |
-|---|---|---|
-| LW pads, OCRAM bulk | `MISTER_LW`, `MISTER_LW_PAD`, `MISTER_LW_EVT`, `MISTER_OCRAM`, `MISTER_OCRAM_OSD`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT` and keeps its save slots on SPI | a core with a disc, or two bulk functions: pads keep the path proven on hardware, the blocks that cost block memory move |
-| lean, no LW bridge | `MISTER_OCRAM`, `MISTER_OCRAM_OSD`, `MISTER_OCRAM_EVT`; a disc core adds `MISTER_OCRAM_SECTOR_SLOT`; pads stay on SPI or take `MISTER_OCRAM_PAD` | a core short of logic or block memory, or one that wants no bridge the HPS must be answered on |
-| LW only | the tiers of `docs/LW_BRIDGE.md` | a cartridge core; any core until the mailbox is proven |
+| set | macros | status, events, saves | cost beyond stock | for |
+|---|---|---|---|---|
+| **default, a disc core: LW pads, OCRAM bulk, SPI status** | `MISTER_LW`, `MISTER_LW_PAD`, `MISTER_OCRAM`, `MISTER_OCRAM_OSD`, `MISTER_OCRAM_SECTOR_SLOT` and its geometry | all on SPI, unchanged | LW floor and pads about 310 ALMs + 1 M10K; mailbox about 530 ALMs, 0 M10K (ESTIMATED) | a core with a disc and little room: pads keep the proven low-latency path, bulk costs no block memory |
+| add events on LW | the default plus `MISTER_LW_EVT` | status and flags on an LW line; saves on SPI | about +120 ALMs (104 fitted) | a core whose status or block-request latency is measured to matter, and that has the room |
+| LW only | the tiers of `docs/LW_BRIDGE.md`, save slots included | LW | about 1,065 ALMs + 5 M10K (fitted, a disc core's build) | a cartridge core; a core that wants save blocks off SPI |
+| lean, no LW bridge | `MISTER_OCRAM`, `MISTER_OCRAM_OSD`; pads on SPI | SPI | about 160 + 160 ALMs, 0 M10K (ESTIMATED) | a core that wants no bridge the HPS must be answered on. A disc core cannot take it yet: the SECTOR tier needs `MISTER_LW` |
+| area-critical extras | `MISTER_DISABLE_SPI_PAD` (needs `MISTER_LW_PAD`); `CONF_STR_BRAM(1)` | — | about -85 ALMs (ESTIMATED; a stock Main loses the pads); about -350 ALMs for 4 M10K (ESTIMATED) | only when the fit needs it; never a default |
 
 ## Test-core diagnostics
 
@@ -293,13 +299,11 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   the stores.
 - **The block slot's handover follows the SECTOR block's rules.** The slot's mux moves only between requests, moves
   to the mailbox side only while `hps_io`'s commit mark reads 0, and one request is never shown on both paths
-  (`docs/LW_BRIDGE.md`, "One request, one path"). The rules are reused; `sys/lw_blk_mux.sv` and the commit mark as
-  they stand are not, because both live on the 384-bit `HPS_BUS` that only `MISTER_LW` builds. The tier needs a
-  plain-port mux with one feeder port per path, and the commit mark as a plain output under either path's block
-  macro. `lw_blk_mux` stays, as the LW wrapper around that mux, and `HPS_BUS[380]` still carries the mark, and
-  `[381]` its presence, under `MISTER_LW`: no existing bus bit, port or hooking line of `docs/LW_BRIDGE.md` moves. With both paths' enables set
-  the mux takes neither: the slot stays on SPI and the SECTOR ring's fault bit sets. A host binds one path for the
-  slot, and never stores the SECTOR block's EN for a slot it serves here.
+  (`docs/LW_BRIDGE.md`, "One request, one path"). The rules and the parts are reused: the mailbox's feeder drives the
+  same LW sector bits of the 384-bit `HPS_BUS` the SECTOR block drives, so the core hooks the slot through
+  `lw_blk_mux` exactly as for the LW block, and the tier needs `MISTER_LW`. A build of both paths' SECTOR macros
+  stops (`sector_slot_on_two_feeders`): one slot has one feeder. A plain-port mux, for a disc core with no LW floor,
+  is not built; its trigger is the first such core.
 - **H_SECTOR bit 0 asks for the slot, and C_BIND bit 0 says the mux is on the mailbox's feeder.** Publish frames
   only while H_SECTOR's bit is set, C_BIND's reads 1 and C_HELLO holds the echo; serve the slot over SPI, from
   GET_SDSTAT, whenever they do not.
@@ -320,6 +324,41 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 - **Save slots are not carried.** A save slot's read must reach the core whole or not at all, which the SECTOR
   block keeps by holding the frame in its FIFO; a consumer with no FIFO cannot withdraw a frame that the session's
   end cuts short. Save slots stay on SPI, or on the SECTOR block of `docs/LW_BRIDGE.md` where that is built.
+
+### The SECTOR tier as built
+
+`MISTER_OCRAM_SECTOR_SLOT` (the `hps_io` slot), `MISTER_OCRAM_SECTOR_FRAME` (a frame's 32-bit words, 1-4096,
+default 128), `MISTER_OCRAM_SECTOR_GAP` (cycles between strobes, 2-15, default 2) and `MISTER_OCRAM_BLKSZ` (`hps_io`'s
+BLKSZ, default 2) declare it; a 2,352-byte disc frame is 588 words at BLKSZ 3. A build stops naming its guard
+without `MISTER_LW` (`ocram_sector_needs_MISTER_LW`), with `MISTER_OCRAM_DIAG` (`ocram_sector_excludes_MISTER_OCRAM_DIAG`:
+the torture sink and the REQUEST writer share ring 4's span and the EVT writer), beside `MISTER_LW_SECTOR_SLOT`
+(`sector_slot_on_two_feeders`), and at a frame or gap outside those ranges (`ocram_sector_unservable_geometry`).
+The hello stores C_CAPS bit 4, C_RING[4] = `{kind 2, no line, 8,192 words, 0x7000}` and C_K[0, 1, 2, 4, 5]: K0
+`{0, gap}`, K1 `{BLKSZ[10:8], wide[0]}`, K2 = 1, K4 `{RD 0x01, slot[19:16], frame words[12:0]}`, K5 = 32 (LBA bits);
+K3, K6 and K7 read 0. The wire items (the kind, the K words, the REQUEST's `arg` 0) are PROVISIONAL.
+
+- **The walker** (`clk_100m`) serves both host-to-core rings at record granularity, alternating when both have work.
+  It reads H_SECTOR in the session poll. Bit 0 set raises the bind level to `clk_sys`; C_BIND bit 0 is stored as 1
+  once the feeder's mux reads back on the mailbox.
+- **A request stands** when its record `{offered, lba}` crosses from `clk_sys` with offered set. With none standing the
+  tail frame waits and nothing is fetched. With one standing and the ring not empty, the walker reads the tail
+  frame's header and LBA and crosses SEC_HEAD with the LBA; the feeder answers **accept** (the walker streams the
+  frame's words, one crossing each, then stores the tail), **mismatch** (the tail moves past the frame) or **no
+  request** (it fell in between: the frame stays, and the walker waits for a new record or the next poll).
+- **A REQUEST is posted** (`{0x21, 0, 1}` then the LBA, behind a room check of two words) when a request stands, the
+  ring is empty after a head read made since that request's record landed, and none is posted yet for it. The ring
+  is read on the poll period, and back to back only while a record can be consumed.
+- **H_SECTOR bit 0 cleared:** a frame being played finishes; the walker then reads H_IDX[4] and stores C_IDX[4] =
+  that head, which discards every queued frame; only after that does the mux return to SPI and C_BIND bit 0 = 0 get
+  stored. That store waits for a REQUEST record in flight to finish, and no REQUEST starts once the drop is owed.
+- **A fault** on ring 4 (a head more than the ring ahead, a length past the head: C_STATE bit 12) or on ring 3 (C_STATE
+  bit 11) drops the bind the same way, without the flush. A session that ends mid-record sets bit 20 at the next
+  hello.
+- **The feeder** (`clk_sys`) re-creates `hps_io`'s strobes as the SECTOR block's primary feeder does, cycle for cycle
+  from the ack's rise (the trace-compare bench, arm C of `tb/run.sh`): with `io_wide` two 16-bit strobes a word, else
+  four bytes, GAP apart, the first GAP after the ack. Each word is held in the crossing's capture register until its
+  strobes have issued. It zero-fills the rest of a frame on the consumer's reset, or once the session's enable or the
+  bind level has been low for two cycles while a word is awaited.
 
 ## What a host must not assume
 
@@ -349,20 +388,33 @@ transaction unfinished, which is the danger the gate exists for.
 Measured on a DE10-Nano, 2026-11-22..24 (milestones M0-M7). The full records live in the greenfield rewrite's
 `harness/rig/ocram-m*-measured.md`.
 
-There are three different rates here, and they are easy to mix up:
+There are four different rates here, and they are easy to mix up. Every consumer rate is per consumer; consumers
+share the master at record granularity, so two running together split one budget (below).
 
 | path | what limits it | measured |
 |---|---|---|
 | fabric -> on-chip RAM (this master, single-beat AXI3, 32-bit) | bridge latency, flat: 9 `clk_100m` cycles a read, 10 a write | ~36 MB/s reads (8.9 M words/s), ~32 MB/s writes (8.07 M words/s) |
 | CPU -> on-chip RAM (the host's own loads and stores) | the A9's mapping and instruction choice | `STR` 72.5 ns/word (~55 MB/s); `STM` x8 37.8 ns/word (~105 MB/s); `LDM` x8 13.9 ns/word (~290 MB/s, reads) |
-| host -> ring -> consumer, end to end | the consumer's clock-domain handshake | ~6.3 M words/s (~25 MB/s), the same on strongly-ordered and write-combined maps |
+| host -> ring -> torture sink (DIAG), end to end | the bridge: the sink consumes on `clk_100m`, with no crossing | ~6.3 M words/s (~25 MB/s), the same on strongly-ordered and write-combined maps |
+| host -> ring -> OSD consumer, end to end | the consumer's clock-domain handshake, one crossing a word | 640 ns a word: ~1.56 M words/s (~6.2 MB/s) at the Template's 20 MHz `clk_sys` |
 
 - `STR` stores one register; `STM`/`LDM` store/load several consecutive registers in one instruction, so the bus
   can burst. A host should write payloads with multi-register stores (a `memcpy`), not a word-at-a-time loop.
 - The CPU outruns the fabric by 2-4x, so a write-combined mapping buys nothing today: the fabric is the bottleneck.
 - The handshake: each word read at `clk_100m` crosses into the consumer's `clk_sys` through a holding register and
-  a toggle, two flip-flops each way (`lw_xfer`). That round trip is ~640 ns a word, against 90 ns for the read itself,
-  and it is most of a row's ~41 us. Crossing several words at once, or a small dual-clock FIFO, is the obvious
+  a toggle, two flip-flops each way (`lw_xfer`). That round trip is ~640 ns a word at a 20 MHz `clk_sys`, against
+  90 ns for the read itself, and it is most of a row's ~41 us. It scales with `clk_sys`, not with the bridge.
+- The bench (`tb/ocram_tb.sv` built with `OCRAM_TB_RATE`: its bridge model at a fixed 10-cycle latency, which reproduces both rig figures:
+  6.28 M words/s for the sink, 638 ns a word for the OSD at 20 MHz) gives, per consumer, ring pre-filled:
+
+| consumer | 20 MHz `clk_sys` | 33.8688 MHz `clk_sys` |
+|---|---|---|
+| OSD, `hps_ocram_osd` (the M7 consumer) | 608 ns a word, 1.64 M words/s, 38.9 us a row | 450 ns, 2.22 M words/s, 28.8 us a row |
+| OSD, `hps_ocram_rx` | 612 ns, 1.63 M words/s, 39.2 us a row | 455 ns, 2.20 M words/s, 29.1 us a row |
+| SECTOR, `hps_ocram_rx`, 588-word frames, gap 2 | 608 ns, 1.64 M words/s | 451 ns, 2.22 M words/s, 265 us a frame |
+| OSD and SECTOR together, `hps_ocram_rx` | about 1.7 M words/s in all; a row waits behind a frame, about 330 us a row | about 2.3 M words/s in all; about 245 us a row, the SECTOR stream 2.0 M words/s |
+
+  `hps_ocram_rx` keeps the one-word handshake, so its rates are the old consumer's: it saves area, not time. Crossing several words at once, or a small dual-clock FIFO, is the obvious
   next step; read bursts would then amortize the 90 ns latency as well. Neither is built.
 - The region is ~60 KB at most and is used as rings: the rate is how fast a stream flows through, the size is how
   far a producer can run ahead. Per job:
@@ -371,12 +423,14 @@ There are three different rates here, and they are easy to mix up:
 |---|---|---|---|
 | one OSD row | 256 B | ~41-49 us | ~0.86 ms |
 | full 16-row OSD repaint | 4 KB | ~0.64 ms | ~14-18 ms |
-| one CD sector | 2,352 B | ~100 us | — |
-| PSX 2x CD-ROM stream | 150 sectors/s | ~1.4 % of the path's time | — |
+| one CD sector | 2,352 B | ~265 us at 33.8688 MHz `clk_sys` (bench) | — |
+| PSX 2x CD-ROM stream | 150 sectors/s | ~4 % of the path's time (bench) | — |
 
 - Cost (Quartus 17.0.2, seed 1, Template): the floor (master, poller, control page) is 158 ALMs and 0 M10K;
   `MISTER_OCRAM_OSD` adds 399 ALMs and 0 M10K (the consumer 338.5, the master's port 57.5). That is about five
-  times the first estimate, and the handshake above is most of it. The bridge itself is free hard silicon: stock
+  times the first estimate. The handshake above is the OSD tier's time, not its area: the area went to three
+  registers holding the same word, four address adders and a walker of its own, which `hps_ocram_rx.sv` replaces with
+  one walker, one adder and one held word (ESTIMATED about 160 ALMs alone, not yet fitted). The bridge itself is free hard silicon: stock
   `sys/sysmem.sv` already instantiates the `fpga2hps` atom, unused (`port_size_config` `2'b11`); this tier sets
   `2'b00` (32-bit).
 - Verified on the rig: secure and non-secure transactions both pass; 10^9 fabric-written words read with 0 errors
@@ -390,6 +444,8 @@ There are three different rates here, and they are easy to mix up:
 - Write-combined ordering with the ring part-full (every torture run kept it full).
 - What this traffic costs the other HPS masters (a loaded run lost 3.5 %, not attributed).
 - Read bursts and a multi-word crossing: designed in prose only.
+- The SECTOR tier and `hps_ocram_rx.sv`: benched only (`tb/ocram_tb.sv`, `tb/sfeed_tb.sv`), not fitted, not run on
+  hardware.
 - A greenfield host driving a real core's menu over the ring on hardware (the probe has; the host path is in diagnosis).
 - A stock Main host.
 - A warm reset with `warmramgrp.enable` cleared: stock U-Boot hangs on a hardware warm reset with or without this
