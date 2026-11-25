@@ -241,7 +241,8 @@ end
 `endif
 `endif
 // MISTER_OCRAM_FIO (with MISTER_OCRAM): the same link front, lw_link, with the OCRAM download player's nets on its
-// player side (hps_ocram_rx.sv). hps_io stops a build that names both players (link_on_two_players).
+// player side (hps_ocram_rx.sv). hps_io stops a build that names both players (link_on_two_players). With
+// MISTER_OCRAM_UIO that player also plays frames on the UIO and both OSD selects, into the same decoders.
 `ifdef MISTER_OCRAM
 `ifdef MISTER_OCRAM_FIO
 `define LW_OCRAM_FIO_LINK

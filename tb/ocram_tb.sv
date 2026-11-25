@@ -40,6 +40,10 @@
 // word at the strobe address one clk_sys later in its LBA field while its mux and ack are up (lw_save_mux's). The
 // bench sets each request's blk_cnt directly (the window carries none) and gives the walker BLKSZ 2 for the mount
 // slots, so a block is 128 words and blk_cnt 3 is 512 (MISTER_OCRAM_MOUNT_FRAME 512 in the shape).
+// With MISTER_OCRAM_UIO (arm U, beside the download tier) a twin link stack (an lw_link with no player, a second
+// hps_io, two osds) takes each UIO and OSD frame's words over the link, and the cases compare it with the mailbox
+// side (fio_link's hps_io and two osds on the player's OSD selects): the UIO strobe streams, hps_io's and the osds'
+// registers, the toggles at each frame's end; frames outside the mask or with arg[6:2] set are skipped by length.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -139,7 +143,16 @@ localparam integer FGAP = `MISTER_OCRAM_FIO_GAP;
 localparam integer FGAP = 4;
 `endif
 localparam [31:0] C_RING1_FIO = 32'h2968_0400;   // kind 5 (LANE), line 5, 1024 words at 0x1000
+// the select mask: the FPGA select; with MISTER_OCRAM_UIO also the UIO and OSD selects (no HDMI osd: not select 2)
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_DEBUG_NOHDMI
+localparam [31:0] C_K9_EXP    = {16'h000B, FGAP[15:0]};
+`else
+localparam [31:0] C_K9_EXP    = {16'h000F, FGAP[15:0]};
+`endif
+`else
 localparam [31:0] C_K9_EXP    = {16'h0002, FGAP[15:0]};
+`endif
 `ifdef MISTER_OCRAM_SECTOR_FRAME
 localparam integer SFRAME = `MISTER_OCRAM_SECTOR_FRAME;
 `else
@@ -3947,6 +3960,274 @@ task fio_case5;
 		fio_check_writes("the frozen frame's window", w0);
 	end
 endtask
+
+`ifdef MISTER_OCRAM_UIO
+////////////////////////  the UIO and OSD frames (MISTER_OCRAM_UIO)  ////////////////////////
+
+// Arm U. The twin: the same link words sent by the HPS over the link, through an lw_link of its own with no player,
+// into a second real hps_io and two real osds; the mailbox side has its two osds on the player's OSD selects, behind
+// fio_link. Every strobe either side passes on the UIO select is logged as {sel, din}, with a mark at each select
+// fall: that stream is all sys_top's UIO write arms read, so equal streams are equal registers there; hps_io's and
+// the osds' registers are compared directly. A link OSD transaction raises both OSD selects; the mailbox sends it as
+// two frames, sel 2 then sel 3 (sel 2 only with an HDMI osd).
+`ifdef MISTER_DEBUG_NOHDMI
+localparam [3:0] U_SELS = 4'b1011;
+`else
+localparam [3:0] U_SELS = 4'b1111;
+`endif
+reg   [3:0] tw_l = 4'd0;                 // the twin link's selects {vga, hdmi, fpga, uio}
+reg         tw_clk = 1'b0;
+reg  [15:0] tw_d = 16'd0;
+wire  [3:0] tw_sel;
+wire        tw_stb, tw_ack;
+wire [15:0] tw_din;
+lw_link tw_link
+(
+	.clk_sys(clk_sys), .l_sel(tw_l), .l_clk(tw_clk), .l_din(tw_d), .l_wait(1'b0),
+	.p_own(1'b0), .p_hold(1'b0), .p_sel(4'd0), .p_strobe(1'b0), .p_din(16'd0),
+	.io_sel(tw_sel), .io_strobe(tw_stb), .io_din(tw_din), .io_ack(tw_ack)
+);
+wire [45:0] tbus;
+assign tbus[45:38] = 8'd0;
+assign tbus[35:33] = {tw_sel[1], tw_sel[0], tw_stb};
+assign tbus[31:16] = tw_din;
+hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) tw_io
+(
+	.clk_sys(clk_sys), .HPS_BUS(tbus), .ioctl_wait(1'b0), .ioctl_din(16'd0), .sd_rd(1'b0), .sd_wr(1'b0)
+);
+`ifdef MISTER_OCRAM_OSD
+`define U_OSD_PORT , .lw_we(1'b0), .lw_addr(13'd0), .lw_byte(8'd0)
+`else
+`define U_OSD_PORT
+`endif
+osd u_mh(.clk_sys(clk_sys), .io_osd(m_sel[2]), .io_strobe(m_strobe), .io_din(m_din), .clk_video(clk_video),
+         .din(24'd0), .de_in(1'b0), .vs_in(1'b0), .hs_in(1'b0), .dout(), .de_out(), .vs_out(), .hs_out(),
+         .osd_status() `U_OSD_PORT);
+osd u_mv(.clk_sys(clk_sys), .io_osd(m_sel[3]), .io_strobe(m_strobe), .io_din(m_din), .clk_video(clk_video),
+         .din(24'd0), .de_in(1'b0), .vs_in(1'b0), .hs_in(1'b0), .dout(), .de_out(), .vs_out(), .hs_out(),
+         .osd_status() `U_OSD_PORT);
+osd u_th(.clk_sys(clk_sys), .io_osd(tw_sel[2]), .io_strobe(tw_stb), .io_din(tw_din), .clk_video(clk_video),
+         .din(24'd0), .de_in(1'b0), .vs_in(1'b0), .hs_in(1'b0), .dout(), .de_out(), .vs_out(), .hs_out(),
+         .osd_status() `U_OSD_PORT);
+osd u_tv(.clk_sys(clk_sys), .io_osd(tw_sel[3]), .io_strobe(tw_stb), .io_din(tw_din), .clk_video(clk_video),
+         .din(24'd0), .de_in(1'b0), .vs_in(1'b0), .hs_in(1'b0), .dout(), .de_out(), .vs_out(), .hs_out(),
+         .osd_status() `U_OSD_PORT);
+`undef U_OSD_PORT
+// the registers that are X until first written start at 0 on both sides, so a toggle can be counted
+initial begin
+	#1;
+	fio_io.RTC = 65'd0; tw_io.RTC = 65'd0; fio_io.TIMESTAMP = 33'd0; tw_io.TIMESTAMP = 33'd0;
+	fio_io.status = 128'd0; tw_io.status = 128'd0; fio_io.cfg = 16'd0; tw_io.cfg = 16'd0;
+end
+
+// the UIO streams, {sel, din} per strobe and 20'hE0000 at each select fall; the pulses and toggles of each side
+reg  [19:0] us_m [0:4095];
+reg  [19:0] us_t [0:4095];
+integer     usn_m = 0, usn_t = 0;
+reg         u0_m = 1'b0, u0_t = 1'b0;
+integer     om_h = 0, om_v = 0;          // strobes the mailbox side passed on each OSD select
+integer     mnt_m = 0, mnt_t = 0, gw_m = 0, gw_t = 0, rtc_m = 0, rtc_t = 0, ts_m = 0, ts_t = 0;
+reg         mnt_md = 1'b0, mnt_td = 1'b0, rtc_md = 1'b0, rtc_td = 1'b0, ts_md = 1'b0, ts_td = 1'b0;
+always @(posedge clk_sys) begin
+	if (m_strobe && m_sel[0] && usn_m < 4096) begin us_m[usn_m] = {m_sel, m_din}; usn_m = usn_m + 1; end
+	if (u0_m && !m_sel[0] && usn_m < 4096) begin us_m[usn_m] = 20'hE0000; usn_m = usn_m + 1; end
+	u0_m = m_sel[0];
+	if (tw_stb && tw_sel[0] && usn_t < 4096) begin us_t[usn_t] = {tw_sel, tw_din}; usn_t = usn_t + 1; end
+	if (u0_t && !tw_sel[0] && usn_t < 4096) begin us_t[usn_t] = 20'hE0000; usn_t = usn_t + 1; end
+	u0_t = tw_sel[0];
+	if (m_strobe && m_sel[2]) om_h = om_h + 1;
+	if (m_strobe && m_sel[3]) om_v = om_v + 1;
+	if (fio_io.img_mounted === 1'b1 && !mnt_md) mnt_m = mnt_m + 1;
+	if (tw_io.img_mounted === 1'b1 && !mnt_td) mnt_t = mnt_t + 1;
+	mnt_md = fio_io.img_mounted === 1'b1; mnt_td = tw_io.img_mounted === 1'b1;
+	if (fio_io.gamma_wr === 1'b1) gw_m = gw_m + 1;
+	if (tw_io.gamma_wr === 1'b1) gw_t = gw_t + 1;
+	if (fio_io.RTC[64] !== rtc_md) rtc_m = rtc_m + 1;
+	if (tw_io.RTC[64] !== rtc_td) rtc_t = rtc_t + 1;
+	if (fio_io.TIMESTAMP[32] !== ts_md) ts_m = ts_m + 1;
+	if (tw_io.TIMESTAMP[32] !== ts_td) ts_t = ts_t + 1;
+	rtc_md = fio_io.RTC[64]; rtc_td = tw_io.RTC[64]; ts_md = fio_io.TIMESTAMP[32]; ts_td = tw_io.TIMESTAMP[32];
+end
+
+// The twin's link word and transaction: the HPS's handshake on io_clk/io_ack, as lk_word
+task tw_word(input [15:0] w);
+	integer t;
+	begin
+		@(negedge clk_sys); tw_d = w; tw_clk = 1;
+		t = 0; while (tw_ack !== 1'b1 && t < 200000) begin @(negedge clk_sys); t = t + 1; end
+		tw_clk = 0;
+		t = 0; while (tw_ack !== 1'b0 && t < 200000) begin @(negedge clk_sys); t = t + 1; end
+	end
+endtask
+reg  [15:0] uw [0:63];                   // the transaction's link words: the opcode, then its data words
+integer     un = 0;
+task tw_txn(input [3:0] s);
+	integer m;
+	begin
+		@(negedge clk_sys); tw_l = s;
+		repeat (2) @(negedge clk_sys);
+		for (m = 0; m < un; m = m + 1) tw_word(uw[m]);
+		@(negedge clk_sys); tw_l = 4'd0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+// The same words as one LFRAME on ring 1, arg = {odd, tag, capture, sel}; published alone, played to its tail store
+task u_frame(input [1:0] s, input [3:0] tag, input cap, input string what);
+	integer j, len, ok1;
+	begin
+		len = (un + 1) / 2;
+		fio_put({8'h30, un[0], tag, cap, s, len[15:0]});
+		for (j = 0; j < len; j = j + 1) fio_put({(2 * j + 1 < un) ? uw[2 * j + 1] : 16'd0, uw[2 * j]});
+		fio_publish;
+		fio_wait_played(5000, ok1);
+		check({what, ": C_IDX[1] reaches the frame's end"}, ok1, 1);
+		repeat (20) @(posedge clk_sys);
+	end
+endtask
+// opcode op with n random data words
+task u_words(input [7:0] op, input integer n);
+	integer j;
+	begin
+		uw[0] = {8'h00, op}; un = 1 + n;
+		for (j = 1; j <= n; j = j + 1) uw[j] = $random(seed);
+	end
+endtask
+
+task u_same(input string what);
+	integer j, bad;
+	begin
+		bad = 0;
+		for (j = 0; j < usn_m || j < usn_t; j = j + 1)
+			if (j >= usn_m || j >= usn_t || us_m[j] !== us_t[j]) begin
+				if (bad < 4) $display("   %s: UIO strobe %0d mailbox %h link %h", what, j, us_m[j], us_t[j]);
+				bad = bad + 1;
+			end
+		check({what, ": the UIO strobe stream, mailbox and link (sys_top's arms read it)"}, bad, 0);
+		check({what, ": status"}, fio_io.status !== tw_io.status, 0);
+		check({what, ": the buttons and switches word (0x01)"}, {16'd0, fio_io.cfg}, {16'd0, tw_io.cfg});
+		check({what, ": RTC[31:0]"}, fio_io.RTC[31:0], tw_io.RTC[31:0]);
+		check({what, ": RTC[64:32]"}, fio_io.RTC[64:32], tw_io.RTC[64:32]);
+		check({what, ": TIMESTAMP"}, fio_io.TIMESTAMP[31:0], tw_io.TIMESTAMP[31:0]);
+		check({what, ": TIMESTAMP's toggle"}, fio_io.TIMESTAMP[32], tw_io.TIMESTAMP[32]);
+		check({what, ": img_size, img_readonly"}, {fio_io.img_size !== tw_io.img_size,
+		                                          fio_io.img_readonly !== tw_io.img_readonly}, 0);
+		check({what, ": sdram_sz"}, fio_io.sdram_sz, tw_io.sdram_sz);
+		check({what, ": the gamma words"}, {fio_io.gamma_en, fio_io.gamma_wr_addr, fio_io.gamma_value},
+		      {tw_io.gamma_en, tw_io.gamma_wr_addr, tw_io.gamma_value});
+		check({what, ": uart_mode, uart_speed"}, {fio_io.uart_mode !== tw_io.uart_mode,
+		                                         fio_io.uart_speed !== tw_io.uart_speed}, 0);
+		check({what, ": mount strobes, gamma writes"}, {mnt_m[15:0], gw_m[15:0]}, {mnt_t[15:0], gw_t[15:0]});
+	end
+endtask
+task u_osd_same(input string what);
+	begin
+		check({what, ": osd VGA enable, status, info"}, {u_mv.osd_enable, u_mv.osd_status, u_mv.info, u_mv.rot},
+		      {u_tv.osd_enable, u_tv.osd_status, u_tv.info, u_tv.rot});
+		check({what, ": osd VGA infox, infoy"}, {u_mv.infox[15:0], u_mv.infoy[15:0]},
+		      {u_tv.infox[15:0], u_tv.infoy[15:0]});
+		check({what, ": osd VGA infow, infoh"}, {7'd0, u_mv.infow, 7'd0, u_mv.infoh},
+		      {7'd0, u_tv.infow, 7'd0, u_tv.infoh});
+		if (U_SELS[2]) begin
+			check({what, ": osd HDMI enable, status, info"}, {u_mh.osd_enable, u_mh.osd_status, u_mh.info, u_mh.rot},
+			      {u_th.osd_enable, u_th.osd_status, u_th.info, u_th.rot});
+			check({what, ": osd HDMI infox, infoy"}, {u_mh.infox[15:0], u_mh.infoy[15:0]},
+			      {u_th.infox[15:0], u_th.infoy[15:0]});
+			check({what, ": osd HDMI infow, infoh"}, {7'd0, u_mh.infow, 7'd0, u_mh.infoh},
+			      {7'd0, u_th.infow, 7'd0, u_th.infoh});
+		end
+	end
+endtask
+
+// U1. C_K[9] exact; each frame of the UIO set against its link twin, odd and even, the stock steps at each end
+task uio_case1;
+	integer i, k, r0, t0;
+	reg [7:0] op;
+	begin
+		$display("-- U1: C_K[9] declares the UIO and OSD selects; each UIO frame against its link twin");
+		fio_session(16'h0F10);
+		fio_holds(0);
+		usn_m = 0; usn_t = 0;
+		check("C_K[9]: {sel mask, gap}", mem[C_K9 >> 2], {12'd0, U_SELS, FGAP[15:0]});
+		check("C_CAPS: no bit for the UIO frames", mem[C_CAPS >> 2], C_CAPS_EXP);
+		r0 = rtc_m; t0 = ts_m;
+		// hps_io's write arms (the LW lane's ten) and sys_top's, each with its own data length; twice, new data
+		for (k = 0; k < 2; k = k + 1)
+			for (i = 0; i < 24; i = i + 1) begin
+				case (i)
+					0: begin op = 8'h01; u_words(op, 1); end
+					1: begin op = 8'h1C; u_words(op, 1); uw[1][6:1] = 6'd0; end   // slot 0 (VDNUM 1), bit 7 read-only
+					2: begin op = 8'h1D; u_words(op, 4); end
+					3: begin op = 8'h1E; u_words(op, 8); end
+					4: begin op = 8'h22; u_words(op, 4); end
+					5: begin op = 8'h24; u_words(op, 2); end
+					6: begin op = 8'h31; u_words(op, 1); end
+					7: begin op = 8'h32; u_words(op, 1); end
+					8: begin op = 8'h33; u_words(op, 6); end                      // two gamma triplets
+					9: begin op = 8'h3B; u_words(op, 3); end
+					10: begin op = 8'h20; u_words(op, 9 + k * 3); end
+					11: begin op = 8'h25; u_words(op, 1); end
+					12: begin op = 8'h26; u_words(op, 1); end
+					13: begin op = 8'h27; u_words(op, 1); end
+					14: begin op = 8'h2A; u_words(op, 4 + k); end
+					15: begin op = 8'h2B; u_words(op, 1); end
+					16: begin op = 8'h2F; u_words(op, 10); end
+					17: begin op = 8'h37; u_words(op, 1); end
+					18: begin op = 8'h38; u_words(op, 1); end
+					19: begin op = 8'h39; u_words(op, 15); end
+					20: begin op = 8'h3A; u_words(op, 4 + k); end
+					21: begin op = 8'h3E; u_words(op, 1); end
+					22: begin op = 8'h41; u_words(op, 2 + k); end
+					default: begin op = 8'h1E; u_words(op, 7); end                // a short status frame, odd
+				endcase
+				tw_txn(4'b0001);
+				u_frame(2'd0, 4'd0, 1'b0, $sformatf("U1 0x%02h (%0d words)", op, un));
+				u_same($sformatf("U1 0x%02h (%0d words)", op, un));
+			end
+		check("U1: RTC's toggle, once a 0x22 frame (mailbox)", rtc_m - r0, 2);
+		check("U1: TIMESTAMP's toggle, once a 0x24 frame (mailbox)", ts_m - t0, 2);
+		check("U1: the toggles, mailbox and link", {rtc_m[15:0], ts_m[15:0]}, {rtc_t[15:0], ts_t[15:0]});
+		check("U1: mount strobes (mailbox)", mnt_m >= 2, 1);
+		check("U1: the walker took no fault", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
+	end
+endtask
+
+// U2. the OSD control words as sel 2 then sel 3; frames the mask or the arg refuses are skipped by length
+task uio_case2;
+	integer i, h0, v0, n0;
+	begin
+		$display("-- U2: an OSD control word as two frames, sel 2 then 3; refused frames skipped by length");
+		fio_session(16'h0F11);
+		fio_holds(0);
+		usn_m = 0; usn_t = 0;
+		for (i = 0; i < 4; i = i + 1) begin
+			h0 = om_h; v0 = om_v;
+			case (i)
+				0: begin u_words(8'h41, 5); uw[5] = 16'd1; end   // enable, x, y, w, h, rotation
+				1: begin u_words(8'h45, 4); end                  // enable with info
+				2: begin u_words(8'h40, 0); end                  // disable
+				default: begin u_words(8'h43, 3); end            // enable, info, no rotation word
+			endcase
+			tw_txn(4'b1100);
+			u_frame(2'd2, 4'd0, 1'b0, $sformatf("U2 OSD 0x%02h, sel 2", uw[0][7:0]));
+			u_frame(2'd3, 4'd0, 1'b0, $sformatf("U2 OSD 0x%02h, sel 3", uw[0][7:0]));
+			check($sformatf("U2 OSD 0x%02h: strobes on the HDMI select", uw[0][7:0]), om_h - h0, U_SELS[2] ? un : 0);
+			check($sformatf("U2 OSD 0x%02h: strobes on the VGA select", uw[0][7:0]), om_v - v0, un);
+			u_osd_same($sformatf("U2 OSD 0x%02h", uw[0][7:0]));
+		end
+		// a capture frame, a tag without capture: skipped whole, nothing on the link, no fault; the next frame plays
+		n0 = usn_m;
+		u_words(8'h1E, 8);
+		u_frame(2'd0, 4'd0, 1'b1, "U2 a capture frame (no MISTER_OCRAM_LANE)");
+		u_frame(2'd0, 4'd5, 1'b0, "U2 a tag without capture");
+		check("U2: refused frames: no UIO strobe", usn_m, n0);
+		u_words(8'h1E, 8);
+		tw_txn(4'b0001);
+		u_frame(2'd0, 4'd0, 1'b0, "U2 the frame after them");
+		u_same("U2 the frame after the refused ones");
+		check("U2: the walker took no fault", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
+	end
+endtask
+`endif
 `endif
 
 initial begin
@@ -4032,6 +4313,10 @@ initial begin
 	fio_cut("the ID view", 32'h0000_0000, 0);
 	fio_cut("a core reset through GPO, the core's wait up", 32'h4000_0000, 1);
 	fio_case5;
+`ifdef MISTER_OCRAM_UIO
+	uio_case1;
+	uio_case2;
+`endif
 `endif
 
 	$display("-- the protocol monitor over the whole suite");

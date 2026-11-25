@@ -63,9 +63,10 @@
 //    empty, once per request (rq_post, rq_start: the master's record writer).
 //  * Download: an LFRAME {0x30, {odd, 0, sel}, len}, then len words of two link words each, low half first; odd
 //    drops the last high half. The walker crosses its header as FIO_HEAD in the read's response cycle when the kind
-//    is 0x30, arg[6:2] is 0, sel is in the select mask (1, the FPGA select) and len is not 0, then each word as
-//    DATA; the tail is stored after the last word's answer, which the player gives once the frame has ended. Every
-//    other record is skipped by length. The ring is walked in every session; it has no bind.
+//    is 0x30, arg[6:2] is 0, sel is in the select mask (FIO_SELS: 1, the FPGA select; with MISTER_OCRAM_UIO also 0,
+//    the UIO select, and 2, 3, the OSD selects) and len is not 0, then each word as DATA; the tail is stored after
+//    the last word's answer, which the player gives once the frame has ended. Every other record is skipped by
+//    length. The ring is walked in every session; it has no bind.
 //  * The player (hps_ocram_fplay, clk_sys) is the LW lane player's: a frame starts with both link selects low for
 //    two cycles, the link not busy and the enable up; each strobe is followed by GAP consecutive cycles with
 //    l_wait low; the select drops between frames. A frame the session's end cuts ends short at the next word it
@@ -224,7 +225,18 @@ localparam [15:0] SEC_BASE  = 16'h7000;
 localparam [15:0] SEC_WORDS = 16'd8192;
 localparam [15:0] FIO_BASE  = (FIO_RING == 32'd13) ? 16'h7000 : 16'h1000;
 localparam [15:0] FIO_WORDS = 16'd1 << FIO_RING[3:0];
-localparam  [3:0] FIO_SELS  = 4'b0010;      // the selects an LFRAME may name: the FPGA select (1) alone
+// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: the FPGA select (1) alone; with MISTER_OCRAM_UIO
+// also the UIO select (0) and both OSD selects, the HDMI one (2) only with an HDMI osd. hps_ocram_master's C_K[9]
+// declares the same mask from the same macros.
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_DEBUG_NOHDMI
+localparam  [3:0] FIO_SELS  = 4'b1011;
+`else
+localparam  [3:0] FIO_SELS  = 4'b1111;
+`endif
+`else
+localparam  [3:0] FIO_SELS  = 4'b0010;
+`endif
 localparam [15:0] MNT_BASE  = 16'h6000;
 localparam [15:0] MNT_WORDS = 16'd1024;
 `ifdef MISTER_OCRAM_DIAG

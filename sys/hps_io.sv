@@ -346,6 +346,16 @@ link_on_two_players link_guard();
 `endif
 `endif
 `endif
+// MISTER_OCRAM_UIO widens the OCRAM download tier's player to the UIO and OSD selects: without it there is no player.
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_FIO
+ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
+`endif
+`else
+ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
+`endif
+`endif
 
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;

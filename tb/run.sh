@@ -94,6 +94,15 @@
 #      MISTER_DISABLE_SPI_BLK (0x16 reads 0 with requests raised, 0x17 and 0x18 raise no ack and no strobe, the
 #      commit mark reads 0 on every cycle, present) and without it (the same words show the arms alive); and four
 #      runs that each break one of the core's obligations, each named by hps_io's simulation check
+#   U  the UIO and OSD frames on ring 1 (MISTER_OCRAM_UIO, the lean profile's U1; arm X has its guard):
+#      tb/ocram_tb.sv's download shape with MISTER_OCRAM_UIO, every seed, plain and with the crossing models, at
+#      33.8688 and 20 MHz, and once with MISTER_DEBUG_NOHDMI: C_K[9] exact (mask 0x000F, 0x000B without HDMI) and
+#      C_CAPS unchanged; each frame of the set (hps_io's ten write arms, sys_top's write arms) against its twin sent
+#      over the link into a second hps_io: the UIO strobe stream equal, hps_io's registers equal, RTC's and
+#      TIMESTAMP's toggles once a frame; the OSD control words as sel 2 then 3 against the link's one transaction
+#      into two osds each (no sel-2 strobe without HDMI); a capture frame and a tagged frame skipped by length, no
+#      fault; and every download case of arm O's shape in the same run. Then verilator lints the master, the walker
+#      and the player with the macro, with and without MISTER_DEBUG_NOHDMI
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -422,6 +431,58 @@ EOV
   else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
 
+# uarm LOG: arm U. tb/ocram_tb.sv's download shape with MISTER_OCRAM_UIO, each shape compiled once, run under every
+# seed, plain and with the crossing models; then verilator on the three modules with the macro.
+uarm() {
+  : > "$1"; n=0; f=0
+  UB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
+  UD="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO"
+  for m in plain cdc; do
+    for c in uio33 uio20 uion33; do
+      case $c in uio33) D="$UD -DOCRAM_TB_SYS_HP_PS=14762";; uio20) D="$UD -DOCRAM_TB_SYS_HP_PS=25000";;
+        uion33) D="$UD -DMISTER_DEBUG_NOHDMI -DOCRAM_TB_SYS_HP_PS=14762";; esac
+      d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      echo "-- the bench compiles ($c, $m)" >> "$1"
+      if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/uioU_${c}_$m.vvp" $UB > "$O/uioU_${c}_$m.err" 2>&1; then
+        echo "pass bench: compiles ($c, $m)" >> "$1"; n=$((n + 1))
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          vvp -n "$O/uioU_${c}_$m.vvp" +lw_seed=$s > "$O/uioU_${c}_$m.$s.log" 2>&1 &
+        done; wait
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          echo "== seed $s $c $m" >> "$1"; cat "$O/uioU_${c}_$m.$s.log" >> "$1"
+          grep -Eq '^(PASSED|FAILED): [0-9]' "$O/uioU_${c}_$m.$s.log" || echo "FAIL bench $s $c $m: gave no result" >> "$1"
+        done
+      else
+        f=$((f + 1)); echo "FAIL bench: does not compile ($c, $m)" >> "$1"; head -20 "$O/uioU_${c}_$m.err" | sed 's/^/   /' >> "$1"
+      fi
+    done
+  done
+  echo "-- verilator --lint-only -Wall on the master, the walker and the player with MISTER_OCRAM_UIO" >> "$1"
+  if command -v verilator >/dev/null 2>&1; then
+    vok=1
+    for VS in "uio:-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO" \
+              "uion:-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_DEBUG_NOHDMI" \
+              "uioall:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO"; do
+      vn=${VS%%:*}; VF=${VS#*:}
+      for t in hps_ocram_master hps_ocram_rx hps_ocram_fplay; do
+        G=""; fl=$t
+        [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
+        [ $t = hps_ocram_rx ] && case $vn in uioall) G="-GSEC_EN=1 -GFIO_EN=1";; *) G="-GOSD_EN=0 -GFIO_EN=1";; esac
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
+             > "$O/uioV_${t}_$vn.log" 2>&1 || [ -s "$O/uioV_${t}_$vn.log" ]; then
+          vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/uioV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
+        fi
+      done
+    done
+    if [ $vok -eq 1 ]; then echo "pass verilator: no warning" >> "$1"; n=$((n + 1))
+    else f=$((f + 1)); fi
+  else
+    echo "SKIPPED verilator: not on PATH" >> "$1"
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
+}
+
 # elab LOG: arm E, one elaboration and simulation of tb/top_tb.sv per configuration; the log ends with one
 # PASSED/FAILED line for the arm. Files from sys.qip and files.qip, less those sys_stubs.sv stands in for. The
 # configurations run $LW_TB_JOBS (8) at a time, the three off ones first: each LW run's warnings are compared
@@ -566,6 +627,11 @@ bad|ocram_fio_ring_on_ring4_span|a download ring of 2^13 beside DIAG|-DMISTER_OC
 ok|-|the download edges: 2^13 words alone, gap 7|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=13 -DXO_FGAP=7
 ok|-|the download edges: 2^2 words, gap 4|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=2 -DXO_FGAP=4
 ok|-|the download edges: 2^10 words, gap 7|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=7
+bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO alone|-DMISTER_OCRAM_UIO
+bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO with the floor and no download tier|-DMISTER_OCRAM -DMISTER_OCRAM_UIO -DXO_MASTER
+bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO and MISTER_OCRAM_FIO without the floor|-DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO
+ok|-|MISTER_OCRAM_UIO with the download tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4
+ok|-|MISTER_OCRAM_UIO with the download tier, no HDMI osd|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_DEBUG_NOHDMI -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4
 bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT0_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT0_SLOT=2
 bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT1_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT1_SLOT=3
 bad|ocram_sector_needs_MISTER_LW|the mount slots without MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2
@@ -846,6 +912,15 @@ for g in $ARMS; do
     rmy "$O/rmY.log"
     grep -v "^pass " "$O/rmY.log" | grep -v '^== seed'
     V=$(verdict Y "$O/rmY.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = U ]; then
+    echo "== arm U: tb/ocram_tb.sv with MISTER_OCRAM_UIO: UIO and OSD frames on ring 1 against their link twins"
+    uarm "$O/uioU.log"
+    grep -v "^pass " "$O/uioU.log" | grep -v '^== seed'
+    V=$(verdict U "$O/uioU.log") || rc=1
     R="$R$V
 "
     continue

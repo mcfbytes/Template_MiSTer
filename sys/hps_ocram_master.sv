@@ -60,10 +60,12 @@
 //    the n words hps_ocram_rx hands over one at a time, behind a room check of n + 2 words; the head store
 //    publishes it and m_pub tells hps_ocram_rx, whose feeder then drops the slot's ack.
 //  * MISTER_OCRAM_FIO: the download ring r = 1 (hps_ocram_rx plays its LFRAME records), C_CAPS bit 1, C_RING[1]
-//    with line ordinal 5, C_K[9] {sel mask, gap}, and the ring's mark line: H_MARK[1] is read in the session poll,
-//    and the line (mark_line, f2h_irq[12]) is high in a session while H_MARK[1] bit 31 is set and the ring's tail
-//    is at or past H_MARK[1][15:0] (modulo 2^16, within half the index space). While it is high H_MARK[1] is
-//    re-read back to back, alternating with the EVT line's re-read and yielding to a waiting consumer as it does.
+//    with line ordinal 5, C_K[9] {sel mask, gap} (MISTER_OCRAM_UIO widens the mask to the UIO and OSD selects,
+//    0x000F, or 0x000B with MISTER_DEBUG_NOHDMI, and takes no C_CAPS bit), and the ring's mark line: H_MARK[1] is
+//    read in the session poll, and the line (mark_line, f2h_irq[12]) is high in a session while H_MARK[1] bit 31
+//    is set and the ring's tail is at or past H_MARK[1][15:0] (modulo 2^16, within half the index space). While it
+//    is high H_MARK[1] is re-read back to back, alternating with the EVT line's re-read and yielding to a waiting
+//    consumer as it does.
 //
 // Address map, layout 1 (offsets from 0xFFFF0000): the host half of the control page H_HELLO, H_BIND, H_LINE,
 // H_IDX[2], H_IDX[3], H_IDX[4]; the fabric half C_HELLO, C_VERSION, C_CAPS, C_STATE, C_IDX[2], C_IDX[3],
@@ -274,10 +276,21 @@ localparam [31:0] C_RING3_EVT   = {5'd4, 5'd4, 4'd11, 4'd0, 14'h1000};    // EVT
 /* verilator lint_off UNUSEDPARAM */   // a DIAG build's words or a SECTOR build's, never both
 localparam [31:0] C_RING4_TS    = {5'd31, 5'd0, 4'd13, 4'd0, 14'h1C00};   // DIAG, no line, 8192 words, 0x7000
 localparam [31:0] C_RING4_SEC   = {5'd2, 5'd0, 4'd13, 4'd0, 14'h1C00};    // SECTOR, no line, 8192 words, 0x7000
-// LANE, line 5, 2^FIO_RING words at 0x1000 (8,192 at 0x7000); sel mask bit 1 (the FPGA select) and the gap
+// LANE, line 5, 2^FIO_RING words at 0x1000 (8,192 at 0x7000); the select mask and the gap. The mask is the
+// walker's FIO_SELS (hps_ocram_rx.sv), from the same macros: bit 1 the FPGA select; with MISTER_OCRAM_UIO also bit 0
+// the UIO select and the OSD selects, bit 3 VGA and bit 2 HDMI (not with MISTER_DEBUG_NOHDMI).
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_DEBUG_NOHDMI
+localparam  [3:0] FIO_SELS      = 4'b1011;
+`else
+localparam  [3:0] FIO_SELS      = 4'b1111;
+`endif
+`else
+localparam  [3:0] FIO_SELS      = 4'b0010;
+`endif
 localparam [13:0] FIO_OFF       = (FIO_RING == 32'd13) ? 14'h1C00 : 14'h0400;
 localparam [31:0] C_RING1_FIO   = {5'd5, 5'd5, FIO_RING[3:0], 4'd0, FIO_OFF};
-localparam [31:0] C_K9_FIO      = {16'h0002, FIO_GAP[15:0]};
+localparam [31:0] C_K9_FIO      = {12'd0, FIO_SELS, FIO_GAP[15:0]};
 localparam [31:0] C_K0_SEC      = {24'd0, SEC_GAP[7:0]};                 // {FIFO entries 0, 0, strobe gap}
 localparam [31:0] C_K4_SEC      = {8'h01, 4'd0, SEC_SLOT[3:0], 3'd0, SEC_FRAME[12:0]};   // {RD, slot, frame words}
 localparam [31:0] REQ_HEADER    = {8'h21, 8'd0, 16'd1};                  // kind REQUEST, arg 0, len 1
