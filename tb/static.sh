@@ -33,7 +33,7 @@
 #      ocram_mline, connected to hps_ocram_master.mark_line, and the constant ocram_mline is a net in every OCRAM
 #      configuration (0 there without MISTER_OCRAM_FIO).
 #   3. Every floor configuration has floor nets to check; the off configuration has none.
-# Then, once, the crossing structure, on every framework-only file (hps_lw_*, lw_*, hps_ocram_*) and the
+# Then, once, the crossing structure, on every framework-only file (hps_lw_*, lw_*, hps_ocram_*, ocram_*) and the
 # floors' text of the stock files, with every tier:
 #   4. The cell registers (lws0_, lws1_, lwa0_, lwa1_, lwq_, lwsrc_, lwtg_) are named only in sys/lw_cdc.sv, and
 #      the synchroniser attribute is on its two-flop stages alone (SYNC_ALLOW lists no exception).
@@ -74,9 +74,12 @@
 #      lw_s0, lw_a, lw_q and lw_src exactly the cells' first stages, asynchronous chain, bundle captures and
 #      hold registers. It prints the source bits into first stages and the bundle bits, per block at its
 #      default parameters (one instance each, every generate branch), for the post-fit pair count to compare.
-# Then, once, the OCRAM floor's addresses, in hps_ocram_master.sv with both OCRAM macros:
-#  11. Every araddr and awaddr is one assignment of {16'hFFFF, off_q}; off_q's one source is t_off; every t_off
-#      assignment is a control localparam (all below 0x100) or evt_off, whose one assignment is
+# Then, once, the OCRAM floor's addresses, in hps_ocram_master.sv and its layers (ocram_axi.sv, ocram_arb.sv,
+# ocram_evt_wr.sv) with both OCRAM macros:
+#  11. Every araddr and awaddr is one assignment of {16'hFFFF, off_q} (ocram_axi); off_q's one source is t_off,
+#      which ocram_arb assigns only from its ports' offsets; every port offset the master connects is a control
+#      localparam (all below 0x100, every declaration of one the same value), hj_off(hj_k) or poll_off (each a control
+#      localparam), a consumer's offset, or the writer's off, which is C_IDX3 or evt_off, whose one assignment is
 #      EVT_BASE + ((evt_index & (EVT_WORDS - 1)) << 2); EVT_BASE + 4*EVT_WORDS is below 0xF000. A new address
 #      form fails the check.
 # Needs Icarus Verilog (for its preprocessor) and python3.
@@ -767,7 +770,7 @@ def plain_ref(ts):
 
 print('-- crossing structure: the cells hold every crossing register, and every source has its name')
 lwfiles = sorted('sys/' + x for x in os.listdir('sys')
-                 if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
+                 if re.match(r'(hps_lw_|lw_|hps_ocram_|ocram_)\w*\.s?v$', x))
 stock = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv']
 check(CDC in lwfiles, '%s: no such file' % CDC)
 # rule 1: cell register names and the synchroniser attribute
@@ -941,9 +944,10 @@ for _, ln, _ in sorted(OCRAM_LINES.values()):
 
 # ---- hps_ocram_*: every address is {16'hFFFF, off}; off a control localparam, an EVT word or a consumer's
 # ---- ring word from a localparam base and a masked index ----
-print('-- hps_ocram_master.sv and hps_ocram_rx.sv: the constant upper address half, every offset bounded')
-OTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS)))
-OSTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS_SEC)))
+print('-- hps_ocram_master.sv, its layers and hps_ocram_rx.sv: the constant upper address half, every offset bounded')
+OCFILES = ['sys/hps_ocram_master.sv', 'sys/ocram_axi.sv', 'sys/ocram_arb.sv', 'sys/ocram_evt_wr.sv']
+OTXT = ' '.join(' '.join(tokens(pp(f_, OCMACS))) for f_ in OCFILES)
+OSTXT = ' '.join(' '.join(tokens(pp(f_, OCMACS_SEC))) for f_ in OCFILES)
 ODTXT = ' '.join(tokens(pp('sys/hps_ocram_rx.sv', OCMACS_SEC)))
 ALLT = OTXT + ' ' + OSTXT + ' ' + ODTXT
 CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX0': 0x10, 'H_IDX1': 0x14,
@@ -954,14 +958,15 @@ CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_ID
         'C_K9': 0xf4, 'C_K10': 0xf8, 'C_K11': 0xfc}
 LITS = dict(re.findall(r"localparam \[ 15 : 0 \] (\w+) = 16'h([0-9A-Fa-f]+) ;", ALLT))
 for n_, v_ in sorted(CTRL.items()):
-    check(int(LITS.get(n_, '-1'), 16) == v_ and v_ < 0x100,
-          'hps_ocram_*: %s is not 16''h%02X below 0x100' % (n_, v_))
+    vs_ = set(int(x, 16) for x in re.findall(r"localparam \[ 15 : 0 \] %s = 16'h([0-9A-Fa-f]+) ;" % n_, ALLT))
+    check(vs_ == {v_} and v_ < 0x100, 'hps_ocram_*: %s is not 16''h%02X below 0x100 in every declaration' % (n_, v_))
 for b_, w_, bv, wv in (('EVT_BASE', 'EVT_WORDS', 0x4000, 2048), ('TS_BASE', 'TS_WORDS', 0x7000, 8192),
                        ('OSD_BASE', 'OSD_WORDS', 0x2000, 2048), ('SEC_BASE', 'SEC_WORDS', 0x7000, 8192),
                        ('MNT_BASE', 'MNT_WORDS', 0x6000, 1024)):
-    M_ = re.search(r"localparam \[ 15 : 0 \] %s = 16'd(\d+) ;" % w_, ALLT)
-    ew = int(M_.group(1)) if M_ else -1
-    check(int(LITS.get(b_, '-1'), 16) == bv and ew == wv,
+    ews_ = set(int(x) for x in re.findall(r"localparam \[ 15 : 0 \] %s = 16'd(\d+) ;" % w_, ALLT))
+    bvs_ = set(int(x, 16) for x in re.findall(r"localparam \[ 15 : 0 \] %s = 16'h([0-9A-Fa-f]+) ;" % b_, ALLT))
+    ew = ews_.pop() if len(ews_) == 1 else -1
+    check(bvs_ == {bv} and ew == wv,
           'hps_ocram_*: %s/%s are not 16''h%04X/%d' % (b_, w_, bv, wv))
     check(ew > 0 and bv + 4 * ew <= 0xF000,
           'hps_ocram_*: %s + 4*%s (%s) is not below 0xF000' % (b_, w_, bv + 4 * ew if ew > 0 else '?'))
@@ -979,11 +984,23 @@ for OT_, OWHO in ((OTXT, 'DIAG'), (OSTXT, 'SECTOR')):
               'hps_ocram_master (%s): ' % OWHO + '%s is not one {16''hFFFF, off_q} assignment' % r_)
     check(re.findall(r"off_q < = (\w+) ;", OT_) == ['t_off'],
           'hps_ocram_master (%s): ' % OWHO + 'off_q has another source than t_off: %s' % re.findall(r"off_q < = (\w+) ;", OT_))
-    TSRC = re.findall(r"(?<![A-Za-z0-9_])t_off = (hj_off \( hj_k \)|[A-Za-z_]\w*) ;", OT_)
-    check(TSRC and len(re.findall(r"(?<![A-Za-z0-9_])t_off = ", OT_)) == len(TSRC) and
-          set(TSRC) <= set(CTRL) | {'evt_off', 'c0_off', 'c1_off', 'hj_off ( hj_k )'},
-          'hps_ocram_master (%s): ' % OWHO + 'an offset that is not a control localparam, evt_off, a consumer offset or hj_off: %s'
-          % ' '.join(sorted(set(TSRC))))
+    # ocram_arb: t_off is its idle default or one port's own offset
+    TSRC = re.findall(r"(?<![A-Za-z0-9_.])t_off = ([^;]*) ;", OT_)
+    check(TSRC and set(TSRC) <= {"16'h0000", 'off [ 16 * i + : 16 ]'},
+          'hps_ocram_master (%s): ' % OWHO + 'ocram_arb\'s t_off is not its ports\' offsets: %s' % TSRC)
+    # the master's ports: each offset a control localparam, a table of them, a consumer's or the writer's
+    PORTS_ = re.findall(r"\. off \( \{ ([^}]*) \} \)", OT_)
+    PSRC = [x.strip() for x in PORTS_[0].split(',')] if len(PORTS_) == 1 else []
+    check(PSRC and set(PSRC) <= set(CTRL) | {'c0_off', 'c1_off', 'w_off', 'poll_off', 'hj_off ( hj_k )'},
+          'hps_ocram_master (%s): ' % OWHO + 'an arbiter port\'s offset that is not a control localparam, a table, a '
+          'consumer\'s or the writer\'s: %s' % ' / '.join(PSRC or PORTS_))
+    check(set(re.findall(r"poll_off = (\w+) ;", OT_)) <= set(CTRL) and re.findall(r"poll_off = (\w+) ;", OT_),
+          'hps_ocram_master (%s): ' % OWHO + 'poll_off is not a table of control localparams')
+    # the writer: its off is C_IDX3 or evt_off, connected to w_off alone
+    WOFF_ = re.findall(r"assign off = ([^;]*) ;", OT_)
+    check(len(WOFF_) == 1 and set(re.findall(r"\w+", WOFF_[0])) <= {'rec_go', 'last_q', 'C_IDX3', 'evt_off'} and
+          len(re.findall(r"\. off \( w_off \)", OT_)) == 1 and not re.search(r"(?<![A-Za-z0-9_.])w_off = ", OT_),
+          'hps_ocram_master (%s): ' % OWHO + 'ocram_evt_wr\'s off is not C_IDX3 or evt_off into w_off: %s' % WOFF_)
     check(set(re.findall(r"hj_off = (\w+) ;", OT_)) <= set(CTRL),
           'hps_ocram_master (%s): ' % OWHO + 'hj_off returns a value that is not a control localparam')
     check(len(re.findall(r"wire \[ 15 : 0 \] evt_off = EVT_BASE \+ \( \( evt_index & \( EVT_WORDS - 1 \) \) < < 2 \) ;", OT_)) == 1

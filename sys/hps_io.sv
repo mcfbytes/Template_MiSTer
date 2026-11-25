@@ -447,7 +447,7 @@ link_on_two_players link_guard();
 `endif
 `endif
 // MISTER_OCRAM_EVT: its port takes the LW events tier's span of HPS_BUS (so MISTER_LW, and never beside
-// MISTER_LW_EVT) and its records are the SECTOR tier's record writer's. MISTER_DISABLE_SPI_EVT compiles out the
+// MISTER_LW_EVT) and its records are the OCRAM floor's (so MISTER_OCRAM). MISTER_DISABLE_SPI_EVT compiles out the
 // link's event replies (0x29, 0x36, 0x3C, 0x3F); without the OCRAM events tier they would have no path.
 `ifdef MISTER_OCRAM_EVT
 `ifndef MISTER_LW
@@ -456,12 +456,8 @@ ocram_evt_needs_MISTER_LW ocram_evt_lw_guard();
 `ifdef MISTER_LW_EVT
 evt_on_two_tiers ocram_evt_two_guard();
 `endif
-`ifdef MISTER_OCRAM
-`ifndef MISTER_OCRAM_SECTOR_SLOT
-ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT ocram_evt_sec_guard();
-`endif
-`else
-ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT ocram_evt_sec_guard();
+`ifndef MISTER_OCRAM
+ocram_evt_needs_MISTER_OCRAM ocram_evt_floor_guard();
 `endif
 `endif
 `ifdef MISTER_DISABLE_SPI_EVT
@@ -479,15 +475,12 @@ ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
 ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
 `endif
 `endif
-// MISTER_OCRAM_LANE captures the replies of the download tier's frames into REPLY records, which the SECTOR tier's
-// record writer writes: without either there is no frame or no writer.
+// MISTER_OCRAM_LANE captures the replies of the download tier's frames into REPLY records on the EVT ring: without
+// that tier there is no frame.
 `ifdef MISTER_OCRAM_LANE
 `ifdef MISTER_OCRAM
 `ifndef MISTER_OCRAM_FIO
 ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
-`endif
-`ifndef MISTER_OCRAM_SECTOR_SLOT
-ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT ocram_lane_sec_guard();
 `endif
 `else
 ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();

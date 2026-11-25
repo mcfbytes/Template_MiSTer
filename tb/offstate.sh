@@ -311,8 +311,8 @@ for label, defs in sets:
           'sys/hps_io.sv [SPI_KBM, %s]: uio_block is not the build\'s less the key, mouse and trigger arms: also '
           'removed %s, not removed %s, other edits %s' % (label, ' '.join(extra[:12]), ' '.join(kept[:12]), other))
 
-lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
-OCM = 'hps_ocram_master.sv'
+lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_|ocram_)\w*\.s?v$', x))
+OCM = ('hps_ocram_master.sv', 'ocram_axi.sv', 'ocram_arb.sv', 'ocram_evt_wr.sv')   # the OCRAM floor's own files
 print('-- every framework-only file is empty without its floor macro (%s)' % ' '.join(lw))
 for x in lw:
     f = 'sys/' + x
@@ -327,7 +327,7 @@ for x in lw:
             t, e = pp(f, [label])
             check(t is not None and len(t) > 0, '%s [%s]: empty with a floor macro' % (f, label))
         continue
-    if x == OCM:
+    if x in OCM:
         for label, defs in sets:
             t, e = pp(f, defs)
             if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
@@ -374,10 +374,10 @@ for x in lw:
                 '`ifdef', 'LW_CDC_BUILT', '`default_nettype', 'none']
         tail = ['`default_nettype', 'wire', '`endif', '`undef', 'LW_CDC_BUILT']
         scan = False                       # the prologue's ifdef/endif pairs are not one guard
-    elif x == OCM:
+    elif x in OCM:
         head = ['`ifdef', 'MISTER_OCRAM', '`default_nettype', 'none']
-        tail = ['`default_nettype', 'wire', '`endif', '`undef', 'MISTER_OCRAM_MARK',
-                '`undef', 'MISTER_OCRAM_POLL']
+        tail = ['`default_nettype', 'wire', '`endif'] + (['`undef', 'MISTER_OCRAM_MARK', '`undef', 'MISTER_OCRAM_POLL']
+                                                         if x == OCM[0] else [])   # the master's defaults
         scan = True
     elif x in XFLOOR:
         _, head, tail, _, _ = XFLOOR[x]
@@ -415,7 +415,7 @@ for x in lw:
         if k in ('`define', '`undef') and i + 1 < len(t):
             m = t[i + 1]
             if k == '`define':
-                okname = m.startswith('LW_') or (x == OCM and m.startswith('MISTER_OCRAM_'))
+                okname = m.startswith('LW_') or (x in OCM and m.startswith('MISTER_OCRAM_'))
                 check(okname, '%s: defines %s, a name outside LW_' % (f, m))
                 check(m != 'LW_DIAG', '%s: defines LW_DIAG, which only a build sets' % f)
                 live[m] = True
@@ -432,7 +432,7 @@ def tree(root):
             r.add(os.path.relpath(os.path.join(d, x), root))
     return r
 mine, theirs = tree('.'), tree(UP)
-lwonly = lambda p: re.match(r'sys/(hps_lw_|lw_|hps_ocram_)[^/]*$', p) is not None
+lwonly = lambda p: re.match(r'sys/(hps_lw_|lw_|hps_ocram_|ocram_)[^/]*$', p) is not None
 for p in sorted(mine - theirs):
     check(lwonly(p), '%s: not in upstream and not an LW-only file' % p)
 for p in sorted(theirs - mine):
@@ -443,7 +443,7 @@ for p in sorted(mine & theirs) + ['files.qip']:
     check(open(p, 'rb').read() == open(os.path.join(UP, p), 'rb').read(), '%s: differs from upstream' % p)
 qip = open('sys/sys.qip').read().splitlines()
 add = re.compile(r'set_global_assignment -name SYSTEMVERILOG_FILE \[file join \$::quartus\(qip_path\) '
-                 r'(hps_lw_|lw_|hps_ocram_)\w+\.sv \]$')
+                 r'(hps_lw_|lw_|hps_ocram_|ocram_)\w+\.sv \]$')
 sdc = re.compile(r'set_global_assignment -name SDC_FILE +\[file join \$::quartus\(qip_path\) lw_bridge\.sdc \]$')
 rest = [l for l in qip if not add.match(l) and not sdc.match(l)]
 check(rest == open(os.path.join(UP, 'sys/sys.qip')).read().splitlines(),

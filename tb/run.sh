@@ -52,7 +52,11 @@
 #      (spi_blk_off_tier_slot_outside_vdnum); and the OCRAM mount slots with MISTER_OCRAM_BLKSZ (default 2) not
 #      hps_io's BLKSZ (ocram_blksz_differs_from_hps_io), each with its legal neighbours; and the
 #      key tier's: MISTER_LW_KBM without MISTER_LW_PAD (lw_kbm_needs_MISTER_LW_PAD) or on a core with PS2DIV
-#      (lw_kbm_on_a_PS2DIV_core), MISTER_DISABLE_SPI_KBM without MISTER_LW_KBM (spi_kbm_off_needs_MISTER_LW_KBM)
+#      (lw_kbm_on_a_PS2DIV_core), MISTER_DISABLE_SPI_KBM without MISTER_LW_KBM (spi_kbm_off_needs_MISTER_LW_KBM);
+#      and tier 3's: MISTER_OCRAM_EVT without MISTER_LW, beside MISTER_LW_EVT or without the floor
+#      (ocram_evt_needs_MISTER_LW, evt_on_two_tiers, ocram_evt_needs_MISTER_OCRAM), MISTER_OCRAM_LANE without the
+#      download tier (ocram_lane_needs_MISTER_OCRAM_FIO), MISTER_DISABLE_SPI_EVT without MISTER_OCRAM_EVT, each with
+#      its legal neighbours, the events tier and the capture lane without the SECTOR tier among them
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -150,6 +154,8 @@ cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
 ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y K U A I}
 O=${LW_TB_OUT:-tb/out}
+# the OCRAM master's own layers, beside sys/hps_ocram_master.sv wherever it is built or linted
+OCMF="sys/ocram_axi.sv sys/ocram_arb.sv sys/ocram_evt_wr.sv"
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
 probe() {
@@ -242,14 +248,14 @@ lint() {
     m="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_FIO"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_fplay --top lw_link -G FIO_EN=1"
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv \
+    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv $OCMF \
       sys/hps_ocram_rx.sv >> "$1" 2>&1 || st=1
     # the mount slots beside the SECTOR tier: the master, the walker and feeder, the window's save-slot nets, the muxes
     m="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_sfeed --top lw_sys_window --top lw_save_mux"
     t="$t --top lw_blk_mux -G SEC_EN=1 -G MNT_EN=3 -G SEC_EXT=1 -G MNT_EXT=3"
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv sys/hps_ocram_rx.sv \
+    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv \
       >> "$1" 2>&1 || st=1
   done
   return $st
@@ -319,7 +325,7 @@ fioc() {
 # hps_ocram_master.sv and hps_ocram_rx.sv with lw_cdc.sv (each OCRAM macro set), warnings as errors.
 ocram() {
   : > "$1"; n=0; f=0
-  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
   OCD="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10"
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10"
   OCS="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
@@ -378,7 +384,7 @@ ocram() {
         [ $t = hps_ocram_fplay ] && { case $vn in fio|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
         [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";;
           fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; mnt) G="-GOSD_EN=0 -GSEC_EN=1 -GMNT_EN=2'b11";; esac
-        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF sys/lw_cdc.sv \
              > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -449,7 +455,7 @@ rmy() {
     f=$((f + 1)); echo "FAIL lw_tb: does not compile (kbm)" >> "$1"; head -20 "$O/rmY_kbm.err" | sed 's/^/   /' >> "$1"
   fi
   # ocram_tb.sv: the OSD shape with MISTER_DISABLE_SPI_OSD, the mount shape with both removals
-  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DOCRAM_TB_SYS_HP_PS=14762"
   OCM="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_MOUNT0_SLOT=3"
   OCM="$OCM -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
@@ -530,7 +536,7 @@ EOV
 # seed, plain and with the crossing models; then verilator on the three modules with the macro.
 uarm() {
   : > "$1"; n=0; f=0
-  UB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
+  UB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
   UD="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO"
   for m in plain cdc; do
     for c in uio33 uio20 uion33; do
@@ -563,7 +569,7 @@ uarm() {
         G=""; fl=$t
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
         [ $t = hps_ocram_rx ] && case $vn in uioall) G="-GSEC_EN=1 -GFIO_EN=1";; *) G="-GOSD_EN=0 -GFIO_EN=1";; esac
-        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF sys/lw_cdc.sv \
              > "$O/uioV_${t}_$vn.log" 2>&1 || [ -s "$O/uioV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/uioV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -580,7 +586,7 @@ uarm() {
 
 # aarm LOG: arm A. tb/ocram_tb.sv's capture shape, each shape compiled once, run under every seed, plain and with
 # the crossing models; then verilator on the master, the walker and the player with the macro.
-AB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
+AB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
 AD="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
 AD="$AD -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE"
 aarm() {
@@ -614,7 +620,7 @@ aarm() {
         G=""; fl=$t
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
         [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=2'b01";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
-        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF sys/lw_cdc.sv \
              > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/laneV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -631,7 +637,7 @@ aarm() {
 
 # iarm LOG: arm I. tb/ocram_tb.sv's SECTOR shape with the events tier, each shape compiled once, run under every
 # seed, plain and with the crossing models; then verilator on the master and the port with the macro.
-IB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
+IB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
 ID="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
 ID="$ID -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_EVT"
 iarm() {
@@ -663,7 +669,7 @@ iarm() {
               "evtoff:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_EVT -DMISTER_DISABLE_SPI_EVT"; do
       vn=${VS%%:*}; VF=${VS#*:}
       for t in hps_ocram_master hps_ocram_evt; do
-        if ! verilator --lint-only -Wall $VF --top-module $t -Isys sys/hps_ocram_master.sv sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF --top-module $t -Isys sys/hps_ocram_master.sv $OCMF sys/lw_cdc.sv \
              > "$O/evtV_${t}_$vn.log" 2>&1 || [ -s "$O/evtV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/evtV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -785,7 +791,7 @@ hps_ocram_rx #(.OSD_EN(0), .SEC_EN(0), .FIO_EN(1), .MNT_EN(2'b01)) mr();
 `endif
 endmodule
 EOS
-  XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
+  XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
   XOF="$XOF sys/osd.v"
   while IFS='|' read -r want guard what d; do
     echo "-- $what" >> "$1"
@@ -830,17 +836,17 @@ bad|ocram_uio_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_UIO and MISTER_OCRAM_FIO witho
 ok|-|MISTER_OCRAM_UIO with the download tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4
 bad|ocram_evt_needs_MISTER_LW|MISTER_OCRAM_EVT without MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT
 bad|evt_on_two_tiers|MISTER_OCRAM_EVT beside MISTER_LW_EVT|-DMISTER_LW -DMISTER_LW_EVT -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT
-bad|ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_EVT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_EVT
-bad|ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_EVT without the floor|-DMISTER_LW -DMISTER_OCRAM_EVT
-bad|ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT|the master with MISTER_OCRAM_EVT and no SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_EVT -DXO_MASTER
+ok|-|MISTER_OCRAM_EVT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_EVT
+bad|ocram_evt_needs_MISTER_OCRAM|MISTER_OCRAM_EVT without the floor|-DMISTER_LW -DMISTER_OCRAM_EVT
+ok|-|the master with MISTER_OCRAM_EVT and no SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_EVT -DXO_MASTER
 ok|-|MISTER_OCRAM_EVT with the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT -DXO_MASTER
 bad|spi_evt_off_needs_MISTER_OCRAM_EVT|MISTER_DISABLE_SPI_EVT alone|-DMISTER_DISABLE_SPI_EVT
 bad|spi_evt_off_needs_MISTER_OCRAM_EVT|MISTER_DISABLE_SPI_EVT with MISTER_LW_EVT only|-DMISTER_LW -DMISTER_LW_EVT -DMISTER_DISABLE_SPI_EVT
 ok|-|MISTER_DISABLE_SPI_EVT with the OCRAM events tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT -DMISTER_DISABLE_SPI_EVT -DXO_MASTER
 bad|ocram_lane_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_LANE without the download tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_LANE
 bad|ocram_lane_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_LANE without the floor|-DMISTER_LW -DMISTER_OCRAM_LANE
-bad|ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_LANE without the SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE
-bad|ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT|the master with MISTER_OCRAM_LANE and no SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE -DXO_MASTER
+ok|-|MISTER_OCRAM_LANE without the SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE
+ok|-|the master with MISTER_OCRAM_LANE and no SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE -DXO_MASTER
 bad|ocram_lane_needs_MISTER_OCRAM_FIO|the master with MISTER_OCRAM_LANE and no download tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_LANE -DXO_MASTER
 ok|-|MISTER_OCRAM_LANE with the SECTOR and download tiers|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE -DXO_MASTER
 ok|-|MISTER_OCRAM_UIO with the download tier, no HDMI osd|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_DEBUG_NOHDMI -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4

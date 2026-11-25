@@ -42,7 +42,8 @@
 //    Per ring it keeps its tail and avail = head - tail, read
 //    at a head read; a head more than the ring's size ahead, or a length past avail, stops that ring for the session
 //    with a one-cycle fault. One adder addresses every ring word: tail + k (the header is k = 0, the tail store is
-//    the same sum at the record's end). Every read response is registered before a decision, except a payload
+//    the same sum at the record's end), and each request's data word is that sum, registered as the request is
+//    raised (idle, the sum is the next request's ring's). Every read response is registered before a decision, except a payload
 //    word, which goes straight into the forward cell's hold register (the one register rdata reaches); no read
 //    whose response the cell takes is issued while the cell is busy. A head is read only when the ring is caught
 //    up and a poll tick, a finished record or (SECTOR) a new request asks for it.
@@ -154,7 +155,7 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	output wire        m_post,       // a REQUEST or a WRITE is owed for a mount slot's request
 	output wire        m_write,      // it is a WRITE
 	output wire  [7:0] m_arg,        // {blk_cnt, k}
-	output wire [10:0] m_n,          // the block's words
+	output wire [10:0] m_len,        // the record's len: 1 for a REQUEST, 1 + the block's words for a WRITE
 	output wire [31:0] m_lba,
 	output wire        m_wv,         // a WRITE's next word is in m_wd
 	output wire [31:0] m_wd,
@@ -413,6 +414,7 @@ reg   [3:0] wst = W_IDLE;
 reg         req = 1'b0;
 reg         req_we = 1'b0;
 reg  [15:0] req_off = 16'd0;
+reg  [15:0] req_wd = 16'd0;            // the request's data word: tail + k
 reg         rd_pend = 1'b0;            // a ring word read is owed at tail + k
 reg         st_pend = 1'b0;            // the ring's tail store is owed: tail + k
 reg   [1:0] ring = RG_OSD;             // the record's ring
@@ -467,6 +469,10 @@ endfunction
 wire  [1:0] mst = {mr2[32], mr1[32]} & MNT_EN;
 wire  [1:0] mwr = {mr2[39], mr1[39]};
 wire [10:0] mn1 = mwn(mr1[38:33]), mn2 = mwn(mr2[38:33]);
+// each slot's WRITE len, 1 + its block's words, registered as its request record lands
+localparam [18:0] MW_0 = 19'd1 << ({1'b0, BLKSZ} + 4'd5);
+localparam [10:0] ML_0 = MW_0[10:0] + 11'd1;
+reg  [10:0] ml1_q = ML_0, ml2_q = ML_0;
 // the slot whose record is offered to the master: the WRITE being walked, else a bound read not yet posted
 wire  [1:0] rd_ok = mst & ~mwr & sbm & ~drop_m & bind_lwx[2:1] & ~m_posted;
 wire  [1:0] wj    = mst & mwr & sbm & ~drop_m & ~w_done;
@@ -477,14 +483,7 @@ wire [39:0] pr    = pk2 ? mr2 : mr1;
 /* verilator lint_on UNUSEDSIGNAL */
 wire [10:0] mn    = (mfk == 2'd2) ? mn2 : mn1;        // the walked slot's block
 
-wire [15:0] tl     = (ring == RG_SEC) ? tail_s : (ring == RG_FIO) ? tail_f : (ring == RG_MNT) ? tail_m : tail_o;
-wire [15:0] widx   = tl + {2'd0, k};
-wire [15:0] osd_off = OSD_BASE + ((widx & (OSD_WORDS - 1)) << 2);
-wire [15:0] sec_off = SEC_BASE + ((widx & (SEC_WORDS - 1)) << 2);
-wire [15:0] fio_off = FIO_BASE + ((widx & (FIO_WORDS - 1)) << 2);
-wire [15:0] mnt_off = MNT_BASE + ((widx & (MNT_WORDS - 1)) << 2);
 // a response is decoded in its own cycle, as the bridge's rdata reaches each register in one stage
-wire [15:0] new_gap = c_rdata[15:0] - tl;
 wire [16:0] rlen    = {1'b0, c_rdata[15:0]} + 17'd1;
 wire        c_new   = c_done && c_ok;
 wire        c_bad   = c_done && !c_ok;
@@ -559,10 +558,21 @@ function [2:0] rr_pick(input [3:0] jobs, input [1:0] last);   // {found, id}
 endfunction
 wire  [2:0] pick   = rr_pick({job_m, job_f, job_s, job_o}, turn);
 
+// idle, the tail is the next record's ring's: a request raised then registers that ring's sum
+wire  [1:0] ring_p = (SEC_EN != 0 && fl_pend) ? RG_SEC : pick[1:0];
+wire  [1:0] tring  = (wst == W_IDLE) ? ring_p : ring;
+wire [15:0] tl     = (tring == RG_SEC) ? tail_s : (tring == RG_FIO) ? tail_f : (tring == RG_MNT) ? tail_m : tail_o;
+wire [15:0] widx   = tl + {2'd0, k};
+wire [15:0] osd_off = OSD_BASE + ((widx & (OSD_WORDS - 1)) << 2);
+wire [15:0] sec_off = SEC_BASE + ((widx & (SEC_WORDS - 1)) << 2);
+wire [15:0] fio_off = FIO_BASE + ((widx & (FIO_WORDS - 1)) << 2);
+wire [15:0] mnt_off = MNT_BASE + ((widx & (MNT_WORDS - 1)) << 2);
+wire [15:0] new_gap = c_rdata[15:0] - tl;
+
 assign c_req    = req;
 assign c_we     = req_we;
 assign c_off    = req_off;
-assign c_wdata  = {16'd0, widx};          // a tail store's value: k and the tail hold until its done
+assign c_wdata  = {16'd0, req_wd};        // tail + k as the request rose: k and the tail hold until its done
 assign c_fault  = flt_o;
 assign c_mid    = mid_o;
 assign c_sfault = flt_s;
@@ -584,7 +594,7 @@ assign m_post   = MNT_EN != 0 && !mq_v &&
                   (mw_job ? (w_acc && !w_started) : (rd_ok != 2'd0 && !stop_m));
 assign m_write  = mw_job;
 assign m_arg    = {pr[38:33], pk};
-assign m_n      = pk2 ? mn2 : mn1;
+assign m_len    = mw_job ? (pk2 ? ml2_q : ml1_q) : 11'd1;
 assign m_lba    = pr[31:0];
 assign m_wv     = m_have;
 assign m_wd     = done_q[33:2];         // the answer to the last token: held until the next one is launched
@@ -646,8 +656,12 @@ always @(posedge clk) begin
 	end
 	else if (rq_start) rq_posted <= 1'b1;
 	// the mount record: a new one voids the post and the WRITE's end
-	if (mq_v && mq[41:40] == 2'd1) begin mr1 <= mq[39:0]; m_posted[0] <= 1'b0; w_done[0] <= 1'b0; end
-	if (mq_v && mq[41:40] == 2'd2) begin mr2 <= mq[39:0]; m_posted[1] <= 1'b0; w_done[1] <= 1'b0; end
+	if (mq_v && mq[41:40] == 2'd1) begin
+		mr1 <= mq[39:0]; ml1_q <= mwn(mq[38:33]) + 11'd1; m_posted[0] <= 1'b0; w_done[0] <= 1'b0;
+	end
+	if (mq_v && mq[41:40] == 2'd2) begin
+		mr2 <= mq[39:0]; ml2_q <= mwn(mq[38:33]) + 11'd1; m_posted[1] <= 1'b0; w_done[1] <= 1'b0;
+	end
 	if (m_start) m_posted[pk2] <= 1'b1;
 	if (m_start && mw_job) w_started <= 1'b1;   // once: the slot's next record may land before the ack's fall
 	if (s_tick) begin due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; due_m <= 1'b1; s_wait <= 1'b0; end
@@ -657,6 +671,7 @@ always @(posedge clk) begin
 		rd_pend <= 1'b0;
 		req     <= 1'b1;
 		req_we  <= 1'b0;
+		req_wd  <= widx;
 		case (ring)
 		RG_SEC:  req_off <= sec_off;
 		RG_FIO:  req_off <= fio_off;
@@ -668,6 +683,7 @@ always @(posedge clk) begin
 		st_pend   <= 1'b0;
 		req       <= 1'b1;
 		req_we    <= 1'b1;
+		req_wd    <= widx;
 		case (ring)
 		RG_SEC:  req_off <= C_IDX4;
 		RG_FIO:  req_off <= C_IDX1;
@@ -714,17 +730,19 @@ always @(posedge clk) begin
 		mid_f <= 1'b0;
 		mid_m <= 1'b0;
 		if (SEC_EN != 0 && fl_pend) begin
-			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; wst <= W_FLUSH;
+			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; req_wd <= widx; wst <= W_FLUSH;
 		end
 		else if (pick[2]) begin
 			ring <= pick[1:0]; turn <= pick[1:0];
 			case (pick[1:0])
 			RG_SEC: if (avail_s == 14'd0) begin
-				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; due_s <= 1'b0; wst <= W_HEAD;
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; req_wd <= widx; due_s <= 1'b0;
+				wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_s <= 1'b1; wst <= W_HDR; end
 			RG_FIO: if (avail_f == 14'd0) begin
-				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX1; due_f <= 1'b0; wst <= W_HEAD;
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX1; req_wd <= widx; due_f <= 1'b0;
+				wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_f <= 1'b1; wst <= W_HDR; end
 			RG_MNT: if (m_wjob) begin
@@ -733,18 +751,20 @@ always @(posedge clk) begin
 				wst <= W_HGO;
 			end
 			else if (avail_m == 11'd0) begin
-				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX0; due_m <= 1'b0; wst <= W_HEAD;
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX0; req_wd <= widx; due_m <= 1'b0;
+				wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_m <= 1'b1; wst <= W_HDR; end
 			default: if (avail_o == 12'd0) begin
-				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX2; due_o <= 1'b0; wst <= W_HEAD;
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX2; req_wd <= widx; due_o <= 1'b0;
+				wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_o <= 1'b1; wst <= W_HDR; end
 			endcase
 		end
 	end
 	W_HEAD, W_FLUSH: if (c_done) begin
-		if (!c_ok) begin req <= 1'b1; req_we <= 1'b0; end            // no value: read it again
+		if (!c_ok) begin req <= 1'b1; req_we <= 1'b0; req_wd <= widx; end   // no value: read it again
 		else if (new_gap > rwords) begin
 			// a head more than the ring's size ahead: a host defect
 			case (ring)
@@ -910,7 +930,7 @@ always @(posedge clk) begin
 			end
 			endcase
 		end
-		else if (c_bad) req <= 1'b1;                               // a failed store is tried again, same value
+		else if (c_bad) begin req <= 1'b1; req_wd <= widx; end     // a failed store is tried again, same value
 	end
 	default: wst <= W_IDLE;
 	endcase

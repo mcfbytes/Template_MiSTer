@@ -322,7 +322,7 @@ wire [31:0] rq_lba;
 // the mount slots: the ring's levels and the records to the EVT writer
 wire        c0_mfault, c0_mmid, m_post, m_write, m_wv, m_start, m_wtake, m_pub;
 wire  [7:0] m_arg;
-wire [10:0] m_n;
+wire [10:0] m_len;
 wire [31:0] m_lba, m_wd;
 // the download tier: the ring's tail and levels, the mark line, and the player's side of lw_link
 wire [15:0] f_tail;
@@ -385,7 +385,7 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 	.e_ask(e_ask), .e_v(e_v), .e_d(e_d),
 	.e_free(e_free), .p_post(p_post), .p_arg(p_arg), .p_n(p_n), .p_wv(p_wv), .p_wd(p_wd), .p_start(p_start),
 	.p_wtake(p_wtake),
-	.c0_mfault(c0_mfault), .c0_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
+	.c0_mfault(c0_mfault), .c0_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_len(m_len),
 	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
 	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst),
 	.awlock(awlock), .awcache(awcache), .awprot(awprot), .awuser(awuser), .awvalid(awvalid),
@@ -439,7 +439,7 @@ hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP
 	.x_reset(x_reset), .x_hps_ack(x_hps_ack), .x_req(x_req), .x_lba(x_lba), .x_commit(x_commit), .x_wide(x_wide),
 	.x_en(x_en), .x_ack(x_ack), .x_wr(x_wr), .x_dat(x_dat), .x_adr(x_adr),
 	.f_tail(f_tail), .c_ffault(c0_ffault), .c_fmid(c0_fmid),
-	.c_mfault(c0_mfault), .c_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
+	.c_mfault(c0_mfault), .c_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_len(m_len),
 	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
 	.p_post(p_post), .p_arg(p_arg), .p_n(p_n), .p_wv(p_wv), .p_wd(p_wd), .e_free(e_free), .p_start(p_start),
 	.p_wtake(p_wtake), .l_dout(l_dout_m),

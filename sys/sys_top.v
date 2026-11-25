@@ -306,7 +306,7 @@ wire        ocram_evt_stop, ocram_c0_sfault, ocram_c0_smid, ocram_c0_wide;
 wire        ocram_c0_mfault, ocram_c0_mmid, ocram_m_post, ocram_m_write, ocram_m_wv;
 wire        ocram_m_start, ocram_m_wtake, ocram_m_pub;
 wire  [7:0] ocram_m_arg;
-wire [10:0] ocram_m_n;
+wire [10:0] ocram_m_len;
 wire [31:0] ocram_m_lba, ocram_m_wd;
 wire        ocram_rq_post, ocram_rq_start;
 wire [31:0] ocram_rq_lba;
@@ -433,7 +433,7 @@ assign ocram_c0_mmid   = 1'b0;
 assign ocram_m_post    = 1'b0;
 assign ocram_m_write   = 1'b0;
 assign ocram_m_arg     = 8'd0;
-assign ocram_m_n       = 11'd0;
+assign ocram_m_len     = 11'd0;
 assign ocram_m_lba     = 32'd0;
 assign ocram_m_wv      = 1'b0;
 assign ocram_m_wd      = 32'd0;
@@ -1101,7 +1101,7 @@ hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_
 	.m_post(ocram_m_post),
 	.m_write(ocram_m_write),
 	.m_arg(ocram_m_arg),
-	.m_n(ocram_m_n),
+	.m_len(ocram_m_len),
 	.m_lba(ocram_m_lba),
 	.m_wv(ocram_m_wv),
 	.m_wd(ocram_m_wd),
@@ -2299,7 +2299,7 @@ hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_E
 	.m_post(ocram_m_post),
 	.m_write(ocram_m_write),
 	.m_arg(ocram_m_arg),
-	.m_n(ocram_m_n),
+	.m_len(ocram_m_len),
 	.m_lba(ocram_m_lba),
 	.m_wv(ocram_m_wv),
 	.m_wd(ocram_m_wd),

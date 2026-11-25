@@ -18,8 +18,9 @@
 `ifdef MISTER_OCRAM
 `default_nettype none
 
-// The floor of the OCRAM mailbox: the AXI3 master on the fpga2hps bridge, its run latch, the poller, the hello,
-// the EVT ring's writer and interrupt line, its consumer port, and (with MISTER_OCRAM_DIAG) the diagnostic
+// The floor of the OCRAM mailbox: the AXI3 master on the fpga2hps bridge (ocram_axi.sv, the bus; ocram_arb.sv, its
+// request ports), its run latch, the poller, the hello, the EVT ring's records (ocram_evt_wr.sv) and interrupt line,
+// its consumer port, and (with MISTER_OCRAM_DIAG) the diagnostic
 // counters and the host-to-fabric torture sink. The design note is the law, spec/ocram-mailbox-design.md (the
 // Template's reader-facing copy is docs/OCRAM_MAILBOX.md); this file is layout 1 only.
 //
@@ -32,9 +33,10 @@
 //    with its payload until its ready, then BREADY while the response is awaited. Read: ARVALID held until
 //    ARREADY, then RREADY while the response is awaited.
 //  * One arbiter, fixed order: the terminal store; the fault's C_STATE store; the poll's and the line's reads when
-//    due; the hello's stores; a C_HELLO state store; a C_BIND store; the EVT ring's records (MARK, VERDICT); then
-//    the consumers, round robin between the two ports (the last granted goes last). A consumer is granted only in
-//    P_SESSION and never in a latch-set or latch-clear cycle.
+//    due; the hello's stores; a C_HELLO state store; a C_BIND store; the EVT ring's records; then the consumers,
+//    round robin between the two ports (the last granted goes last). A consumer is granted only in P_SESSION and
+//    never in a latch-set or latch-clear cycle. The records, in their own fixed order: BIND, the disc slot's REQUEST,
+//    a mount slot's REQUEST or WRITE, REPLY, the events tier's, MARK, VERDICT.
 //  * The run latch (§2.6): it sets on a rising edge of GPO bit 28 (RUN) seen while GPO bit 31 is 1 and no HPS
 //    reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
 //    and hps_rst_n enters through an lw_arst cell, never raw.
@@ -49,7 +51,7 @@
 //  * MARK records, the counters that fill them, the torture sink and the GPO 27/26 test knobs exist only with
 //    MISTER_OCRAM_DIAG; hps_ocram_diag and hps_ocram_tsink are separate modules so the fit reports their ALMs
 //    apart. The host-to-core rings' consumer is hps_ocram_rx (MISTER_OCRAM_OSD, MISTER_OCRAM_SECTOR_SLOT).
-//  * MISTER_OCRAM_SECTOR_SLOT (not with MISTER_OCRAM_DIAG: the record writer and the span are shared): the SECTOR
+//  * MISTER_OCRAM_SECTOR_SLOT (not with MISTER_OCRAM_DIAG: ring 4's span is shared): the SECTOR
 //    ring r = 4, H_SECTOR read in the session poll, C_BIND bit 0 (stored as hps_ocram_rx reports it), C_K[0..7],
 //    and the REQUEST record {0x21, 0, 1} then the LBA, written by the EVT ring's writer behind a room check of 2
 //    words. After every C_BIND store it posts BIND {0x27, C_BIND[7:0], 0} (C_CAPS bit 10): a C_BIND store waits
@@ -66,7 +68,7 @@
 //    is set and the ring's tail is at or past H_MARK[1][15:0] (modulo 2^16, within half the index space). While it
 //    is high H_MARK[1] is re-read back to back, alternating with the EVT line's re-read and yielding to a waiting
 //    consumer as it does.
-//  * MISTER_OCRAM_EVT (beside the SECTOR tier, whose record writer it shares, so MISTER_LW): C_CAPS bit 11, H_BIND
+//  * MISTER_OCRAM_EVT (with MISTER_LW, whose events span of HPS_BUS its port takes): C_CAPS bit 11, H_BIND
 //    and C_BIND bit 8 (the events bind, read in the session poll until it is set, as the OSD bind is), and d's
 //    records on the EVT ring: STATUS {0x20, 0, 4} then status_req[31:0] first, INFO {0x28, info, 0}, UPLOAD
 //    {0x29, index, 0} and RUMBLE {0x2A, pad, 1} then {0, level}. hps_ocram_evt (below) carries hps_io's event port
@@ -75,7 +77,7 @@
 //    whose stflg moved abandons the record (its head is not stored). A RUMBLE whose level is the last published
 //    (0 at each hello) is spent with no record; an INFO with arg 0 is no notice. d's records go after an owed BIND,
 //    REQUEST or WRITE. MISTER_DISABLE_SPI_EVT sets C_CAPS bit 18.
-//  * MISTER_OCRAM_LANE (beside the SECTOR and download tiers): C_CAPS bit 12, and REPLY {0x22, arg, n} on the EVT
+//  * MISTER_OCRAM_LANE (beside the download tier): C_CAPS bit 12, and REPLY {0x22, arg, n} on the EVT
 //    ring for each capture LFRAME hps_ocram_rx plays: arg the frame's, echoed whole, n its len; each payload word
 //    two link replies, low half first, as the walker hands them over. The walker holds the frame until e_free (the
 //    EVT ring's free words) covers n + 1; p_post asks for the record, which opens after an owed BIND, REQUEST and
@@ -158,7 +160,7 @@ module hps_ocram_master #(
 	input  wire        m_post,       // a mount slot's REQUEST or WRITE is owed
 	input  wire        m_write,      // it is a WRITE
 	input  wire  [7:0] m_arg,        // {blk_cnt, k}
-	input  wire [10:0] m_n,          // the block's words
+	input  wire [10:0] m_len,        // its len: 1 for a REQUEST, 1 + the block's words for a WRITE
 	input  wire [31:0] m_lba,
 	input  wire        m_wv,         // a WRITE's next word is in m_wd
 	input  wire [31:0] m_wd,
@@ -403,23 +405,14 @@ generate
 	end
 endgenerate
 
-// The SECTOR tier and the DIAG sink share ring 4's span and the EVT ring's record writer: a build of both stops.
+// The SECTOR tier and the DIAG sink share ring 4's span: a build of both stops.
 `ifdef MISTER_OCRAM_DIAG
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 ocram_sector_excludes_MISTER_OCRAM_DIAG diag_guard();
 `endif
 `endif
-// The events tier's records are the SECTOR tier's record writer's (tonight's bound: that writer alone exists).
-`ifdef MISTER_OCRAM_EVT
-`ifndef MISTER_OCRAM_SECTOR_SLOT
-ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT evt_guard();
-`endif
-`endif
-// The capture lane's REPLY is that writer's too, and its frames are the download tier's.
+// The capture lane's frames are the download tier's.
 `ifdef MISTER_OCRAM_LANE
-`ifndef MISTER_OCRAM_SECTOR_SLOT
-ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT lane_guard();
-`endif
 `ifndef MISTER_OCRAM_FIO
 ocram_lane_needs_MISTER_OCRAM_FIO lane_fio_guard();
 `endif
@@ -473,95 +466,30 @@ wire ns = run_ns;
 wire ns = 1'b0;
 `endif
 
-////////////////////////////////  AXI engine  ///////////////////////////////
+/////////////////////////////////  the bus  /////////////////////////////////
 
-// One transaction at a time. The valids are combinational from the state register and hold their payloads
-// (off_q, wdata_q) until each ready; the response readies are high in the response states. hrst_q gates
-// starting only: a transaction in flight is never abandoned at the reset's rise, and one still unanswered in
-// the cycle the level falls is dropped.
-
-localparam [2:0] E_IDLE = 3'd0, E_WR = 3'd1, E_BRSP = 3'd2, E_AR = 3'd3, E_RRSP = 3'd4;
-
-reg  [2:0]  est = E_IDLE;
-reg  [15:0] off_q = 16'd0;
-reg  [31:0] wdata_q = 32'd0;
-reg         aw_pend = 1'b0, w_pend = 1'b0, ar_pend = 1'b0;
+// ocram_axi.sv is the engine; ocram_arb.sv (below, after the requesters) picks its commands.
+wire        engine_idle, t_done, t_ok;
+wire        t_go, t_we, t_counted;
+wire [15:0] t_off;
+wire [31:0] t_wdata;
 /* verilator lint_off UNUSEDSIGNAL */   // the DIAG counters' inputs
-reg         counted_q = 1'b0;
-reg         drop_q = 1'b0;
+wire        counted_q, drop_q;
 /* verilator lint_on UNUSEDSIGNAL */
 
-wire engine_idle = (est == E_IDLE);
-wire b_fire = bvalid & bready;
-wire r_fire = rvalid & rready;
-wire t_done = (est == E_BRSP) ? b_fire : (est == E_RRSP) ? r_fire : 1'b0;
-wire t_ok   = (est == E_BRSP) ? (bresp == 2'b00) : (rresp == 2'b00);
-
-// the controller's command, valid in an idle cycle
-reg         t_go;
-reg         t_we;
-reg  [15:0] t_off;
-reg  [31:0] t_wdata;
-reg         t_counted;
-
-always @(posedge clk) begin
-	drop_q <= 1'b0;
-	if (hrst_fall && !engine_idle && !t_done) begin
-		est     <= E_IDLE;                    // the reset orphaned it: drop it
-		aw_pend <= 1'b0; w_pend <= 1'b0; ar_pend <= 1'b0;
-		drop_q  <= 1'b1;
-	end
-	else case (est)
-	E_IDLE: if (t_go && !hrst_q) begin
-		off_q     <= t_off;
-		wdata_q   <= t_wdata;
-		counted_q <= t_counted;
-		if (t_we) begin
-			est <= E_WR; aw_pend <= 1'b1; w_pend <= 1'b1;
-		end
-		else begin
-			est <= E_AR; ar_pend <= 1'b1;
-		end
-	end
-	E_WR: begin
-		aw_pend <= aw_pend & ~awready;
-		w_pend  <= w_pend  & ~wready;
-		if ((!aw_pend || awready) && (!w_pend || wready)) est <= E_BRSP;
-	end
-	E_BRSP: if (b_fire) est <= E_IDLE;
-	E_AR: if (ar_pend && arready) begin ar_pend <= 1'b0; est <= E_RRSP; end
-	E_RRSP: if (r_fire) est <= E_IDLE;
-	default: est <= E_IDLE;
-	endcase
-end
-
-assign awid    = 8'd0;
-assign wid     = 8'd0;
-assign arid    = 8'd0;
-assign awaddr  = {16'hFFFF, off_q};    // the constant upper half: OCRAM and nothing else
-assign araddr  = {16'hFFFF, off_q};
-assign awlen   = 4'd0;
-assign arlen   = 4'd0;
-assign awsize  = 3'b010;               // a 32-bit word
-assign arsize  = 3'b010;
-assign awburst = 2'b01;                // INCR
-assign arburst = 2'b01;
-assign awlock  = 2'b00;
-assign arlock  = 2'b00;
-assign awcache = 4'b0000;
-assign arcache = 4'b0000;
-assign awuser  = 5'd0;
-assign aruser  = 5'd0;
-assign awprot  = {1'b0, ns, 1'b0};     // {instruction, non-secure, privileged}: secure unless the DIAG knob
-assign arprot  = {1'b0, ns, 1'b0};
-assign wdata   = wdata_q;
-assign wstrb   = 4'hF;
-assign wlast   = 1'b1;
-assign awvalid = (est == E_WR) && aw_pend;
-assign wvalid  = (est == E_WR) && w_pend;
-assign bready  = (est == E_BRSP);
-assign arvalid = (est == E_AR) && ar_pend;
-assign rready  = (est == E_RRSP);
+ocram_axi axi
+(
+	.clk(clk), .hrst_q(hrst_q), .hrst_fall(hrst_fall), .ns(ns),
+	.t_go(t_go), .t_we(t_we), .t_off(t_off), .t_wdata(t_wdata), .t_counted(t_counted),
+	.engine_idle(engine_idle), .t_done(t_done), .t_ok(t_ok), .t_counted_q(counted_q), .t_drop(drop_q),
+	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst), .awlock(awlock),
+	.awcache(awcache), .awprot(awprot), .awuser(awuser), .awvalid(awvalid), .awready(awready),
+	.wid(wid), .wdata(wdata), .wstrb(wstrb), .wlast(wlast), .wvalid(wvalid), .wready(wready),
+	.bresp(bresp), .bvalid(bvalid), .bready(bready),
+	.arid(arid), .araddr(araddr), .arlen(arlen), .arsize(arsize), .arburst(arburst), .arlock(arlock),
+	.arcache(arcache), .arprot(arprot), .aruser(aruser), .arvalid(arvalid), .arready(arready),
+	.rresp(rresp), .rvalid(rvalid), .rready(rready)
+);
 
 ///////////////////////////////  the run  ///////////////////////////////////
 
@@ -572,20 +500,14 @@ localparam [2:0] P_OFF = 3'd0, P_START = 3'd1, P_ARMED = 3'd2, P_WAIT = 3'd3,
 
 localparam [2:0] R_NONE = 3'd0, R_HELLO = 3'd1, R_LINE = 3'd2, R_IDX = 3'd3, R_BIND = 3'd4, R_SECT = 3'd5,
                  R_MARK = 3'd6;
-/* verilator lint_off UNUSEDPARAM */   // the record jobs are a DIAG build's or a SECTOR build's
-localparam [2:0] W_NONE = 3'd0, W_HELLO = 3'd1, W_ONE = 3'd2, W_REC = 3'd3,
-                 W_RECHEAD = 3'd4, W_TERM = 3'd5, W_FAULT = 3'd6, W_BIND = 3'd7;
-/* verilator lint_on UNUSEDPARAM */
+localparam [2:0] W_NONE = 3'd0, W_HELLO = 3'd1, W_ONE = 3'd2, W_TERM = 3'd5, W_FAULT = 3'd6, W_BIND = 3'd7;
 
 reg  [2:0]  phase = P_OFF;
 reg  [7:0]  hello_cnt = 8'd0;          // hellos taken since configuration, no reset; counts each echo
 reg  [31:0] echo_q = 32'd0;            // the H_HELLO value this session echoed
-reg  [15:0] head_q = 16'd0;            // the EVT ring's head, last published
-reg  [15:0] tail_q = 16'd0;            // the EVT ring's tail, last read
 reg         line_en_q = 1'b0;          // H_LINE bit 3 at its last read
 reg         stopped_q = 1'b0;          // the EVT ring stopped on a fault this session
 reg         prev_mid_q = 1'b0;         // the EVT record of the session before this one was part-written
-reg         rec_mid_q = 1'b0;          // an EVT record is being written and not yet published
 reg         osd_bind_q = 1'b0;         // H_BIND bit 11 read: the OSD bind asked for this session
 reg  [3:0]  bind_q = 4'd0;             // the C_BIND bits {11, 2:0} last stored
 `ifdef MISTER_OCRAM_EVT
@@ -621,7 +543,7 @@ reg         hj_act = 1'b0;             // the hello's stores
 reg  [4:0]  hj_k = 5'd0;
 reg  [31:0] hj_state = 32'd0;          // C_STATE as stored at this hello
 reg  [2:0]  rd_act = R_NONE;           // the read in flight
-reg  [2:0]  wr_act = W_NONE;           // the write in flight
+reg  [2:0]  wr_act = W_NONE;           // the write in flight (the record writer keeps its own)
 localparam [POLL-1:0] POLL_T0 = {POLL{1'b0}};
 localparam [POLL-1:0] POLL_ONE = 1;
 reg  [POLL-1:0] poll_t = {POLL{1'b0}}; // free-running; its period is 2^POLL cycles
@@ -630,6 +552,20 @@ wire poll_tick = (poll_t == POLL_T0);
 always @(posedge clk) poll_t <= run_set ? POLL_T0 : poll_t + POLL_ONE;   // a run's polls count from its start
 
 wire run_ended = hrst_rise | run_fall;
+
+// The EVT ring's writer's state, for the session (ocram_evt_wr below)
+wire [15:0] w_head, w_tail;            // the ring's head, last published, and its tail, last read
+/* verilator lint_off UNUSEDSIGNAL */   // the DIAG counters', the capture lane's
+wire [15:0] w_head_nx, w_free;         // the open record's head store value; 2,048 - (head - tail)
+/* verilator lint_on UNUSEDSIGNAL */
+wire        w_act;                     // a record is open: it is part-written until its head store
+/* verilator lint_off UNUSEDSIGNAL */   // the record sources' (and the bench's rec_k)
+wire [10:0] rec_k;                     // its next store: 0 header, 1..len payload, len + 1 head
+wire        w_first;                   // rec_k is 1
+wire  [2:0] w_src;
+wire        w_wfly;                    // a header or payload store of it is in flight
+/* verilator lint_on UNUSEDSIGNAL */
+wire        w_hfly;                    // its head store is in flight
 
 // The consumers' session returns and the hello's wait for their rest. c1_* are the torture sink's outputs
 // (driven below with DIAG, constant when unbuilt). The hello's first store runs only when every built
@@ -800,9 +736,11 @@ reg  [2:0] poll_rd_kind;
 
 // Port 0 is the OSD walker (hps_ocram_osd, MISTER_OCRAM_OSD); port 1 is the torture sink, built below with DIAG.
 // An unbuilt port's request is the constant 0. A consumer asks for one transaction at a time and holds c_req
-// until c_grant; c_done is the R or B handshake's cycle, with c_ok and c_rdata. Round robin: the last granted
-// goes last, and only a session grants.
+// until c_grant; c_done is the R or B handshake's cycle, with c_ok and c_rdata. Round robin (ocram_arb): the last
+// granted goes last, and only a session grants.
 wire c0_req_v = RX_EN && c0_req;
+wire  [1:0] a_cdone;                   // the consumer ports' completions
+wire [31:0] a_crdata;
 `ifdef MISTER_OCRAM_DIAG
 wire        c1_req, c1_we;
 wire [15:0] c1_off;
@@ -813,17 +751,14 @@ wire [31:0] ts_records, ts_words, ts_errors, ts_first_g, ts_first_got, ts_sum;
 wire [15:0] ts_skipped, ts_deepest;
 wire c1_req_v = c1_req;
 `else
+wire        c1_we = 1'b0;
+wire [15:0] c1_off = 16'd0;
+wire [31:0] c1_wdata = 32'd0;
 wire c1_req_v = 1'b0;
 assign c1_rest = 1'b1;                 // the unbuilt port is always at rest
 assign c1_fault = 1'b0;
 assign c1_mid = 1'b0;
 `endif
-
-reg  c_last = 1'b0;                    // the consumer port granted last: 0 or 1
-wire c0_sel = (phase == P_SESSION) && c0_req_v && (!c1_req_v || c_last);
-/* verilator lint_off UNUSEDSIGNAL */   // port 1 is built with DIAG
-wire c1_sel = (phase == P_SESSION) && c1_req_v && (!c0_req_v || !c_last);
-/* verilator lint_on UNUSEDSIGNAL */
 
 wire consumer_req = c0_req_v | c1_req_v;   // a consumer is waiting: the line's re-read gives it a turn
 reg  line_yield_q = 1'b0;                  // a step-4 re-read ran and the consumers have not had their turn
@@ -866,30 +801,52 @@ always @(*) begin
 	end
 end
 
-reg  c_act_v = 1'b0;                   // a consumer transaction is in flight
-reg  c_act_port = 1'b0;
-reg  c_act_we = 1'b0;
+// the poll's read, a table of the kind
+reg  [15:0] poll_off;
+always @(*) begin
+	case (poll_rd_kind)
+	R_LINE:  poll_off = H_LINE;
+	R_IDX:   poll_off = H_IDX3;
+	R_BIND:  poll_off = H_BIND;
+	R_SECT:  poll_off = H_SECTOR;
+	R_MARK:  poll_off = H_MARK1;
+	default: poll_off = H_HELLO;
+	endcase
+end
 
-reg  [3:0] t_job = 4'd0;               // the job the arbiter chose this cycle, J_NONE if none
-/* verilator lint_off UNUSEDPARAM */   // the record jobs are a DIAG build's or a SECTOR build's
+// the arbiter's ports, in its order: the terminal store, the fault's C_STATE store, the poll's or the line's reads
+// when due, the hello's stores, a state store, a C_BIND store, the EVT ring's writer, then the two consumers
+localparam integer NP = 7;
 localparam [3:0] J_NONE = 4'd0, J_TERM = 4'd1, J_FAULT = 4'd2, J_POLL = 4'd3, J_HELLO = 4'd4,
-                 J_STO = 4'd5, J_BIND = 4'd6, J_REC = 4'd7, J_MARK = 4'd8, J_VERDICT = 4'd9,
-                 J_C0 = 4'd10, J_C1 = 4'd11, J_RQ = 4'd12, J_BREC = 4'd13, J_MRQ = 4'd14, J_EREC = 4'd15;
-/* verilator lint_on UNUSEDPARAM */
+                 J_STO = 4'd5, J_BIND = 4'd6, J_REC = 4'd7, J_C0 = 4'd10, J_C1 = 4'd11;
+wire [NP+1:0] gnt;
+reg   [3:0] t_job;                     // the job the arbiter chose this cycle, J_NONE if none
+always @(*) begin
+	t_job = J_NONE;
+	if (gnt[0]) t_job = J_TERM;
+	if (gnt[1]) t_job = J_FAULT;
+	if (gnt[2]) t_job = J_POLL;
+	if (gnt[3]) t_job = J_HELLO;
+	if (gnt[4]) t_job = J_STO;
+	if (gnt[5]) t_job = J_BIND;
+	if (gnt[6]) t_job = J_REC;
+	if (gnt[7]) t_job = J_C0;
+	if (gnt[8]) t_job = J_C1;
+end
 wire c0_go = (t_job == J_C0);
 /* verilator lint_off UNUSEDSIGNAL */   // port 1 is built with DIAG
 wire c1_go = (t_job == J_C1);
 /* verilator lint_on UNUSEDSIGNAL */
 
 assign c0_grant = c0_go;
-assign c0_done  = t_done & c_act_v & ~c_act_port;
+assign c0_done  = a_cdone[0];
 assign c0_ok    = t_ok;
-assign c0_rdata = c_act_we ? 32'd0 : rdata;
+assign c0_rdata = a_crdata;
 `ifdef MISTER_OCRAM_DIAG
 assign c1_grant = c1_go;
-assign c1_done  = t_done & c_act_v & c_act_port;
+assign c1_done  = a_cdone[1];
 assign c1_ok    = t_ok;
-assign c1_rdata = c_act_we ? 32'd0 : rdata;
+assign c1_rdata = a_crdata;
 
 hps_ocram_tsink tsink
 (
@@ -917,110 +874,83 @@ hps_ocram_tsink tsink
 	.v_skipped (ts_skipped),
 	.v_deepest (ts_deepest)
 );
+`else
+/* verilator lint_off UNUSEDSIGNAL */   // port 1 is built with DIAG
+wire a_c1done = a_cdone[1];
+/* verilator lint_on UNUSEDSIGNAL */
 `endif
 
 /////////////////////////////  the EVT ring  ////////////////////////////////
 
-`ifdef MISTER_OCRAM_DIAG
-// A MARK has room when 2,048 - waiting holds its 41 words (and, for a period MARK, the VERDICT's 9 beside it:
-// the period's record is followed at once by the verdict, and flood posts no verdict); a VERDICT needs 9.
-wire [15:0] wait_now = head_q - tail_q;
-wire [15:0] room_now = EVT_WORDS - wait_now;
-wire evt_room = !stopped_q && (wait_now <= EVT_WORDS);
-wire [15:0] mark_need = run_flood ? 16'd41 : 16'd50;
-wire mark_ok = (phase == P_SESSION) && evt_room && !rec_act && (run_flood || mark_due_q) &&
-               (room_now >= mark_need);
-wire verdict_ok = (phase == P_SESSION) && evt_room && !rec_act && verdict_pend && (room_now >= 16'd9);
-wire [15:0] evt_index = head_q + {10'd0, rec_k};
-wire [15:0] evt_off = EVT_BASE + ((evt_index & (EVT_WORDS - 1)) << 2);
+// ocram_evt_wr.sv writes the ring's records. Each record source here asks with post and its header, offers its
+// payload words (wv, wd) and sees its start, wtake and pub, in this fixed order: BIND, the disc slot's REQUEST, a
+// mount slot's REQUEST or WRITE, the capture lane's REPLY, the events tier's records, DIAG's MARK and VERDICT. A
+// source with no post (unbuilt) is the constant 0.
+localparam integer NS = 7;
+/* verilator lint_off UNUSEDPARAM */   // each build names its own sources
+localparam [2:0] S_BIND = 3'd0, S_DISC = 3'd1, S_MNT = 3'd2, S_REP = 3'd3, S_EV = 3'd4, S_MARK = 3'd5, S_VD = 3'd6;
+/* verilator lint_on UNUSEDPARAM */
+/* verilator lint_off UNUSEDSIGNAL */   // each build reads its own sources'
+wire [NS-1:0]   w_start, w_wtake, w_pub;
+/* verilator lint_on UNUSEDSIGNAL */
+// the first payload word of a mount slot's record (its LBA) or the events tier's, as it was at the record's start
+/* verilator lint_off UNUSEDSIGNAL */   // a mount build's, an events build's
+reg  [31:0] rec_lba_q = 32'd0;
+/* verilator lint_on UNUSEDSIGNAL */
 
-localparam integer MARKW = `MISTER_OCRAM_MARK;
-localparam [MARKW-1:0] MARK_T0 = {MARKW{1'b0}};
-localparam [MARKW-1:0] MARK_ONE = 1;
-reg  [5:0]  rec_k = 6'd0;              // 0 header, 1..len payload, len+1 the head store
-reg         rec_act = 1'b0;
-reg         rec_kind_q = 1'b0;         // 0 MARK, 1 VERDICT
-reg  [5:0]  rec_len_q = 6'd40;
-reg         mark_due_q = 1'b0;
-reg  [MARKW-1:0] mark_t = {MARKW{1'b0}};
-wire [31:0] mark_word;
-wire        snap_ready;
-
-// the VERDICT's eight payload words, one instant at the record's start
-reg  [31:0] vd0 = 32'd0, vd1 = 32'd0, vd2 = 32'd0, vd3 = 32'd0;
-reg  [31:0] vd4 = 32'd0, vd5 = 32'd0, vd6 = 32'd0, vd7 = 32'd0;
-reg  [31:0] vd_word;
-always @(*) begin
-	case (rec_k)
-	6'd1: vd_word = vd0;
-	6'd2: vd_word = vd1;
-	6'd3: vd_word = vd2;
-	6'd4: vd_word = vd3;
-	6'd5: vd_word = vd4;
-	6'd6: vd_word = vd5;
-	6'd7: vd_word = vd6;
-	6'd8: vd_word = vd7;
-	default: vd_word = 32'd0;
-	endcase
-end
-
-wire mark_start = (t_job == J_MARK);
-`endif
-
-`ifndef MISTER_OCRAM_DIAG
 `ifdef MISTER_OCRAM_SECTOR_SLOT
-// The SECTOR tier's records: a REQUEST (the disc slot's or a mount slot's: its header, the LBA, then the head,
-// behind a room check of 2 words), a mount slot's WRITE (its header, the LBA, the n words as hps_ocram_rx hands
-// them over, then the head, behind n + 2), and the BIND posted after each C_BIND store (its header, then the head,
-// behind 1). A REQUEST or WRITE starts only while its slot's C_BIND bit is stored 1 and no C_BIND store or BIND is
+// The SECTOR tier's sources. BIND {0x27, C_BIND[7:0], 0}, owed after each C_BIND store (behind a room check of 1
+// word); the disc slot's REQUEST {0x21, 0, 1} then the LBA (2); a mount slot's REQUEST {0x21, {blk_cnt, k}, 1} then
+// the LBA, or its WRITE {0x26, {blk_cnt, k}, 1 + n} then the LBA and the n words as hps_ocram_rx hands them over
+// (n + 2). A REQUEST or WRITE starts only while its slot's C_BIND bit is stored 1 and no C_BIND store or BIND is
 // owed; a C_BIND store waits for a record in flight and for an owed BIND. With the EVT ring stopped no BIND is owed.
-localparam [1:0] RS_DISC = 2'd0, RS_MREQ = 2'd1, RS_MWRITE = 2'd2, RS_BIND = 2'd3;
-reg  [10:0] rec_k = 11'd0;             // 0 header, 1..len payload, len + 1 the head store
-reg         rec_act = 1'b0;
-reg   [1:0] rec_src_q = RS_DISC;
-reg  [10:0] rec_len_q = 11'd1;
 reg         brec_pend = 1'b0;          // the BIND record after a C_BIND store is owed
-wire [15:0] wait_now = head_q - tail_q;
-wire [15:0] evt_index = head_q + {5'd0, rec_k};
-wire [15:0] evt_off = EVT_BASE + ((evt_index & (EVT_WORDS - 1)) << 2);
+reg         rec_mw_q = 1'b0;           // the mount record open is a WRITE
+/* verilator lint_off UNUSEDSIGNAL */   // the REPLY's and the events tier's
+wire        brec_owed = brec_pend;
+/* verilator lint_on UNUSEDSIGNAL */
+wire        b_post = brec_pend;
+wire [31:0] b_hdr  = {8'h27, 5'd0, bind_q[2:0], 16'd0};
+wire        d_post = rq_post && c0_sbind[0] && bind_q[0] && !bind_pend && !brec_pend;
+wire [31:0] d_hdr  = REQ_HEADER;
+wire [31:0] d_wd   = rq_lba;           // the disc REQUEST's LBA is hps_ocram_rx's request register
 wire        m_bound = (m_arg[1:0] == 2'd2) ? (c0_sbind[2] && bind_q[2]) : (c0_sbind[1] && bind_q[1]);
-wire [10:0] m_len   = m_write ? m_n + 11'd1 : 11'd1;
-wire rq_ok = (phase == P_SESSION) && !stopped_q && !rec_act && rq_post && c0_sbind[0] && bind_q[0] && !bind_pend &&
-             !brec_pend && (wait_now <= EVT_WORDS - 16'd2);
-wire brec_ok = (phase == P_SESSION) && !stopped_q && !rec_act && brec_pend && (wait_now <= EVT_WORDS - 16'd1);
-wire mq_ok = MNT_EN && (phase == P_SESSION) && !stopped_q && !rec_act && m_post && m_bound && !bind_pend &&
-             !brec_pend && (wait_now <= EVT_WORDS - {5'd0, m_len} - 16'd1);
-wire bind_hold = rec_act || (brec_pend && !stopped_q);
-`ifdef MISTER_OCRAM_LANE
-reg         rec_rep_q = 1'b0;          // the record being written is a REPLY: every payload word is hps_ocram_rx's
-wire rec_word = (rec_src_q == RS_MWRITE && rec_k >= 11'd2) || (rec_rep_q && rec_k >= 11'd1);
-wire        rec_wv = rec_rep_q ? p_wv : m_wv;
-wire [31:0] rec_wd = rec_rep_q ? p_wd : m_wd;
+wire        n_post = MNT_EN && m_post && m_bound && !bind_pend && !brec_pend;
+wire [31:0] n_hdr  = {m_write ? 8'h26 : 8'h21, m_arg, 5'd0, m_len};
+wire        n_wv   = w_first || m_wv;  // a WRITE word waits for hps_ocram_rx's
+wire [31:0] n_wd   = w_first ? rec_lba_q : m_wd;
+wire        bind_hold = w_act || (brec_pend && !stopped_q);
+assign rq_start = w_start[S_DISC];
+assign m_start  = w_start[S_MNT];
+assign m_wtake  = w_wtake[S_MNT] && rec_mw_q && !w_first;
+assign m_pub    = w_pub[S_MNT] && rec_mw_q;
 `else
-wire rec_word = rec_src_q == RS_MWRITE && rec_k >= 11'd2;     // a WRITE word: it waits for hps_ocram_rx's
-wire        rec_wv = m_wv;
-wire [31:0] rec_wd = m_wd;
+/* verilator lint_off UNUSEDSIGNAL */   // the REPLY's and the events tier's
+wire        brec_owed = 1'b0;
+/* verilator lint_on UNUSEDSIGNAL */
+wire        b_post = 1'b0, d_post = 1'b0, n_post = 1'b0, n_wv = 1'b0;
+wire [31:0] b_hdr = 32'd0, d_hdr = 32'd0, d_wd = 32'd0, n_hdr = 32'd0, n_wd = 32'd0;
+wire        bind_hold = 1'b0;
+assign rq_start = 1'b0;
+assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
 `endif
-reg  [31:0] rec_lba_q = 32'd0;         // a mount record's LBA, as it was at the record's start
-assign rq_start = (t_job == J_RQ);
-assign m_start  = (t_job == J_MRQ);
+
 `ifdef MISTER_OCRAM_LANE
-assign m_wtake  = (t_job == J_REC) && rec_word && !rec_rep_q && (rec_k != rec_len_q + 11'd1);
-assign p_wtake  = (t_job == J_REC) && rec_word && rec_rep_q && (rec_k != rec_len_q + 11'd1);
-// J_MARK's code: the DIAG writer and the SECTOR one are never built together
-localparam [3:0] J_PREC = 4'd8;
-assign p_start  = (t_job == J_PREC);
-assign e_free   = EVT_WORDS - wait_now;
-// the REPLY opens behind an owed BIND, REQUEST or WRITE, with room for its n words and its header
-wire rep_ok = (phase == P_SESSION) && !stopped_q && !rec_act && p_post && !bind_pend && !brec_pend &&
-              (wait_now <= EVT_WORDS - {5'd0, p_n} - 16'd1);
+// The capture lane's REPLY {0x22, arg, n}: each payload word as the walker hands it over. It opens behind an owed
+// BIND, REQUEST and WRITE, with room for its n words and its header.
+wire        r_post = p_post && !bind_pend && !brec_owed;
+wire [31:0] r_hdr  = {8'h22, p_arg, 5'd0, p_n};
+wire        r_wv   = p_wv;
+wire [31:0] r_wd   = p_wd;
+assign p_start  = w_start[S_REP];
+assign p_wtake  = w_wtake[S_REP];
+assign e_free   = w_free;
 `else
-assign m_wtake  = (t_job == J_REC) && rec_word && (rec_k != rec_len_q + 11'd1);
-assign p_wtake  = 1'b0;
-assign p_start  = 1'b0;
-assign e_free   = 16'd0;
+wire        r_post = 1'b0, r_wv = 1'b0;
+wire [31:0] r_hdr = 32'd0, r_wd = 32'd0;
+assign p_start = 1'b0, p_wtake = 1'b0, e_free = 16'd0;
 `endif
-assign m_pub    = t_done && !run_ended && (wr_act == W_RECHEAD) && rec_src_q == RS_MWRITE;
+
 `ifdef MISTER_OCRAM_EVT
 // The events tier's records. The offer in hand (ev_have, e_d held by the crossing) is {kind, arg, data}: kind 0
 // STATUS word arg[7:6] with stflg arg[3:0] and status_req's word in data; 1 INFO, arg the byte (0: no notice); 2
@@ -1030,8 +960,7 @@ assign m_pub    = t_done && !run_ended && (wr_act == W_RECHEAD) && rec_src_q == 
 localparam [1:0] EK_STATUS = 2'd0, EK_INFO = 2'd1, EK_UPLOAD = 2'd2, EK_RUMBLE = 2'd3;
 reg         ev_have = 1'b0;            // an offer is in e_d and not spent
 reg         ev_wait = 1'b0;            // an offer is asked for and not yet in
-reg         rec_ev_q = 1'b0;           // the record being written is the events tier's
-reg   [1:0] rec_ek_q = EK_STATUS;      // its kind
+reg   [1:0] rec_ek_q = EK_STATUS;      // the events record's kind
 reg   [2:0] rec_pad_q = 3'd0;          // a RUMBLE's pad
 reg   [3:0] st_flag_q = 4'd0;          // the STATUS being written: its stflg
 reg   [3:0] st_last_q = 4'd0;          // the stflg of the last STATUS published this session (0 at the hello)
@@ -1047,149 +976,122 @@ wire        ev_bound = evt_bound_q && phase == P_SESSION && !stopped_q;
 // the offer in hand opens a record
 wire        ev_rec  = (ev_k == EK_STATUS) ? (ev_arg[7:6] == 2'd0 && ev_arg[3:0] != st_last_q) :
                       (ev_k == EK_INFO) ? (ev_arg != 8'd0) : (ev_k == EK_UPLOAD) ? 1'b1 : (e_d[15:0] != ev_rlast);
-wire [10:0] ev_len  = (ev_k == EK_STATUS) ? 11'd4 : (ev_k == EK_RUMBLE) ? 11'd1 : 11'd0;
 wire [31:0] ev_hdr  = (ev_k == EK_STATUS) ? {8'h20, 8'd0, 16'd4} : (ev_k == EK_INFO) ? {8'h28, ev_arg, 16'd0} :
                       (ev_k == EK_UPLOAD) ? {8'h29, ev_arg, 16'd0} : {8'h2A, 5'd0, ev_pad, 16'd1};
+// its first payload word: a STATUS's word 0, a RUMBLE's level
+wire [31:0] ev_w1   = (ev_k == EK_RUMBLE) ? {16'd0, e_d[15:0]} : e_d[31:0];
 // a STATUS record's words 1-3: the offer in hand is that word with the record's stflg
-wire        st_open = rec_act && rec_ev_q && rec_ek_q == EK_STATUS;
+wire        st_open = w_act && w_src == S_EV && rec_ek_q == EK_STATUS;
 wire        st_wait = st_open && rec_k >= 11'd2 && rec_k <= 11'd4;
 wire        st_wok  = ev_have && ev_k == EK_STATUS && {9'd0, ev_arg[7:6]} == rec_k - 11'd1 && ev_arg[3:0] == st_flag_q;
-wire ev_ok = ev_bound && !rec_act && ev_have && ev_rec && !bind_pend && !brec_pend &&
-             (wait_now <= EVT_WORDS - {5'd0, ev_len} - 16'd1);
+// a STATUS word that is not the open record's next, with its stflg, abandons that record before its head
+wire        ev_drop = st_wait && ev_have && !st_wok && !w_wfly && !run_ended;
+wire        e_post = ev_bound && ev_have && ev_rec && !bind_pend && !brec_owed;
+wire [31:0] e_hdr  = ev_hdr;
+wire        e_wv   = !st_wait || st_wok;   // a STATUS word not yet offered lets the consumers in
+wire [31:0] e_wd   = st_wait ? e_d[31:0] : rec_lba_q;
 assign e_ask = ev_bound && !ev_have && !ev_wait;
 `else
-wire st_wait = 1'b0, st_wok = 1'b0;
+wire        ev_drop = 1'b0;
+wire        e_post = 1'b0, e_wv = 1'b0;
+wire [31:0] e_hdr = 32'd0, e_wd = 32'd0;
+/* verilator lint_off UNUSEDSIGNAL */   // no events record starts
+wire [31:0] ev_w1 = 32'd0;
+/* verilator lint_on UNUSEDSIGNAL */
 assign e_ask = 1'b0;
-`endif
-`else
-wire bind_hold = 1'b0;
-assign rq_start = 1'b0;
-assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
-assign e_ask = 1'b0;
-assign p_wtake = 1'b0, p_start = 1'b0, e_free = 16'd0;
-`endif
-`else
-wire bind_hold = 1'b0;
-assign rq_start = 1'b0;
-assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
-assign e_ask = 1'b0;
-assign p_wtake = 1'b0, p_start = 1'b0, e_free = 16'd0;
 `endif
 
-// The arbiter: the terminal store, the fault's C_STATE store, the poll's or the line's reads when due, the
-// hello's stores, a state store, a C_BIND store, the EVT record's words, then the consumers.
+`ifdef MISTER_OCRAM_DIAG
+// DIAG's records. A MARK {0x23, 3, 40}, the counters' snapshot, opens when its period is due (at once with flood)
+// with room for its 41 words and, for a period MARK, the VERDICT's 9 beside it: the period's record is followed at
+// once by the verdict, and flood posts no verdict. A VERDICT {0x25, 4, 8} needs 9. A MARK's payload word 1 waits
+// for the counter snapshot still draining older transactions, and the consumers wait with it.
+localparam integer MARKW = `MISTER_OCRAM_MARK;
+localparam [MARKW-1:0] MARK_T0 = {MARKW{1'b0}};
+localparam [MARKW-1:0] MARK_ONE = 1;
+reg         mark_due_q = 1'b0;
+reg  [MARKW-1:0] mark_t = {MARKW{1'b0}};
+wire [31:0] mark_word;
+wire        snap_ready;
+// the VERDICT's eight payload words, one instant at the record's start
+reg  [31:0] vd0 = 32'd0, vd1 = 32'd0, vd2 = 32'd0, vd3 = 32'd0;
+reg  [31:0] vd4 = 32'd0, vd5 = 32'd0, vd6 = 32'd0, vd7 = 32'd0;
+reg  [31:0] vd_word;
 always @(*) begin
-	t_go = 1'b0; t_we = 1'b0; t_off = H_HELLO; t_wdata = 32'd0; t_counted = 1'b1; t_job = J_NONE;
-	if (engine_idle && !hrst_q && !run_fall && !run_set) begin
-		if (term_pend) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = C_HELLO; t_wdata = C_HELLO_STOP; t_counted = 1'b0;
-			t_job = J_TERM;
-		end
-		else if (fault_pend) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = C_STATE; t_job = J_FAULT;
-			t_wdata = state_word(hello_cnt, stopped_q, osd_stopped_q, ts_stopped_q, fio_stopped_q, mnt_stopped_q,
-			                     prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q, prev_mid_mnt_q);
-		end
-		else if (poll_sel) begin
-			t_go = 1'b1; t_we = 1'b0; t_job = J_POLL;
-			case (poll_rd_kind)
-			R_LINE:  t_off = H_LINE;
-			R_IDX:   t_off = H_IDX3;
-			R_BIND:  t_off = H_BIND;
-			R_SECT:  t_off = H_SECTOR;
-			R_MARK:  t_off = H_MARK1;
-			default: t_off = H_HELLO;
-			endcase
-		end
-		else if (hj_act && hj_has(hj_k)) begin
-			t_go = 1'b1; t_we = 1'b1; t_job = J_HELLO;
-			t_off   = hj_off(hj_k);
-			t_wdata = hello_data(hj_k, hj_state, echo_q, c0_wide);
-		end
-		else if (sto_pend) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = C_HELLO; t_wdata = sto_data; t_job = J_STO;
-		end
-		else if (bind_pend && !bind_hold) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = C_BIND; t_wdata = {20'd0, c0_open, 8'd0, c0_sbind}; t_job = J_BIND;
-`ifdef MISTER_OCRAM_EVT
-			t_wdata[8] = evt_bind_q;
-`endif
-		end
-`ifndef MISTER_OCRAM_DIAG
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-		else if (rec_act && (!rec_word || rec_wv || rec_k == rec_len_q + 11'd1) && (!st_wait || st_wok)) begin
-			// a WRITE word not yet handed over, or a STATUS word not yet offered, lets the consumers in
-			if (rec_k == rec_len_q + 11'd1) begin
-				t_go = 1'b1; t_we = 1'b1; t_job = J_REC;
-				t_off = C_IDX3; t_wdata = {16'd0, head_q + {5'd0, rec_len_q} + 16'd1};
-			end
-			else begin
-				// the disc REQUEST's LBA is hps_ocram_rx's request register
-				t_go = 1'b1; t_we = 1'b1; t_job = J_REC; t_off = evt_off;
-				t_wdata = rec_word ? rec_wd : (rec_src_q == RS_DISC) ? rq_lba : rec_lba_q;
-`ifdef MISTER_OCRAM_EVT
-				if (st_wait) t_wdata = e_d[31:0];      // a STATUS word 1-3, as offered
-`endif
-			end
-		end
-		else if (brec_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_wdata = {8'h27, 5'd0, bind_q[2:0], 16'd0}; t_job = J_BREC;
-		end
-		else if (rq_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_wdata = REQ_HEADER; t_job = J_RQ;
-		end
-		else if (mq_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_job = J_MRQ;
-			t_wdata = {m_write ? 8'h26 : 8'h21, m_arg, 5'd0, m_len};
-		end
-`ifdef MISTER_OCRAM_LANE
-		else if (rep_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_job = J_PREC; t_wdata = {8'h22, p_arg, 5'd0, p_n};
-		end
-`endif
-`ifdef MISTER_OCRAM_EVT
-		else if (ev_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_job = J_EREC; t_wdata = ev_hdr;
-		end
-`endif
-`endif
-`endif
-`ifdef MISTER_OCRAM_DIAG
-		else if (rec_act) begin
-			if (rec_k == 6'd1 && !rec_kind_q && !snap_ready) begin
-				// a MARK's payload word 1 waits for the counter snapshot still draining older transactions
-			end
-			else begin
-				t_go = 1'b1; t_we = 1'b1; t_job = J_REC;
-				if (rec_k == rec_len_q + 6'd1) begin
-					t_off = C_IDX3; t_wdata = {16'd0, head_q + {10'd0, rec_len_q} + 16'd1}; t_counted = 1'b1;
-				end
-				else begin
-					t_off = evt_off;
-					t_wdata = rec_kind_q ? vd_word : mark_word;
-					t_counted = 1'b0;
-				end
-			end
-		end
-		else if (mark_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_wdata = MARK_HEADER; t_counted = 1'b0;
-			t_job = J_MARK;
-		end
-		else if (verdict_ok) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_wdata = VERDICT_HEADER; t_counted = 1'b0;
-			t_job = J_VERDICT;
-		end
-`endif
-		else if (c0_sel) begin
-			t_go = 1'b1; t_we = c0_we; t_off = c0_off; t_wdata = c0_wdata; t_job = J_C0;
-		end
-`ifdef MISTER_OCRAM_DIAG
-		else if (c1_sel) begin
-			t_go = 1'b1; t_we = c1_we; t_off = c1_off; t_wdata = c1_wdata; t_job = J_C1;
-		end
-`endif
-	end
+	case (rec_k)
+	11'd1: vd_word = vd0;
+	11'd2: vd_word = vd1;
+	11'd3: vd_word = vd2;
+	11'd4: vd_word = vd3;
+	11'd5: vd_word = vd4;
+	11'd6: vd_word = vd5;
+	11'd7: vd_word = vd6;
+	11'd8: vd_word = vd7;
+	default: vd_word = 32'd0;
+	endcase
 end
+wire        mark_start = w_start[S_MARK];
+wire        k_post = (run_flood || mark_due_q) && (run_flood || w_free >= 16'd50);
+wire [31:0] k_hdr  = MARK_HEADER;
+wire        k_wv   = !(w_first && !snap_ready);
+wire        v_post = verdict_pend;
+wire [31:0] v_hdr  = VERDICT_HEADER;
+wire        w_hold = w_act && w_src == S_MARK && w_first && !snap_ready;
+`else
+wire        k_post = 1'b0, k_wv = 1'b0, v_post = 1'b0;
+wire [31:0] k_hdr = 32'd0, mark_word = 32'd0, v_hdr = 32'd0, vd_word = 32'd0;
+wire        w_hold = 1'b0;
+`endif
+
+// The session's abandonments of the record open: an HPS reset, a stop or a run's start; the session's end; a host
+// tail past the ring's size; and the events tier's out-of-turn STATUS word. A head store in flight still lands.
+wire        idx_fault = !stopped_q && (((w_head - rdata[15:0]) & 16'hFFFF) > EVT_WORDS);
+wire        idx_done  = t_done && (rd_act == R_IDX) && !run_ended && t_ok;
+wire        sess_end  = t_done && (rd_act == R_HELLO) && !run_ended && t_ok && (phase == P_SESSION) &&
+                        (rdata != echo_q);
+wire        w_drop = hrst_rise | run_fall | run_set | sess_end | (idx_done && idx_fault) | ev_drop;
+
+wire        w_req, w_counted;
+wire [15:0] w_off;
+wire [31:0] w_wdata;
+ocram_evt_wr #(.N(NS)) evt_wr
+(
+	.clk(clk), .clr(hello_start), .live((phase == P_SESSION) && !stopped_q), .drop(w_drop),
+	.kill(hrst_rise | (run_set & ~run_fall)), .ended(run_ended), .t_set(idx_done && !idx_fault), .t_d(rdata[15:0]),
+	.head(w_head), .tail(w_tail), .head_nx(w_head_nx), .free(w_free), .act(w_act), .k(rec_k), .first(w_first),
+	.src(w_src), .wfly(w_wfly), .hfly(w_hfly),
+	.post({v_post, k_post, e_post, r_post, n_post, d_post, b_post}),
+	.hdr({v_hdr, k_hdr, e_hdr, r_hdr, n_hdr, d_hdr, b_hdr}),
+	.wv({1'b1, k_wv, e_wv, r_wv, n_wv, 1'b1, 1'b1}),
+	.wd({vd_word, mark_word, e_wd, r_wd, n_wd, d_wd, 32'd0}),
+	.start(w_start), .wtake(w_wtake), .pub(w_pub),
+	.req(w_req), .off(w_off), .wdata(w_wdata), .counted(w_counted), .grant(gnt[6]), .done(t_done)
+);
+
+`ifdef MISTER_OCRAM_EVT
+wire [31:0] bind_word = {20'd0, c0_open, 2'd0, evt_bind_q, 5'd0, c0_sbind};
+`else
+wire [31:0] bind_word = {20'd0, c0_open, 8'd0, c0_sbind};
+`endif
+
+// The arbiter (ocram_arb.sv): each port's request, offset and data from registers or a table; a consumer only in a
+// session, and never while a MARK's first payload word waits.
+ocram_arb #(.F(NP)) arb
+(
+	.clk(clk), .en(engine_idle && !hrst_q && !run_fall && !run_set), .kill(hrst_rise),
+	.req({(phase == P_SESSION) && c1_req_v && !w_hold, (phase == P_SESSION) && c0_req_v && !w_hold, w_req,
+	      bind_pend && !bind_hold, sto_pend, hj_act && hj_has(hj_k), poll_sel, fault_pend, term_pend}),
+	.we({c1_we, c0_we, 1'b1, 1'b1, 1'b1, 1'b1, 1'b0, 1'b1, 1'b1}),
+	.off({c1_off, c0_off, w_off, C_BIND, C_HELLO, hj_off(hj_k), poll_off, C_STATE, C_HELLO}),
+	.wdata({c1_wdata, c0_wdata, w_wdata, bind_word, sto_data, hello_data(hj_k, hj_state, echo_q, c0_wide), 32'd0,
+	        state_word(hello_cnt, stopped_q, osd_stopped_q, ts_stopped_q, fio_stopped_q, mnt_stopped_q,
+	                   prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q, prev_mid_mnt_q),
+	        C_HELLO_STOP}),
+	.counted({1'b1, 1'b1, w_counted, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b0}),
+	.grant(gnt),
+	.t_go(t_go), .t_we(t_we), .t_off(t_off), .t_wdata(t_wdata), .t_counted(t_counted), .t_done(t_done),
+	.rdata(rdata), .c_done(a_cdone), .c_rdata(a_crdata)
+);
 
 `ifdef MISTER_OCRAM_DIAG
 // The hello starts the torture sink's counters; a MARK record restarts its period. The period counter marks the
@@ -1241,17 +1143,14 @@ always @(posedge clk) begin
 	if (phase == P_SESSION && evt_bind_q != evt_bound_q) bind_pend <= 1'b1;
 `endif
 
-	// the hello clears the session's ring state when its first store is about to run
+	// the hello clears the session's state when its first store is about to run (the writer its ring's)
 	if (hello_start) begin
 		phase       <= P_HELLO;
 		hj_act      <= 1'b1;
 		hj_k        <= 5'd0;
-		head_q      <= 16'd0;
-		tail_q      <= 16'd0;
 		stopped_q   <= 1'b0;
 		line_en_q   <= 1'b0;
 		poll_step   <= 3'd0;
-		rec_mid_q   <= 1'b0;
 		sto_pend    <= 1'b0;            // this hello's C_STATE and C_HELLO supersede a pending state word
 		fault_pend  <= 1'b0;
 		osd_stopped_q <= 1'b0;
@@ -1269,8 +1168,6 @@ always @(posedge clk) begin
 		hj_state    <= state_word(hello_cnt + 8'd1, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0,
 		                          prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q, prev_mid_mnt_q);
 `ifdef MISTER_OCRAM_DIAG
-		rec_act     <= 1'b0;
-		rec_k       <= 6'd0;
 		verdict_pend<= 1'b0;
 		deepest_q   <= 16'd0;
 `endif
@@ -1291,16 +1188,10 @@ always @(posedge clk) begin
 		sto_pend   <= 1'b0;
 		hj_act     <= 1'b0;
 		`ifdef MISTER_OCRAM_DIAG
-			rec_act <= 1'b0;
-			rec_k   <= 6'd0;
 			verdict_pend <= 1'b0;
 		`endif
-		`ifndef MISTER_OCRAM_DIAG
 		`ifdef MISTER_OCRAM_SECTOR_SLOT
-			rec_act <= 1'b0;
-			rec_k   <= 11'd0;
 			brec_pend <= 1'b0;
-		`endif
 		`endif
 		boot_pend  <= 1'b0;
 		boot_first <= 1'b1;
@@ -1315,38 +1206,29 @@ always @(posedge clk) begin
 		bind_q     <= 4'd0;
 		sec_ask_q  <= 3'd0;
 		bind_pend  <= 1'b0;
-		c_act_v    <= 1'b0;
-		if (rec_mid_q) prev_mid_q <= 1'b1;
+		if (w_act) prev_mid_q <= 1'b1;
 		if (OSD_EN != 0 && c0_mid) prev_mid_osd_q <= 1'b1;
 		if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
 		if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 		if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
 		if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
-		rec_mid_q  <= 1'b0;
 	end
 	else if (run_fall) begin
 		// the stop: the transaction in flight completes in the engine; a record being written is abandoned and
 		// its head is not stored; one terminal store follows unless the HPS reset ended the run. A record head
 		// store already in flight still lands, so it is not an abandoned record.
 		phase      <= P_OFF;
-		if (rec_mid_q && (wr_act != W_RECHEAD)) prev_mid_q <= 1'b1;
+		if (w_act && !w_hfly) prev_mid_q <= 1'b1;
 		if (OSD_EN != 0 && c0_mid) prev_mid_osd_q <= 1'b1;
 		if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
 		if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 		if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
 		if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
-		rec_mid_q  <= 1'b0;
 		`ifdef MISTER_OCRAM_DIAG
-			rec_act <= 1'b0;
-			rec_k   <= 6'd0;
 			verdict_pend <= 1'b0;
 		`endif
-		`ifndef MISTER_OCRAM_DIAG
 		`ifdef MISTER_OCRAM_SECTOR_SLOT
-			rec_act <= 1'b0;
-			rec_k   <= 11'd0;
 			brec_pend <= 1'b0;
-		`endif
 		`endif
 		hj_act     <= 1'b0;
 		sto_pend   <= 1'b0;
@@ -1375,16 +1257,10 @@ always @(posedge clk) begin
 		sto_pend   <= 1'b0;
 		hj_act     <= 1'b0;
 		`ifdef MISTER_OCRAM_DIAG
-			rec_act <= 1'b0;
-			rec_k   <= 6'd0;
 			verdict_pend <= 1'b0;
 		`endif
-		`ifndef MISTER_OCRAM_DIAG
 		`ifdef MISTER_OCRAM_SECTOR_SLOT
-			rec_act <= 1'b0;
-			rec_k   <= 11'd0;
 			brec_pend <= 1'b0;
-		`endif
 		`endif
 		rd_act     <= R_NONE;
 		wr_act     <= W_NONE;
@@ -1402,105 +1278,10 @@ always @(posedge clk) begin
 `ifdef MISTER_OCRAM_EVT
 				evt_bound_q <= evt_bind_q;
 `endif
-`ifndef MISTER_OCRAM_DIAG
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 				brec_pend <= !stopped_q;
 `endif
-`endif
 			end
-`ifndef MISTER_OCRAM_DIAG
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-			J_REC: begin
-				wr_act <= (rec_k == rec_len_q + 11'd1) ? W_RECHEAD : W_REC;
-				rec_k  <= rec_k + 11'd1;
-			end
-			J_RQ, J_MRQ, J_BREC: begin
-				wr_act    <= W_REC;
-				rec_act   <= 1'b1;
-				rec_mid_q <= 1'b1;
-				rec_k     <= 11'd1;
-				rec_lba_q <= m_lba;
-`ifdef MISTER_OCRAM_EVT
-				rec_ev_q  <= 1'b0;
-`endif
-`ifdef MISTER_OCRAM_LANE
-				rec_rep_q <= 1'b0;
-`endif
-				if (t_job == J_BREC) begin rec_src_q <= RS_BIND; rec_len_q <= 11'd0; brec_pend <= 1'b0; end
-				else if (t_job == J_MRQ) begin rec_src_q <= m_write ? RS_MWRITE : RS_MREQ; rec_len_q <= m_len; end
-				else begin rec_src_q <= RS_DISC; rec_len_q <= 11'd1; end
-			end
-`ifdef MISTER_OCRAM_EVT
-			J_EREC: begin
-				// the offer is spent into the record: a STATUS's word 0 or a RUMBLE's level is its first payload
-				wr_act    <= W_REC;
-				rec_act   <= 1'b1;
-				rec_mid_q <= 1'b1;
-				rec_k     <= 11'd1;
-				rec_lba_q <= (ev_k == EK_RUMBLE) ? {16'd0, e_d[15:0]} : e_d[31:0];
-				rec_src_q <= RS_BIND;              // no WRITE word, no REQUEST LBA
-				rec_len_q <= ev_len;
-				rec_ev_q  <= 1'b1;
-				rec_ek_q  <= ev_k;
-				rec_pad_q <= ev_pad;
-				st_flag_q <= ev_arg[3:0];
-`ifdef MISTER_OCRAM_LANE
-				rec_rep_q <= 1'b0;
-`endif
-			end
-`endif
-`ifdef MISTER_OCRAM_LANE
-			J_PREC: begin
-				// the REPLY's header is written: its n words follow as the frame plays
-				wr_act    <= W_REC;
-				rec_act   <= 1'b1;
-				rec_mid_q <= 1'b1;
-				rec_k     <= 11'd1;
-				rec_src_q <= RS_BIND;              // no WRITE token, no REQUEST LBA
-				rec_len_q <= p_n;
-				rec_rep_q <= 1'b1;
-`ifdef MISTER_OCRAM_EVT
-				rec_ev_q  <= 1'b0;
-`endif
-			end
-`endif
-`endif
-`endif
-`ifdef MISTER_OCRAM_DIAG
-			J_REC: begin
-				if (rec_k == rec_len_q + 6'd1) begin
-					wr_act <= W_RECHEAD; rec_k <= rec_k + 6'd1;
-				end
-				else begin
-					wr_act <= W_REC; rec_k <= rec_k + 6'd1;
-				end
-			end
-			J_MARK, J_VERDICT: begin
-				wr_act    <= W_REC;
-				rec_act   <= 1'b1;
-				rec_k     <= 6'd1;
-				rec_mid_q <= 1'b1;
-				if (t_job == J_VERDICT) begin
-					// the eight verdict words are one instant, registered at the record's start
-					rec_kind_q <= 1'b1;
-					rec_len_q  <= 6'd8;
-					vd0 <= ts_records;
-					vd1 <= ts_words;
-					vd2 <= ts_errors;
-					vd3 <= ts_first_g;
-					vd4 <= ts_first_got;
-					vd5 <= ts_sum;
-					vd6 <= {ts_skipped, ts_deepest};
-					vd7 <= {osd_rows, osd_deepest};
-					verdict_pend <= 1'b0;
-				end
-				else begin
-					rec_kind_q <= 1'b0;
-					rec_len_q  <= 6'd40;
-					if (!run_flood) verdict_pend <= 1'b1;
-				end
-			end
-`endif
 			default: ;
 			endcase
 		end
@@ -1508,6 +1289,35 @@ always @(posedge clk) begin
 			rd_act <= poll_rd_kind;
 			if (poll_sel && (poll_rd_kind == R_HELLO) && (phase == P_START)) boot_first <= 1'b0;
 		end
+		// a record's start: its source takes what the record keeps
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		if (w_start[S_BIND]) brec_pend <= 1'b0;
+		if (w_start[S_MNT]) begin rec_lba_q <= m_lba; rec_mw_q <= m_write; end
+`endif
+`ifdef MISTER_OCRAM_EVT
+		if (w_start[S_EV]) begin
+			// the offer is spent into the record: a STATUS's word 0 or a RUMBLE's level is its first payload
+			rec_lba_q <= ev_w1;
+			rec_ek_q  <= ev_k;
+			rec_pad_q <= ev_pad;
+			st_flag_q <= ev_arg[3:0];
+		end
+`endif
+`ifdef MISTER_OCRAM_DIAG
+		if (w_start[S_VD]) begin
+			// the eight verdict words are one instant, registered at the record's start
+			vd0 <= ts_records;
+			vd1 <= ts_words;
+			vd2 <= ts_errors;
+			vd3 <= ts_first_g;
+			vd4 <= ts_first_got;
+			vd5 <= ts_sum;
+			vd6 <= {ts_skipped, ts_deepest};
+			vd7 <= {osd_rows, osd_deepest};
+			verdict_pend <= 1'b0;
+		end
+		if (w_start[S_MARK] && !run_flood) verdict_pend <= 1'b1;
+`endif
 	end
 
 	// a write's completion advances its job; BRESP non-OKAY is counted by the diag and otherwise ignored
@@ -1529,35 +1339,15 @@ always @(posedge clk) begin
 				else hj_k <= hj_next(hj_k);
 			end
 		end
-`ifdef MISTER_OCRAM_DIAG
-		else if (wr_act == W_RECHEAD) begin
-			wr_act  <= W_NONE;
-			head_q  <= head_q + {10'd0, rec_len_q} + 16'd1;
-			rec_act <= 1'b0;
-			rec_mid_q <= 1'b0;
-			rec_k   <= 6'd0;
-			if (((head_q + {10'd0, rec_len_q} + 16'd1) - tail_q) > deepest_q)
-				deepest_q <= (head_q + {10'd0, rec_len_q} + 16'd1) - tail_q;
-		end
-`endif
-`ifndef MISTER_OCRAM_DIAG
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-		else if (wr_act == W_RECHEAD) begin
-			wr_act    <= W_NONE;
-			head_q    <= head_q + {5'd0, rec_len_q} + 16'd1;
-			rec_act   <= 1'b0;
-			rec_mid_q <= 1'b0;
-			rec_k     <= 11'd0;
-`ifdef MISTER_OCRAM_EVT
-			// published: the STATUS's stflg and the RUMBLE's level are now the last ones
-			if (rec_ev_q && rec_ek_q == EK_STATUS) st_last_q <= st_flag_q;
-			if (rec_ev_q && rec_ek_q == EK_RUMBLE) rum_last_q[{rec_pad_q, 4'd0} +: 16] <= rec_lba_q[15:0];
-			rec_ev_q  <= 1'b0;
-`endif
-		end
-`endif
-`endif
 		else if (wr_act != W_NONE) wr_act <= W_NONE;
+		// a record published: the DIAG deepest fill, the events tier's last STATUS stflg and RUMBLE level
+`ifdef MISTER_OCRAM_DIAG
+		if ((w_pub != {NS{1'b0}}) && ((w_head_nx - w_tail) > deepest_q)) deepest_q <= w_head_nx - w_tail;
+`endif
+`ifdef MISTER_OCRAM_EVT
+		if (w_pub[S_EV] && rec_ek_q == EK_STATUS) st_last_q <= st_flag_q;
+		if (w_pub[S_EV] && rec_ek_q == EK_RUMBLE) rum_last_q[{rec_pad_q, 4'd0} +: 16] <= rec_lba_q[15:0];
+`endif
 	end
 
 	// a hello step that this build does not store is passed without a transaction
@@ -1601,31 +1391,15 @@ always @(posedge clk) begin
 `endif
 				else begin
 					// the session ends: its line drops, and each record part-written is recorded for the next hello
-					`ifdef MISTER_OCRAM_DIAG
-						if (rec_act) begin
-							rec_act <= 1'b0;
-							rec_k <= 6'd0;
-							if (rec_mid_q) prev_mid_q <= 1'b1;
-							rec_mid_q <= 1'b0;
-						end
-					`endif
-					`ifndef MISTER_OCRAM_DIAG
 					`ifdef MISTER_OCRAM_SECTOR_SLOT
 						brec_pend <= 1'b0;
-						if (rec_act) begin
-							rec_act <= 1'b0;
-							rec_k <= 11'd0;
-							if (rec_mid_q) prev_mid_q <= 1'b1;
-							rec_mid_q <= 1'b0;
-						end
 					`endif
-					`endif
+					if (w_act) prev_mid_q <= 1'b1;
 					if (OSD_EN != 0 && c0_mid) prev_mid_osd_q <= 1'b1;
 					if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
 					if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 					if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
 					if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
-					rec_mid_q <= 1'b0;
 					poll_step <= 3'd0;
 					sto_pend  <= 1'b1;
 					sto_data  <= (rdata == 32'd0) ? C_HELLO_ARMED : C_HELLO_WAIT;
@@ -1657,7 +1431,7 @@ always @(posedge clk) begin
 			mark_arm_q <= rdata[31];
 			mark_idx_q <= rdata[15:0];
 			if (poll_step == 3'd6) poll_step <= 3'd2;
-			else if (line_en_q && !stopped_q && (head_q != tail_q)) poll_step <= 3'd4;
+			else if (line_en_q && !stopped_q && (w_head != w_tail)) poll_step <= 3'd4;
 			else if (rdata[31] && mark_reached(f_tail, rdata[15:0])) poll_step <= 3'd7;
 			else poll_step <= 3'd0;
 		end
@@ -1666,88 +1440,44 @@ always @(posedge clk) begin
 			poll_step <= 3'd3;
 		end
 		else if (rd_act == R_IDX) begin
-			if (!stopped_q && (((head_q - rdata[15:0]) & 16'hFFFF) > EVT_WORDS)) begin
+			// the tail itself is the writer's (t_set)
+			if (idx_fault) begin
 				// a host defect: bit 11 at once, the ring stops for the rest of the session
 				stopped_q  <= 1'b1;
 				fault_pend <= 1'b1;
 				poll_step  <= 3'd0;
-				`ifdef MISTER_OCRAM_DIAG
-					if (rec_act) begin
-						rec_act <= 1'b0;
-						rec_k <= 6'd0;
-						if (rec_mid_q) prev_mid_q <= 1'b1;
-						rec_mid_q <= 1'b0;
-					end
-				`endif
-				`ifndef MISTER_OCRAM_DIAG
 				`ifdef MISTER_OCRAM_SECTOR_SLOT
 					brec_pend <= 1'b0;
-					if (rec_act) begin
-						rec_act <= 1'b0;
-						rec_k <= 11'd0;
-						if (rec_mid_q) prev_mid_q <= 1'b1;
-						rec_mid_q <= 1'b0;
-					end
 				`endif
-				`endif
+				if (w_act) prev_mid_q <= 1'b1;
 			end
 			else if (!stopped_q) begin
-				tail_q <= rdata[15:0];
 `ifdef MISTER_OCRAM_DIAG
-				if (((head_q - rdata[15:0]) & 16'hFFFF) > deepest_q)
-					deepest_q <= (head_q - rdata[15:0]) & 16'hFFFF;
+				if (((w_head - rdata[15:0]) & 16'hFFFF) > deepest_q)
+					deepest_q <= (w_head - rdata[15:0]) & 16'hFFFF;
 `endif
-				poll_step <= (FIO_EN != 0 && mark_line) ? 3'd7 : (line_en_q && (head_q != rdata[15:0])) ? 3'd4 : 3'd0;
+				poll_step <= (FIO_EN != 0 && mark_line) ? 3'd7 : (line_en_q && (w_head != rdata[15:0])) ? 3'd4 : 3'd0;
 			end
-			else begin
-				tail_q <= rdata[15:0];
-				poll_step <= 3'd0;
-			end
+			else poll_step <= 3'd0;
 		end
 	end
 
-	// a consumer transaction's handshake: its port sees the done, the arbiter turns to the other port next time
-	if (t_done && c_act_v) c_act_v <= 1'b0;
-`ifdef MISTER_OCRAM_DIAG
-	if (c0_go || c1_go) begin
-		c_act_v    <= 1'b1;
-		c_act_port <= c1_go;
-		c_act_we   <= c1_go ? c1_we : c0_we;
-		c_last     <= c1_go;
-	end
-`else
-	if (c0_go) begin
-		c_act_v    <= 1'b1;
-		c_act_port <= 1'b0;
-		c_act_we   <= c0_we;
-		c_last     <= 1'b0;
-	end
-`endif
-
 `ifdef MISTER_OCRAM_EVT
-	// the events tier's offers: one asked for at a time; spent into a record, or at once when it needs none; a
-	// STATUS word that is not the open record's next, with its stflg, abandons that record before its head
+	// the events tier's offers: one asked for at a time; spent into a record, or at once when it needs none
 	ev_abandon <= 1'b0;
 	if (e_ask) ev_wait <= 1'b1;
 	if (e_v) begin ev_wait <= 1'b0; ev_have <= 1'b1; end
-	else if (t_go && (t_job == J_EREC || (t_job == J_REC && st_wait))) ev_have <= 1'b0;
+	else if (w_start[S_EV] || (w_wtake[S_EV] && st_wait)) ev_have <= 1'b0;
 	else if (ev_have && ev_bound && !st_open && !ev_rec) ev_have <= 1'b0;
-	if (st_wait && ev_have && !st_wok && wr_act != W_REC && !run_ended) begin
-		rec_act    <= 1'b0;
-		rec_k      <= 11'd0;
-		rec_mid_q  <= 1'b0;
-		rec_ev_q   <= 1'b0;
-		ev_abandon <= 1'b1;
-	end
+	if (ev_drop) ev_abandon <= 1'b1;
 	if (hello_start) begin
 		st_last_q  <= 4'd0;
 		rum_last_q <= 96'd0;
-		rec_ev_q   <= 1'b0;
 	end
 `endif
 
 	// the EVT line: high in a session, allowed by H_LINE, the ring not stopped, the head not the tail
-	line <= (phase == P_SESSION) && line_en_q && !stopped_q && (head_q != tail_q);
+	line <= (phase == P_SESSION) && line_en_q && !stopped_q && (w_head != w_tail);
 	// the mark line: high in a session while H_MARK[1] is armed and the download ring's tail has reached its index
 	mark_line <= FIO_EN != 0 && (phase == P_SESSION) && mark_arm_q && mark_reached(f_tail, mark_idx_q);
 end
@@ -1759,7 +1489,7 @@ hps_ocram_diag diag
 	.clr        (diag_clr),
 	.mark_start (mark_start),
 	.snap_ready (snap_ready),
-	.mark_i     (rec_k - 6'd1),
+	.mark_i     (rec_k[5:0] - 6'd1),
 	.mark_word  (mark_word),
 	.counted    (counted_q),
 	.awvalid    (awvalid),
@@ -1779,6 +1509,7 @@ hps_ocram_diag diag
 `endif
 
 endmodule
+
 
 `ifdef MISTER_OCRAM_DIAG
 //============================================================================
