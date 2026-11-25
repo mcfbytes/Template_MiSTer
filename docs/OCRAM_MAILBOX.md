@@ -148,6 +148,40 @@ Consumers run on `clk_sys`. Each fetches one word at a time through one held-dat
 `sys/lw_cdc.sv`, so no crossing carries a clock ratio and none reaches a video clock. That is why no FIFO is needed:
 the RAM is the queue, and the consumer's own pace sets the fetch rate.
 
+### The layers
+
+The master and the consumer are each a wrapper over one module a job, and every module with logic but the
+crossings (`ocram_xing`, `hps_ocram_evt`) has one clock. A boundary between them is ports, never an SV `interface`.
+
+| layer | module | file | clock | holds |
+|---|---|---|---|---|
+| config | - | `sys/ocram_cfg.vh` | - | the `.qsf` macros as localparams, once: the tiers' enables, the geometry, the select mask, C_CAPS. `sys_top.v`, `hps_ocram_master.sv` and `hps_io.sv` include it |
+| bus | `ocram_axi` | `sys/ocram_axi.sv` | `clk_100m` | the AXI3 engine, one single-beat transaction at a time |
+| access | `ocram_arb` | `sys/ocram_arb.sv` | `clk_100m` | the pick over the request ports, fixed order then the consumers round robin; a mux of held requests |
+| session | `hps_ocram_master` | `sys/hps_ocram_master.sv` | `clk_100m` | the run latch, the phase, the poller, the hello's stores, C_STATE, C_BIND, the two lines; the record sources |
+| records out | `ocram_evt_wr` | `sys/ocram_evt_wr.sv` | `clk_100m` | the EVT ring's head, tail and free words; one record at a time from its sources, and its abandon |
+| records in | `ocram_ring_rd` | `sys/ocram_ring_rd.sv` | `clk_100m` | the walker: the ring table by ring id, the head read, the length check, the fetch, the tail store, the faults; one `ocram_bind` (`sys/ocram_bind.sv`) a block slot |
+| mount write | `ocram_mnt_wr` | `sys/ocram_mnt_wr.sv` | `clk_100m` | a mount WRITE's words, pulled from the feeder through the crossing for its record |
+| crossing | `ocram_xing` | `sys/ocram_xing.sv` | both | every `lw_xfer`, `lw_sync` and `lw_fence` between the walker and the sinks |
+| sinks | `ocram_osd_wr`, `hps_ocram_sfeed`, `hps_ocram_fplay`, `ocram_blk_req` | `sys/ocram_osd_wr.sv`, `sys/hps_ocram_rx.sv` (both), `sys/ocram_blk_req.sv` | `clk_sys` | one consumer's rules each: the OSD writer, the SECTOR feeder, the download player, the block slots' request records |
+
+`hps_ocram_rx` (`sys/hps_ocram_rx.sv`) wires the walker, the crossing and the sinks; `hps_ocram_evt`, the events
+tier's port, and the DIAG modules sit in `sys/hps_ocram_master.sv`. Three port bundles carry everything between
+the layers:
+
+- **B1, the bus request** (requester to `ocram_arb`): `req`, `we`, `off[15:0]`, `wdata[31:0]`, one of each a port,
+  held until `grant`; the engine's done then completes it, a consumer port's as `c_done` and `c_rdata` with the
+  engine's ok. The walker's port is `c_req`, `c_we`, `c_off`, `c_wdata`, back `c_grant`, `c_done`, `c_ok`,
+  `c_rdata`. `ocram_evt_wr` asks on the same bundle, a store each.
+- **B2, the record source** (source to `ocram_evt_wr`): `post`, `hdr[31:0]` (the header as stored), `wv`, `wd[31:0]`;
+  back `start` (the header store's launch), `wtake` (a payload word's) and `pub` (the head store's done: published).
+  The writer's `drop` abandons the record open. Its sources, in priority order: BIND, the SECTOR slot's REQUEST, a
+  mount slot's REQUEST or WRITE, REPLY, the events tier's records, and DIAG's MARK and VERDICT.
+- **B3, the record sink** (crossing to sink, `clk_sys`): `w_v`, `w_head`, `w_d[31:0]` held until answered (a block
+  sink adds `w_k`, `w_wr`); back `a_go`, `a_code[1:0]`, `a_d[31:0]`, `rest`. `ocram_xing` gives each sink its own
+  valid and head (`o_v`/`o_head`, `s_v`/`s_head`, `f_v`/`f_head`) beside the shared `w_d`, and takes each sink's
+  answer apart. The OSD writer answers with `a_go` alone.
+
 ### The map
 
 Offsets are from `0xFFFF0000`. The fabric declares this geometry in the control page and a host reads it there, so a
@@ -345,6 +379,8 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   hello. They go behind an owed BIND, REQUEST or WRITE. The fabric reads one offer at a time from `hps_io`'s port
   (`hps_ocram_evt`, a 42-bit word), so a STATUS is four offers; an INFO or UPLOAD taken in the cycles before a
   session ends can be lost, and a host re-reads the status at each hello.
+  A build without the SECTOR tier posts no BIND record (C_CAPS bit 10 clear): the events bind is in effect when
+  C_BIND shows bit 8.
 - **The mount slots** each keep the SECTOR slot's rule: a request that already stands when its bind arrives is that
   bind's first REQUEST. A host that has stopped polling GET_SDSTAT relies on it.
 - **Ring 1:** no bind bit. A published LFRAME is played; nothing is taken from the link.

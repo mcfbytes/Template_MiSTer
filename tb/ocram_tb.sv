@@ -44,10 +44,11 @@
 // hps_io, two osds) takes each UIO and OSD frame's words over the link, and the cases compare it with the mailbox
 // side (fio_link's hps_io and two osds on the player's OSD selects): the UIO strobe streams, hps_io's and the osds'
 // registers, the toggles at each frame's end; frames outside the mask or with arg[6:2] set are skipped by length.
-// With MISTER_OCRAM_EVT (arm I, beside the SECTOR tier, MISTER_LW for hps_io's wide bus) a real hps_io gives the
-// events tier's port through hps_ocram_evt, and a twin hps_io on the same core inputs is polled over its own link:
-// each STATUS, INFO, UPLOAD and RUMBLE record against the twin's reply; nothing while C_BIND bit 8 is clear; the
-// causes standing at the bind; a STATUS torn by a second transfer abandoned; a REQUEST owed with a STATUS first.
+// With MISTER_OCRAM_EVT (arm I, MISTER_LW for hps_io's wide bus; beside the SECTOR tier, and in a second shape
+// without it) a real hps_io gives the events tier's port through hps_ocram_evt, and a twin hps_io on the same core
+// inputs is polled over its own link: each STATUS, INFO, UPLOAD and RUMBLE record against the twin's reply; nothing
+// while C_BIND bit 8 is clear; the causes standing at the bind, with a BIND record only beside the SECTOR tier; a
+// STATUS torn by a second transfer abandoned; with the SECTOR tier, a REQUEST owed with a STATUS first.
 // With MISTER_DISABLE_SPI_EVT (arm Y) the link's replies read 0 and the records are held to the driven values.
 // With MISTER_OCRAM_LANE (arm A, beside the SECTOR, download and UIO tiers) capture LFRAMEs on the UIO select: each
 // REPLY against the twin hps_io's in-band replies to the same words, odd and even frames, the tag echoed; a capture
@@ -3244,13 +3245,21 @@ task tw_status;
 	end
 endtask
 
+// C_BIND bound: the events bind, beside the SECTOR slot's when the SECTOR tier is built
+localparam [31:0] EVT_BOUND = SEC_B ? 32'h0000_0101 : 32'h0000_0100;
 task evt_session(input [15:0] nonce, input do_bind);
 	begin
+`ifdef MISTER_OCRAM_SECTOR_SLOT
 		sec_session(nonce, 0);
+`else
+		reset_floor;
+		osd_head = 0;
+		start_session(0, 0, 0, nonce, ok);
+`endif
 		e_drain;
 		if (do_bind) begin
 			poke(H_BIND, 32'h0000_0100);
-			wait_word(C_BIND, 32'h0000_0101, 2000, ok);
+			wait_word(C_BIND, EVT_BOUND, 2000, ok);
 			check("C_BIND bit 8 is stored once H_BIND bit 8 is read", ok, 1);
 		end
 	end
@@ -3290,12 +3299,14 @@ task evt_case1;
 		// the bind
 		b0 = bind_n;
 		poke(H_BIND, 32'h0000_0100);
-		wait_word(C_BIND, 32'h0000_0101, 2000, ok1);
+		wait_word(C_BIND, EVT_BOUND, 2000, ok1);
 		check("I1: C_BIND bit 8 is stored", ok1, 1);
 		e_wait(n0 + 4, 2000, ok1);
 		repeat (40 << POLLC) @(posedge clk);
 		e_drain;
-		check("I1: a BIND record follows the store", bind_n - b0 >= 1, 1);
+		// the BIND record is the SECTOR tier's (C_CAPS bit 10): without it none is posted
+		if (SEC_B) check("I1: a BIND record follows the store", bind_n - b0 >= 1, 1);
+		else check("I1: no BIND record without the SECTOR tier", bind_n - b0, 0);
 		check("I1: four records: STATUS, INFO, UPLOAD, RUMBLE pad 2", evd_n - n0, 4);
 		i = e_find(n0, 8'h20, 8'd0, 0);
 		check("I1: the STATUS standing at the bind is its first", i >= 0, 1);
@@ -3406,6 +3417,7 @@ task evt_case4;
 	end
 endtask
 
+`ifdef MISTER_OCRAM_SECTOR_SLOT
 // I5. order: a REQUEST owed with a STATUS goes first. The host's tail is shown one word short of a full ring while
 // both become owed, then the real tail: both fit in the same cycle.
 task evt_case5;
@@ -3434,6 +3446,7 @@ task evt_case5;
 		e_drain;
 	end
 endtask
+`endif
 `endif
 
 `ifdef OCRAM_TB_MNT
@@ -4890,7 +4903,9 @@ initial begin
 	evt_case2;
 	evt_case3;
 	evt_case4;
+`ifdef MISTER_OCRAM_SECTOR_SLOT
 	evt_case5;
+`endif
 `endif
 `ifdef OCRAM_TB_MNT
 	mnt_case1;

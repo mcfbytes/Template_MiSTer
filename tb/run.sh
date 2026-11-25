@@ -146,13 +146,16 @@
 #      a BIND record and the causes standing at the bind (the status transfer its first STATUS); each STATUS, INFO,
 #      UPLOAD and RUMBLE against the twin's 0x29, 0x36, 0x3C and 0x?3F reply, a level back to 0 included; a STATUS
 #      torn by a second transfer abandoned and the second published whole; each hello's levels from 0; a REQUEST
-#      owed with a STATUS first; and every SECTOR case of arm O's shape in the same run. Then verilator lints the
-#      master and hps_ocram_evt with the macro, and with MISTER_DISABLE_SPI_EVT
+#      owed with a STATUS first; and every SECTOR case of arm O's shape in the same run. A second shape has the
+#      events tier without the SECTOR tier (OSD beside it, at 33.8688 MHz): the same cases less the REQUEST order,
+#      and no BIND record at the bind. Then verilator lints the master and hps_ocram_evt with the macro, without the
+#      SECTOR tier, and with MISTER_DISABLE_SPI_EVT
 #   J  the twin (tb/golden/, frozen by tb/golden/freeze.sh from one commit): every tb/ocram_tb.sv shape that arms O,
 #      U, A, I and Y build (diag, osd, sec, fio, mnt at 33.8688 and 20 MHz, uio at both and without HDMI, lane, evt,
-#      and Y's three removal shapes), compiled with OCRAM_TB_TWIN: the gold master, rx (and hps_ocram_evt) on the
-#      live pair's bench inputs, every output of the pair compared x-aware after every edge of clk and clk_sys, the
-#      nets between master and rx not compared; plain only, under every seed. Passes when every run passes and prints
+#      and Y's three removal shapes; not arm I's events shape without SECTOR, which the frozen master stops),
+#      compiled with OCRAM_TB_TWIN: the gold master, rx (and hps_ocram_evt) on the live pair's bench inputs, every
+#      output of the pair compared x-aware after every edge of clk and clk_sys, the nets between master and rx not
+#      compared; plain only, under every seed. Passes when every run passes and prints
 #      "TWIN: N edges compared, 0 mismatches" with N above 0. The live files are sys/hps_ocram_*.sv and sys/ocram_*.sv
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
@@ -651,11 +654,14 @@ aarm() {
 IB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
 ID="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
 ID="$ID -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_EVT"
+# the events tier without the SECTOR tier: no BIND record, no REQUEST
+IN="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_EVT"
 iarm() {
   : > "$1"; n=0; f=0
   for m in plain cdc; do
-    for c in evt33 evt20; do
-      case $c in evt33) D="$ID -DOCRAM_TB_SYS_HP_PS=14762";; evt20) D="$ID -DOCRAM_TB_SYS_HP_PS=25000";; esac
+    for c in evt33 evt20 evtns33; do
+      case $c in evt33) D="$ID -DOCRAM_TB_SYS_HP_PS=14762";; evt20) D="$ID -DOCRAM_TB_SYS_HP_PS=25000";;
+        evtns33) D="$IN -DOCRAM_TB_SYS_HP_PS=14762";; esac
       d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
       echo "-- the bench compiles ($c, $m)" >> "$1"
       if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/evtI_${c}_$m.vvp" $IB > "$O/evtI_${c}_$m.err" 2>&1; then
@@ -676,6 +682,7 @@ iarm() {
   if command -v verilator >/dev/null 2>&1; then
     vok=1
     for VS in "evt:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_EVT" \
+              "evtns:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_EVT" \
               "evtall:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_EVT" \
               "evtoff:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_EVT -DMISTER_DISABLE_SPI_EVT"; do
       vn=${VS%%:*}; VF=${VS#*:}
