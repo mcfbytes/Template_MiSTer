@@ -2973,6 +2973,9 @@ task dm_build;
 			dm_entry(e, 3, 32'h00020000, 32'h04000, 32'h02000, 0, 0, 0);           // OSDBUF 2.0
 			dm[16 + 32 * e + 8] = TB_MENU ? 32'h00140100 : 32'h00100100;              // K0 {rows, bytes per row}
 			dm[16 + 32 * e + 9] = 32'h01000000;                                        // K1 {FIFO entries, 0}
+`ifdef MISTER_DISABLE_SPI_OSD
+			dm[16 + 32 * e + 10] = 32'd1;                                              // K2: no link row write
+`endif
 			e = e + 1;
 		end
 		if (TB_EVT) begin
@@ -5900,6 +5903,49 @@ task tier_cases;
 	end
 endtask
 
+`ifdef MISTER_DISABLE_SPI_OSD
+// Arm Y: with MISTER_DISABLE_SPI_OSD the rows come from the OSDBUF block alone and draw; an SPI row write (0x20, and
+// 0x28 with its highres bit) changes no byte and no box height; the 0x4x control words still work; K2 bit 0 reads 1.
+task rm_osd_case;
+	integer r, i, n;
+	begin
+		$display("-- MISTER_DISABLE_SPI_OSD: OSDBUF K2 bit 0 reads 1");
+		rd("OSD K2: the link's row writes are not built", DIRB + 21'h40 + 21'h80 * TB_E_OSD + 21'h28, 32'd1);
+		$display("-- MISTER_DISABLE_SPI_OSD: rows over LW draw; the 0x4x control words set the box");
+		ena_up;
+		osd_lo;
+		for (r = 0; r < 8; r = r + 1) lw_row(r, 7);
+		osd_drain;
+		ob_cmp("rows 0-7 over LW", 0, 8);
+		osd_check("rows 0-7 over LW, drawn", 64, 3);
+		$display("-- MISTER_DISABLE_SPI_OSD: an SPI row write changes nothing, highres included");
+		spi_osd_begin(8'h22);
+		for (i = 0; i < 256; i = i + 1) spi_w({8'h00, ~ob[2*256 + i]});
+		spi_osd_end;
+		spi_osd_begin(8'h28);
+		for (i = 0; i < 256; i = i + 1) spi_w(16'h00A5);
+		spi_osd_end;
+		settle;
+		ob_cmp("after SPI writes of rows 2 and 8", 0, 8);
+		n = 0;
+		for (i = 8*256; i < 9*256; i = i + 1)
+			n = n + (hdmi_osd.osd_buffer[i] === 8'hA5) + (vga_osd.osd_buffer[i] === 8'hA5);
+		check("row 8: no byte of the SPI write landed", n, 0);
+		check("highres not set by 0x28: 64 lines", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+		osd_check("the image drawn as before", 64, 3);
+		$display("-- MISTER_DISABLE_SPI_OSD: a row 8 byte over LW sets highres, the disable clears it");
+		lw_row(8, 7);
+		osd_drain;
+		repeat (4) @(negedge clk_sys);
+		check("highres from an LW byte: 128 lines", {hdmi_osd.osd_h == 128, vga_osd.osd_h == 128}, 2'b11);
+		osd_lo;
+		repeat (4) @(negedge clk_sys);
+		check("the disable clears it: 64 lines", {hdmi_osd.osd_h == 64, vga_osd.osd_h == 64}, 2'b11);
+		host_end;
+	end
+endtask
+
+`endif
 initial begin
 	repeat (4) @(negedge clk);
 	dir_cases;
@@ -5907,6 +5953,9 @@ initial begin
 	decode_sweep;
 	dir_causes;
 	tier_cases;
+`ifdef MISTER_DISABLE_SPI_OSD
+	rm_osd_case;
+`endif
 	ena_summary(0);
 	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",
 	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);

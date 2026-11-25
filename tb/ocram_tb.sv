@@ -200,8 +200,20 @@ localparam integer ROWS = 20;
 localparam integer ROWS = 16;
 `endif
 localparam  [15:0] ROWS16 = ROWS;
+// the removals' declared bits: C_CAPS 16 MISTER_DISABLE_SPI_BLK, 17 MISTER_DISABLE_SPI_OSD
+`ifdef MISTER_DISABLE_SPI_BLK
+localparam RMB_B = 1;
+`else
+localparam RMB_B = 0;
+`endif
+`ifdef MISTER_DISABLE_SPI_OSD
+localparam RMO_B = 1;
+`else
+localparam RMO_B = 0;
+`endif
 localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0) |
-                               (FIO_B ? 32'h2 : 32'h0) | (SEC_B ? 32'h400 : 32'h0) | (MNT_B ? 32'h1 : 32'h0);
+                               (FIO_B ? 32'h2 : 32'h0) | (SEC_B ? 32'h400 : 32'h0) | (MNT_B ? 32'h1 : 32'h0)
+                               | (RMB_B ? 32'h1_0000 : 32'h0) | (RMO_B ? 32'h2_0000 : 32'h0);
 localparam [31:0] C_K8_EXP   = {ROWS16, 16'd256};
 
 localparam integer M_NORMAL = 0, M_SECURE_REFUSE = 1, M_NEVER = 2;
@@ -380,6 +392,14 @@ hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP
 // The two real osd.v instances: A only over SPI, B only from the OCRAM writer.
 reg         io_osd_a = 1'b0, io_strobe_a = 1'b0;
 reg  [15:0] io_din_a = 16'd0;
+`ifdef MISTER_DISABLE_SPI_OSD
+// With MISTER_DISABLE_SPI_OSD osd A builds no SPI row write: each SPI row must change nothing in it, and the bench
+// then writes the row into A through its tier port, so A stays the reference B is compared with.
+reg         ref_we = 1'b0;
+reg  [12:0] ref_addr = 13'd0;
+reg   [7:0] ref_byte = 8'd0;
+reg   [7:0] ref_row [0:255];
+`endif
 
 osd osd_spi
 (
@@ -391,7 +411,11 @@ osd osd_spi
 	.din(24'd0), .de_in(1'b0), .vs_in(1'b0), .hs_in(1'b0),
 	.dout(), .de_out(), .vs_out(), .hs_out(),
 	.osd_status(),
+`ifdef MISTER_DISABLE_SPI_OSD
+	.lw_we(ref_we), .lw_addr(ref_addr), .lw_byte(ref_byte)
+`else
 	.lw_we(1'b0), .lw_addr(13'd0), .lw_byte(8'd0)
+`endif
 );
 
 osd osd_ocr
@@ -706,12 +730,32 @@ endtask
 // The SPI model's OSDCMDWRITE: 0x20 | row, then the row's 256 bytes, as osd.v's command protocol takes them.
 task spi_row(input integer row);
 	integer j;
+`ifdef MISTER_DISABLE_SPI_OSD
+	integer nb;
+	reg [21:0] h0;
+`endif
 	begin
+`ifdef MISTER_DISABLE_SPI_OSD
+		for (j = 0; j < 256; j = j + 1) ref_row[j] = osd_spi.osd_buffer[row*256 + j];
+		h0 = osd_spi.osd_h;
+`endif
 		@(negedge clk_sys); io_osd_a = 1'b1;
 		spi_word(16'h0020 | row[15:0]);
 		for (j = 0; j < 256; j = j + 1) spi_word({8'd0, rowdata[row*256 + j]});
 		@(negedge clk_sys); io_osd_a = 1'b0;
 		@(negedge clk_sys);
+`ifdef MISTER_DISABLE_SPI_OSD
+		nb = 0;
+		for (j = 0; j < 256; j = j + 1) if (osd_spi.osd_buffer[row*256 + j] !== ref_row[j]) nb = nb + 1;
+		check("MISTER_DISABLE_SPI_OSD: the 0x20 row write changes no byte of osd A", nb, 0);
+		repeat (2) @(negedge clk_sys);
+		check("MISTER_DISABLE_SPI_OSD: nor its highres (its box height)", osd_spi.osd_h, h0);
+		for (j = 0; j < 256; j = j + 1) begin
+			@(negedge clk_sys); ref_we = 1'b1; ref_addr = row*256 + j; ref_byte = rowdata[row*256 + j];
+		end
+		@(negedge clk_sys); ref_we = 1'b0;
+		@(negedge clk_sys);
+`endif
 	end
 endtask
 

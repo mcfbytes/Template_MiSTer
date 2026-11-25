@@ -107,9 +107,12 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                                     [d for _, d in TIER_MACROS]),
                # the SECTOR tier needs MISTER_LW (its HPS_BUS bits) and excludes the LW SECTOR block and DIAG
                ('ocram-sec-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=1', 'MISTER_LW']),
-               ('ocram-osd-sec-lw-pad', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
-                                         'MISTER_OCRAM_SECTOR_FRAME=588', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
-                                         'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD', 'MISTER_DISABLE_SPI_PAD']),
+               # with the three removals: the Template's hps_io has VDNUM 3, its slots 0 and 1 unused
+               ('ocram-osd-sec-lw-spioff', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
+                                            'MISTER_OCRAM_SECTOR_FRAME=588', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
+                                            'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD', 'MISTER_DISABLE_SPI_PAD',
+                                            'MISTER_DISABLE_SPI_OSD', 'MISTER_DISABLE_SPI_BLK',
+                                            'MISTER_DISABLE_SPI_BLK_UNUSED=3']),
                # the download tier: alone, with the OSD tier and DIAG, beside the SECTOR tier and every LW tier but
                # the lane (the lane and the download player cannot share the link)
                ('ocram-fio', ['MISTER_OCRAM', 'MISTER_OCRAM_FIO']),

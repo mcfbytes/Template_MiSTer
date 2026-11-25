@@ -311,7 +311,7 @@ bitstream builds, so an entry's index (and its PENDING, OWNED and OPEN bits) dep
 |---|---|---|---|---|---|---|---|
 | 1 | PAD | `0x00010001` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap; K8 `{spinner FIFO, keyed slots}` = `0x00100018` |
 | 2 | SECTOR | `0x00020000` | `0x08000` / `0x08000` | `0x08000` | 1 | bit *k* per wired slot (`0x1`-`0x7`) | see SECTOR |
-| 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000` |
+| 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000`; K2 bit 0: the link's row writes are not built (`MISTER_DISABLE_SPI_OSD`, PROVISIONAL), else 0 |
 | 4 | EVT | `0x00020000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0xF` | K0 = 4: the status words |
 | 5 | LANE | `0x00010002` | `0x06000` / `0x01000` | `0x06024` | 3 | `0x7` | see LANE |
 
@@ -531,6 +531,10 @@ the SPI one.
   draws into the next program's OSD.
 - **No atomic flip:** a repaint is visible as it lands, as over SPI.
 - **Still on SPI:** enable/disable, the info box, rotation and `osd_status`. The pixel path is upstream's.
+- **`MISTER_DISABLE_SPI_OSD`** (PROVISIONAL; area-critical and test-only, never a default): `osd.v` builds no SPI
+  write command (`0x20`), in both instances, so this block's bytes are the only image and highres comes from them
+  alone; the `0x4x` control words stay on SPI. Declared by K2 bit 0. The build stops at
+  `spi_osd_off_needs_an_osd_tier` without an OSD tier (this block, or `MISTER_OCRAM_OSD`).
 - **Host rules:** compare `drops` around a repaint and store again if it moved; send SPI OSD control words only at
   `level` = 0, so a late byte of rows 8-15 cannot set highres after a disable.
 - **Cost:** the FIFO, 256 x 47 bits (two M10K). Nothing of the block reaches a video clock.
