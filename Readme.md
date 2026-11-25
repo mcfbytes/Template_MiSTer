@@ -51,6 +51,9 @@ MISTER_LW                | LW bridge framework: the lightweight-bridge window be
 LW_DIAG                  | LW window diagnostics readable (debug builds only)
 MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot (with MISTER_LW_SECTOR_FRAME, MISTER_LW_BLKSZ, MISTER_LW_CARD*)
 MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)
+MISTER_OCRAM             | OCRAM mailbox floor, test cores only (docs/OCRAM_MAILBOX.md)
+MISTER_OCRAM_OSD         | OCRAM mailbox OSD tier
+MISTER_OCRAM_SECTOR_SLOT | OCRAM mailbox SECTOR tier on this hps_io slot (with MISTER_OCRAM_SECTOR_FRAME, MISTER_OCRAM_SECTOR_GAP, MISTER_OCRAM_BLKSZ); needs MISTER_LW
 
 
 #### Optional scaler features

@@ -139,14 +139,15 @@ without reply capture, measured on a larger core, took 165-177 ALMs plus 6-7 for
 `docs/OCRAM_MAILBOX.md` proposes a third carrier for bulk data, beside SPI and this window. The HPS writes records
 into its own 64 KB on-chip RAM, and the core fetches them as a master on the FPGA-to-HPS bridge, which `sys/` already
 instantiates with no port connected. The payload waits in the HPS's RAM, so its tiers cost logic and no block memory, and
-the HPS never issues an access the fabric must answer. **It is a design: nothing in `sys/` builds it, and none of its
-macros exists.**
+the HPS never issues an access the fabric must answer. **Its floor, OSD tier and SECTOR tier are built, for test cores
+only; its other tiers are a design.**
 
-It moves no interface in this document. If its block tier is built, `lw_blk_mux` becomes a wrapper around a
-plain-port mux that both paths feed, and `hps_io` gains one output, its commit mark beside `HPS_BUS[380]`; no
-existing bus bit, port or hooking line here moves. The two paths are independent: either floor builds without the other, each
-function has its own macro on each path, SPI stays under both, and a host binds one carrier per function. Where both
-are built the proposal is:
+It moves no interface in this document. Its SECTOR tier (`MISTER_OCRAM_SECTOR_SLOT`) feeds the same SECTOR bits of
+`HPS_BUS` the SECTOR block feeds, through this window, so it needs `MISTER_LW`, the core hooks its slot through
+`lw_blk_mux` as below, and `hps_io` builds the commit mark under either SECTOR macro; a build of both stops, one slot
+having one feeder. No existing bus bit, port or hooking line here moves. Otherwise either floor builds without the
+other, each function has its own macro on each path, SPI stays under both, and a host binds one carrier per function.
+Where both are built the proposal is:
 
 | function | carrier proposed | why |
 |---|---|---|
@@ -851,7 +852,11 @@ and have no presence bit.
 | `[374:372]` | from core | event levels `{upload pending, info pending, a block request stands}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
-| `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT`); presence, constant 1: the mark |
+| `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT` or `MISTER_OCRAM_SECTOR_SLOT`); presence, constant 1: the mark |
+
+The primary's bits (`[95]`-`[127:114]` to the core, `[166:132]`, `[377]` and `[380]`-`[381]` from it) are also fed and
+read by the OCRAM mailbox's SECTOR feeder (`MISTER_OCRAM_SECTOR_SLOT`, `docs/OCRAM_MAILBOX.md`) with the same meaning;
+the window stays the one driver of every to-core bit, and lists no SECTOR entry in that build.
 | `[383:382]` | - | reserved: nothing drives them; every reader ignores them |
 
 ## What a host must not assume

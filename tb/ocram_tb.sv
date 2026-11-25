@@ -15,7 +15,7 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 
-// Standalone: hps_ocram_master (+ hps_ocram_diag, hps_ocram_tsink), hps_ocram_osd and sys/lw_cdc.sv with
+// Standalone: hps_ocram_master (+ hps_ocram_diag, hps_ocram_tsink), hps_ocram_rx (+ hps_ocram_sfeed) and sys/lw_cdc.sv with
 // MISTER_OCRAM and MISTER_OCRAM_OSD (and, in the first compile shape, MISTER_OCRAM_DIAG), a small MARK and poll
 // period, clk_100m, and a clk_sys of 50 MHz unrelated in phase. The AXI slave models the 64 KB OCRAM (a word
 // array) with a seeded latency and ready-delay distribution (or a fast one for the torture cases), and modes
@@ -51,6 +51,7 @@ localparam integer MARKC = `MISTER_OCRAM_MARK;
 localparam [15:0] H_HELLO = 16'h0000;
 localparam [15:0] H_BIND  = 16'h0004;
 localparam [15:0] H_LINE  = 16'h0008;
+localparam [15:0] H_SECTOR = 16'h000C;
 localparam [15:0] H_IDX2  = 16'h0018;
 localparam [15:0] H_IDX3  = 16'h001C;
 localparam [15:0] H_IDX4  = 16'h0020;
@@ -79,9 +80,11 @@ localparam [31:0] C_HELLO_STOP  = 32'h5154_0000;
 localparam [31:0] C_VERSION_1_0 = 32'h0001_0000;
 localparam [31:0] MARK_HEADER   = 32'h2303_0028;
 localparam [31:0] VERDICT_HEADER= 32'h2504_0008;
+localparam [31:0] REQ_HEADER    = 32'h2100_0001;   // kind REQUEST, arg 0, len 1
 localparam [31:0] C_RING2_OSD   = 32'h182C_0800;
 localparam [31:0] C_RING3_EVT   = 32'h212C_1000;
 localparam [31:0] C_RING4_TS    = 32'hF834_1C00;
+localparam [31:0] C_RING4_SEC   = 32'h1034_1C00;   // kind 2 (SECTOR), no line, 8192 words at 0x7000
 localparam [31:0] GPO_IO        = 32'h8000_0000;   // bit 31: the I/O view, RUN 0
 localparam [31:0] GPO_RUN       = 32'h9000_0000;   // bit 31 and RUN
 localparam [31:0] GPO_FRZ       = 32'h0200_0000;   // bit 25: the DIAG freeze knob
@@ -96,13 +99,38 @@ localparam TS_B = 1;
 `else
 localparam TS_B = 0;
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam SEC_B = 1;
+`else
+localparam SEC_B = 0;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_FRAME
+localparam integer SFRAME = `MISTER_OCRAM_SECTOR_FRAME;
+`else
+localparam integer SFRAME = 588;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_GAP
+localparam integer SGAP = `MISTER_OCRAM_SECTOR_GAP;
+`else
+localparam integer SGAP = 2;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam integer SSLOT = `MISTER_OCRAM_SECTOR_SLOT;
+`else
+localparam integer SSLOT = 1;
+`endif
+localparam  [2:0] SBLKSZ = 3'd3;                 // a CD core's: 2,352-byte frames
+// the SECTOR tier's C_K words: K0 {0, gap}, K1 {BLKSZ, wide}, K2 one descriptor, K4 {RD, slot, frame}, K5 32
+localparam [31:0] C_K0_EXP = SGAP;
+localparam [31:0] C_K1_EXP = {21'd0, SBLKSZ, 7'd0, 1'b1};
+localparam [31:0] C_K4_EXP = {8'h01, 4'd0, SSLOT[3:0], 3'd0, SFRAME[12:0]};
 `ifdef MENU_CORE
 localparam integer ROWS = 20;
 `else
 localparam integer ROWS = 16;
 `endif
 localparam  [15:0] ROWS16 = ROWS;
-localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | (TS_B ? 32'h10 : 32'h0);
+localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0);
 localparam [31:0] C_K8_EXP   = {ROWS16, 16'd256};
 
 localparam integer M_NORMAL = 0, M_SECURE_REFUSE = 1, M_NEVER = 2;
@@ -127,8 +155,16 @@ reg clk = 0;                 // clk_100m
 always #5.0 clk = ~clk;
 reg clk_host = 0;            // the host's own clock: 66.7 MHz, not a multiple of 100 MHz
 always #7.5 clk_host = ~clk_host;
-reg clk_sys = 0;             // 50 MHz, unrelated in phase to clk_100m
-initial begin #3.3; forever #10.0 clk_sys = ~clk_sys; end
+// 50 MHz, unrelated in phase to clk_100m; OCRAM_TB_SYS_HP_PS sets the half period in ps (14762: 33.8688 MHz, a CD core's;
+// 25000: the Template's 20 MHz)
+`ifdef OCRAM_TB_SYS_HP_PS
+localparam real SYS_HP = `OCRAM_TB_SYS_HP_PS / 1000.0;
+`else
+localparam real SYS_HP = 10.0;
+`endif
+reg clk_sys = 0;
+reg sys_run = 1'b1;          // 0 stops clk_sys low (the SECTOR tier's frozen-clock case)
+initial begin #3.3; forever begin #(SYS_HP); clk_sys = sys_run ? ~clk_sys : 1'b0; end end
 wire clk_video = clk_sys;
 
 //////////////////////////////  the DUT  ////////////////////////////////////
@@ -156,13 +192,22 @@ wire [31:0] ocram_c0_rdata;
 wire        s_hello, s_live, s_tick, osd_bind;
 wire        c0_rest, c0_fault, c0_mid, c0_open;
 wire [15:0] osd_rows, osd_deepest;
+wire        sec_ask, evt_stop, c0_sfault, c0_smid, c0_sbind, c0_wide, rq_post, rq_start;
+wire [31:0] rq_lba;
+// the SECTOR slot's core side (the window's xsec nets): the bench's consumer model drives the request
+reg         x_reset = 1'b0, x_hps_ack = 1'b0, x_req = 1'b0, x_commit = 1'b0;
+reg  [31:0] x_lba = 32'd0;
+reg         x_wide = 1'b1;
+wire        x_en, x_ack, x_wr;
+wire [15:0] x_dat;
+wire [13:0] x_adr;
 wire        ocram_we;
 wire [12:0] ocram_addr;
 wire  [7:0] ocram_byte;
 reg   [1:0] sel_m = 2'b00;   // both osd selects low: the quiet guard
 reg         view_m = 1'b1;   // the I/O view
 
-hps_ocram_master dut
+hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ)) dut
 (
 	.clk(clk),
 	.hps_rst_n(hps_rst_n),
@@ -174,6 +219,8 @@ hps_ocram_master dut
 	.s_hello(s_hello), .s_live(s_live), .s_tick(s_tick), .osd_bind(osd_bind),
 	.c0_rest(c0_rest), .c0_fault(c0_fault), .c0_mid(c0_mid), .c0_open(c0_open),
 	.osd_rows(osd_rows), .osd_deepest(osd_deepest),
+	.sec_ask(sec_ask), .evt_stop(evt_stop), .c0_sfault(c0_sfault), .c0_smid(c0_smid), .c0_sbind(c0_sbind),
+	.c0_wide(c0_wide), .rq_post(rq_post), .rq_lba(rq_lba), .rq_start(rq_start),
 	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst),
 	.awlock(awlock), .awcache(awcache), .awprot(awprot), .awuser(awuser), .awvalid(awvalid),
 	.awready(awready),
@@ -185,7 +232,7 @@ hps_ocram_master dut
 	.rid(rid), .rdata(rdata), .rresp(rresp), .rlast(rlast), .rvalid(rvalid), .rready(rready)
 );
 
-hps_ocram_osd #(.ROWS(ROWS)) u_osd
+hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP(SGAP)) u_osd
 (
 	.clk(clk),
 	.clk_sys(clk_sys),
@@ -194,6 +241,15 @@ hps_ocram_osd #(.ROWS(ROWS)) u_osd
 	.s_live(s_live),
 	.s_tick(s_tick),
 	.bind_en(osd_bind),
+	.sec_ask(sec_ask),
+	.evt_stop(evt_stop),
+	.c_sfault(c0_sfault),
+	.c_smid(c0_smid),
+	.c_sbind(c0_sbind),
+	.c_wide(c0_wide),
+	.rq_post(rq_post),
+	.rq_lba(rq_lba),
+	.rq_start(rq_start),
 	.c_rest(c0_rest),
 	.c_fault(c0_fault),
 	.c_mid(c0_mid),
@@ -212,7 +268,9 @@ hps_ocram_osd #(.ROWS(ROWS)) u_osd
 	.view(view_m),
 	.we(ocram_we),
 	.addr(ocram_addr),
-	.dbyte(ocram_byte)
+	.dbyte(ocram_byte),
+	.x_reset(x_reset), .x_hps_ack(x_hps_ack), .x_req(x_req), .x_lba(x_lba), .x_commit(x_commit), .x_wide(x_wide),
+	.x_en(x_en), .x_ack(x_ack), .x_wr(x_wr), .x_dat(x_dat), .x_adr(x_adr)
 );
 
 // The two real osd.v instances: A only over SPI, B only from the OCRAM writer.
@@ -254,10 +312,24 @@ integer mode = M_NORMAL;
 reg     fast_lat = 1'b0;               // the torture cases: a short latency and no ready delays
 reg     inj_rd_en = 0, inj_wr_en = 0;
 reg [15:0] inj_rd_addr = 0, inj_wr_addr = 0;
+// the SECTOR cases' stalls: the next write of the data word stall_wd, or the next read of stall_ra, waits stall_n
+reg     stall_w_en = 0, stall_r_en = 0, stall_on = 0;
+reg [31:0] stall_wd = 0;
+reg [15:0] stall_ra = 0;
+integer stall_n = 3000;
+// the transaction log: every completed transaction {we, off, data} while tl_on
+reg     tl_on = 0;
+integer tl_n = 0;
+reg        tl_we  [0:4095];
+reg [15:0] tl_off [0:4095];
+reg [31:0] tl_dat [0:4095];
 
 function integer lat_pick;
 	integer r;
 	begin
+`ifdef OCRAM_TB_RATE
+		if (1) lat_pick = 10; else
+`endif
 		if (fast_lat) lat_pick = 1;
 		else begin
 			r = ($random(seed) & 32'h7FFF_FFFF) % 1000;
@@ -269,6 +341,9 @@ function integer lat_pick;
 endfunction
 function integer rdy_pick;
 	begin
+`ifdef OCRAM_TB_RATE
+		if (1) rdy_pick = 0; else
+`endif
 		if (fast_lat) rdy_pick = 0;
 		else rdy_pick = ($random(seed) & 32'h7FFF_FFFF) % 4;
 	end
@@ -314,6 +389,9 @@ always @(posedge clk) begin
 		if ((aw_seen || (awvalid && awready)) && (w_seen || (wvalid && wready))) begin
 			wst <= WS_LAT;
 			wlat <= lat_pick();
+			if (stall_w_en && (w_seen ? wdata_q : wdata) == stall_wd) begin
+				wlat <= stall_n; stall_w_en <= 1'b0; stall_on <= 1'b1;
+			end
 			awdly <= rdy_pick();
 			wdly  <= rdy_pick();
 			aw_seen <= 1'b0;
@@ -332,6 +410,10 @@ always @(posedge clk) begin
 		if (bready) begin                  // the handshake ends it; a stale valid would be taken
 			bvalid_r <= 1'b0;
 			if (bresp_r == 2'b00) mem[waddr_q[15:2]] <= wdata_q;
+			if (tl_on && tl_n < 4096) begin
+				tl_we[tl_n] = 1'b1; tl_off[tl_n] = waddr_q[15:0]; tl_dat[tl_n] = wdata_q; tl_n = tl_n + 1;
+			end
+			stall_on <= 1'b0;
 			wst <= WS_IDLE;
 		end
 		else bvalid_r <= 1'b1;             // hold with its payload until BREADY
@@ -370,6 +452,7 @@ always @(posedge clk) begin
 		           (inj_rd_en && (araddr[15:0] == inj_rd_addr));
 		if (inj_rd_en && (araddr[15:0] == inj_rd_addr)) inj_rd_en <= 1'b0;
 		rlat <= lat_pick();
+		if (stall_r_en && araddr[15:0] == stall_ra) begin rlat <= stall_n; stall_r_en <= 1'b0; stall_on <= 1'b1; end
 		ardy <= rdy_pick();
 		rst  <= RS_LAT;
 	end
@@ -378,7 +461,12 @@ always @(posedge clk) begin
 		else begin rlat <= rlat - 16'd1; rvalid_r <= 1'b0; end
 	end
 	RS_RSP: begin
-		if (rready) begin rvalid_r <= 1'b0; rst <= RS_IDLE; end
+		if (rready) begin
+			rvalid_r <= 1'b0; rst <= RS_IDLE; stall_on <= 1'b0;
+			if (tl_on && tl_n < 4096) begin
+				tl_we[tl_n] = 1'b0; tl_off[tl_n] = raddr_q[15:0]; tl_dat[tl_n] = rdata_r; tl_n = tl_n + 1;
+			end
+		end
 		else rvalid_r <= 1'b1;
 	end
 	default: rst <= RS_IDLE;
@@ -640,6 +728,7 @@ integer m_hello = 0;
 integer m_term = 0;
 integer m_hidx_reads = 0, m_hello_reads = 0;
 integer m_deepest = 0;
+integer rq_published = 0;    // REQUEST records whose head store was seen
 integer tail_seen = 0;        // the master's last-read EVT tail, not the host's last store
 
 // the EVT records
@@ -653,8 +742,8 @@ integer last_mark_start = 0, gap_min = 1000000, gap_max = 0, gap_n = 0;
 
 // the hello's stores, in the order the master made them
 integer hseq_n = 0;
-reg [15:0] hseq_addr [0:15];
-reg [31:0] hseq_data [0:15];
+reg [15:0] hseq_addr [0:31];
+reg [31:0] hseq_data [0:31];
 reg in_hello = 0;
 
 // the snapshot and the records the host has consumed
@@ -666,6 +755,8 @@ integer s_ns = 0, s_flood = 0;
 integer s_rd_hist [0:15];
 integer s_wr_hist [0:15];
 reg [31:0] vd_last [0:7];
+integer    rq_n = 0;              // REQUEST records the host has taken
+reg [31:0] rq_lba_log [0:255];
 integer vd_seen = 0;
 
 function integer bin_of(input integer lat);
@@ -760,6 +851,7 @@ always @(posedge clk) begin
 		if (araddr[31:16] !== 16'hFFFF) merr("ARADDR's upper half");
 		if (!(araddr[15:0] === H_HELLO || araddr[15:0] === H_BIND || araddr[15:0] === H_LINE ||
 		      araddr[15:0] === H_IDX2 || araddr[15:0] === H_IDX3 || araddr[15:0] === H_IDX4 ||
+		      (SEC_B && araddr[15:0] === H_SECTOR) ||
 		      in_osd(araddr[15:0]) || in_ts(araddr[15:0])))
 			merr("ARADDR outside the control page's host half and the ring spans");
 		if (arprot !== {1'b0, exp_ns[0], 1'b0}) merr("ARPROT");
@@ -837,7 +929,7 @@ always @(posedge clk) begin
 		if (in_hello) begin
 			hseq_addr[hseq_n] = awaddr[15:0];
 			hseq_data[hseq_n] = wdata;
-			if (hseq_n < 15) hseq_n = hseq_n + 1;
+			if (hseq_n < 31) hseq_n = hseq_n + 1;
 			if (awaddr[15:0] == C_HELLO) in_hello = 0;
 		end
 	end
@@ -890,6 +982,8 @@ always @(posedge clk) begin
 				end else if (rec_kind_m == 8'h25) begin
 					if (wdata !== VERDICT_HEADER) merr("a VERDICT header word");
 					verdict_started = verdict_started + 1;
+				end else if (SEC_B && rec_kind_m == 8'h21) begin
+					if (wdata !== REQ_HEADER) merr("a REQUEST header word");
 				end else merr("an EVT header of an unknown kind");
 			end else if (rec_writes > rec_len_m) begin
 				merr("an EVT record longer than its header's length");
@@ -908,6 +1002,7 @@ always @(posedge clk) begin
 				pub_head = wdata[15:0];
 				pub_words = pub_words + rec_writes;
 				if (rec_kind_m == 8'h23) mark_published = mark_published + 1;
+				else if (rec_kind_m == 8'h21) rq_published = rq_published + 1;
 				else verdict_published = verdict_published + 1;
 				b = (pub_head - (tail_seen & 16'hFFFF)) & 16'hFFFF;
 				if (b <= EVT_WORDS && b > m_deepest) m_deepest = b;
@@ -964,6 +1059,10 @@ task evt_take(output integer got);
 					for (i = 0; i < 8; i = i + 1)
 						vd_last[i] = evt_word(host_tail + 1 + i[15:0]);
 					vd_seen = vd_seen + 1;
+				end else if (SEC_B && kind == 8'h21) begin
+					check("REQUEST record: header", hdr, REQ_HEADER);
+					if (rq_n < 256) rq_lba_log[rq_n] = evt_word(host_tail + 16'd1);
+					rq_n = rq_n + 1;
 				end else begin
 					check("EVT record: a known kind", kind, 8'h23);
 				end
@@ -1175,8 +1274,19 @@ task case2;
 		peek(C_IDX4, v);    check("C_IDX[4] = 0", v, 32'd0);
 		peek(C_RING4, v);   check("C_RING[4] descriptor", v, C_RING4_TS);
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		peek(C_IDX4, v);    check("C_IDX[4] = 0", v, 32'd0);
+		peek(C_RING4, v);   check("C_RING[4] descriptor (SECTOR)", v, C_RING4_SEC);
+		peek(16'h00D0, v);  check("C_K[0] {0, gap}", v, C_K0_EXP);
+		peek(16'h00D4, v);  check("C_K[1] {BLKSZ, wide}", v, C_K1_EXP);
+		peek(16'h00D8, v);  check("C_K[2] one descriptor", v, 32'd1);
+		peek(16'h00E0, v);  check("C_K[4] {RD, slot, frame}", v, C_K4_EXP);
+		peek(16'h00E4, v);  check("C_K[5] 32 LBA bits", v, 32'd32);
+		peek(16'h00E8, v);  check("C_K[6] not stored", v, 32'd0);
+`else
 		peek(16'h00D0, v);  check("C_K[0] not stored", v, 32'd0);
 		peek(16'h00E4, v);  check("the other C_RING words not stored", v, 32'd0);
+`endif
 		gpo_store(GPO_IO);
 		wait_stopped(1000, ok);
 		check("a stop stores the terminal value", ok, 1);
@@ -1384,8 +1494,9 @@ task case9;
 		ok1 = 0; i = 0;
 		while (!ok1 && i < 100000) begin @(posedge clk); i = i + 1; if (line_out === 1'b1) ok1 = 1; end
 		check("the line rises with records unread", ok1, 1);
+		// 16 poll periods: one 200-2000-cycle transaction of the model's 5 % tail is not enough to stall the count
 		h0 = m_hidx_reads; v0 = m_hello_reads;
-		repeat (4 << POLLC) @(posedge clk);
+		repeat (16 << POLLC) @(posedge clk);
 		check("the tail is re-read more often than it is polled", (m_hidx_reads - h0) > (m_hello_reads - v0), 1);
 		repeat (40) @(posedge clk);
 		peek(C_IDX3, v);
@@ -1611,6 +1722,9 @@ task case15;
 `ifdef MISTER_OCRAM_DIAG
 		check_hello_word(k, C_IDX4, 32'd0); k = k + 1;
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		check_hello_word(k, C_IDX4, 32'd0); k = k + 1;
+`endif
 		check_hello_word(k, C_BIND, 32'd0); k = k + 1;
 `ifdef MISTER_OCRAM_OSD
 		check_hello_word(k, C_RING2, C_RING2_OSD); k = k + 1;
@@ -1619,8 +1733,18 @@ task case15;
 `ifdef MISTER_OCRAM_DIAG
 		check_hello_word(k, C_RING4, C_RING4_TS); k = k + 1;
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		check_hello_word(k, C_RING4, C_RING4_SEC); k = k + 1;
+`endif
 `ifdef MISTER_OCRAM_OSD
 		check_hello_word(k, C_K8, C_K8_EXP); k = k + 1;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		check_hello_word(k, 16'h00D0, C_K0_EXP); k = k + 1;
+		check_hello_word(k, 16'h00D4, C_K1_EXP); k = k + 1;
+		check_hello_word(k, 16'h00D8, 32'd1); k = k + 1;
+		check_hello_word(k, 16'h00E0, C_K4_EXP); k = k + 1;
+		check_hello_word(k, 16'h00E4, 32'd32); k = k + 1;
 `endif
 		check_hello_word(k, C_HELLO, {16'h4F43, 16'h0A01}); k = k + 1;
 		check("the hello's store count", hseq_n, k);
@@ -2118,6 +2242,479 @@ task case27;
 endtask
 `endif
 
+// The SECTOR tier (MISTER_OCRAM_SECTOR_SLOT): the core's block reader on clk_sys, the host's SECTOR ring.
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam [15:0] SEC_BASE  = 16'h7000;
+localparam integer SEC_WORDS = 8192;
+localparam integer SREC = SFRAME + 2;       // a FRAME record's words: header, LBA, payload
+
+// the core: one request at a time; it falls with the ack's rise; the strobes land in cbuf; a frame ends at the fall
+reg  [15:0] cbuf [0:8191];
+integer     c_strobes = 0, c_frames = 0;
+reg         c_ack_d = 1'b0;
+always @(posedge clk_sys) begin
+	c_ack_d <= x_ack;
+	if (x_ack && !c_ack_d) x_req <= 1'b0;
+	if (x_wr) begin cbuf[x_adr] <= x_dat; c_strobes = c_strobes + 1; end
+	if (!x_ack && c_ack_d) c_frames = c_frames + 1;
+end
+task core_ask(input [31:0] lba);
+	integer j;
+	begin
+		for (j = 0; j < 2 * SFRAME; j = j + 1) cbuf[j] = 16'hDEAD;
+		@(negedge clk_sys); x_lba = lba; x_req = 1'b1;
+	end
+endtask
+task core_drop;
+	begin @(negedge clk_sys); x_req = 1'b0; end
+endtask
+task core_wait(input integer f0, input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 100) begin
+			if (c_frames > f0) ok = 1;
+			else begin @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+// a frame's payload word j: the LBA, a disc generation and the index
+function [31:0] sword(input [31:0] lba, input integer gen, input integer j);
+	sword = v_of({lba[11:0], gen[3:0], j[15:0]});
+endfunction
+// the frame as the core holds it: zeros from word z on (z = SFRAME: none)
+task core_check(input string what, input [31:0] lba, input integer gen, input integer z);
+	integer j, bad;
+	reg [31:0] w;
+	begin
+		bad = 0;
+		for (j = 0; j < SFRAME; j = j + 1) begin
+			w = (j >= z) ? 32'd0 : sword(lba, gen, j);
+			if ({cbuf[2 * j + 1], cbuf[2 * j]} !== w) begin
+				if (bad < 4) $display("   %s: word %0d: got %04h%04h exp %08h", what, j, cbuf[2*j+1], cbuf[2*j], w);
+				bad = bad + 1;
+			end
+		end
+		check(what, bad, 0);
+	end
+endtask
+
+// the host's SECTOR ring: records at the free-running word index sec_head, one H_IDX[4] store publishes them
+integer sec_head = 0;
+task sec_put(input [31:0] v);
+	begin poke(SEC_BASE + ((sec_head[15:0] & (SEC_WORDS - 1)) << 2), v); sec_head = sec_head + 1; end
+endtask
+task sec_frame(input [31:0] lba, input integer gen);
+	integer j;
+	begin
+		sec_put({8'h10, 8'd0, SFRAME[15:0] + 16'd1});
+		sec_put(lba);
+		for (j = 0; j < SFRAME; j = j + 1) sec_put(sword(lba, gen, j));
+	end
+endtask
+task sec_publish;
+	begin poke(H_IDX4, {16'd0, sec_head[15:0]}); end
+endtask
+function [15:0] sec_tail(input dummy);
+	sec_tail = mem[C_IDX4 >> 2][15:0];
+endfunction
+task rq_drain;
+	integer got;
+	begin got = 1; while (got) evt_take(got); end
+endtask
+task rq_wait(input integer n0, input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 20) begin
+			rq_drain;
+			if (rq_n > n0) ok = 1;
+			else begin repeat (5) @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+task sec_session(input [15:0] nonce, input integer osd);
+	begin
+		reset_floor;
+		sec_head = 0; rq_n = 0; osd_head = 0;
+		x_req = 1'b0; x_reset = 1'b0;
+		start_session(0, 0, 0, nonce, ok);        // its zero_page clears H_SECTOR and H_IDX[4]
+		poke(H_SECTOR, 32'd1);
+		if (osd) poke(H_BIND, 32'h0000_0800);
+		wait_word(C_BIND, osd ? 32'h0000_0801 : 32'h0000_0001, 2000, ok);
+		check("C_BIND bit 0 is stored once the slot's mux is on the mailbox", ok, 1);
+		check("the slot's mux is on the mailbox (en_sys)", x_en, 1);
+	end
+endtask
+task wait_bind0(input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 100) begin
+			if (mem[C_BIND >> 2][0] === 1'b0) ok = 1;
+			else begin @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+// the index of the first log entry that writes off (with data d if dm), from k on; -1 if none
+function integer tl_find(input integer k, input [15:0] off, input [31:0] d, input dm, input we);
+	integer q;
+	begin
+		tl_find = -1;
+		for (q = tl_n - 1; q >= k; q = q - 1)
+			if (tl_we[q] == we && tl_off[q] == off && (!dm || tl_dat[q] == d)) tl_find = q;
+	end
+endfunction
+
+// S1. the bind and its transitions
+task sec_case1;
+	begin
+		$display("-- SECTOR: H_SECTOR bit 0 binds the slot: C_BIND bit 0 follows en_sys, 1, 0, 1; bit 11 apart");
+		sec_session(16'h0C01, 0);
+		poke(H_SECTOR, 32'd0);
+		wait_word(C_BIND, 32'd0, 2000, ok);
+		check("H_SECTOR bit 0 cleared: C_BIND bit 0 = 0", ok, 1);
+		check("the mux is back on SPI", x_en, 0);
+		poke(H_SECTOR, 32'd1);
+		wait_word(C_BIND, 32'd1, 2000, ok);
+		check("set again: C_BIND bit 0 = 1", ok, 1);
+		poke(H_BIND, 32'h0000_0800);
+		wait_word(C_BIND, 32'h0000_0801, 2000, ok);
+		check("the OSD bind beside it: C_BIND = 0x801", ok, 1);
+		check("C_CAPS has bit 4 (ring 4)", mem[C_CAPS >> 2][4], 1);
+	end
+endtask
+
+// S2. play, REQUEST post and re-post
+task sec_case2;
+	integer f0, n0;
+	begin
+		$display("-- SECTOR: a request with the ring empty posts one REQUEST; the frame plays; a new request re-posts");
+		sec_session(16'h0C02, 0);
+		n0 = rq_n;
+		core_ask(32'd1000);
+		rq_wait(n0, 2000, ok);
+		check("a REQUEST is posted", ok, 1);
+		check("its LBA", rq_lba_log[n0], 32'd1000);
+		repeat (40 << POLLC) @(posedge clk);
+		rq_drain;
+		check("one REQUEST while the request stands unanswered", rq_n - n0, 1);
+		f0 = c_frames;
+		sec_frame(32'd1000, 0); sec_publish;
+		core_wait(f0, 5000, ok);
+		check("the frame plays", ok, 1);
+		core_check("the frame's payload, as the core holds it", 32'd1000, 0, SFRAME);
+		wait_word(C_IDX4, {16'd0, sec_head[15:0]}, 1000, ok);
+		check("C_IDX[4] moves past the record", ok, 1);
+		n0 = rq_n;
+		core_ask(32'd1001);
+		rq_wait(n0, 2000, ok);
+		check("the next request posts its own REQUEST", ok && rq_lba_log[n0] == 32'd1001, 1);
+		f0 = c_frames;
+		sec_frame(32'd1001, 0); sec_publish;
+		core_wait(f0, 5000, ok);
+		core_check("the second frame's payload", 32'd1001, 0, SFRAME);
+		check("REQUEST records seen by the monitor", rq_published, rq_n);
+	end
+endtask
+
+// S3. prefetch several frames ahead
+task sec_case3;
+	integer f0, n0, k;
+	begin
+		$display("-- SECTOR: six frames prefetched ahead of the requests play in turn, with no REQUEST");
+		sec_session(16'h0C03, 0);
+		for (k = 0; k < 6; k = k + 1) sec_frame(32'd2000 + k, 0);
+		sec_publish;
+		n0 = rq_n;
+		for (k = 0; k < 6; k = k + 1) begin
+			f0 = c_frames;
+			core_ask(32'd2000 + k);
+			core_wait(f0, 5000, ok);
+			core_check($sformatf("prefetched frame %0d", k), 32'd2000 + k, 0, SFRAME);
+		end
+		rq_drain;
+		check("no REQUEST for a prefetched frame", rq_n - n0, 0);
+		wait_word(C_IDX4, {16'd0, sec_head[15:0]}, 200, ok);
+		check("C_IDX[4] at the head once the last word's done is back", ok, 1);
+	end
+endtask
+
+// S4. mismatch discard, S5. no request keeps the frame
+task sec_case4;
+	integer f0, n0;
+	begin
+		$display("-- SECTOR: frames for other LBAs are discarded up to the requested one; with no request a frame waits");
+		sec_session(16'h0C04, 0);
+		sec_frame(32'd3000, 0); sec_frame(32'd3001, 0); sec_frame(32'd3002, 0); sec_publish;
+		repeat (20 << POLLC) @(posedge clk);
+		check("no request: the frames wait, C_IDX[4] = 0", sec_tail(1'b0), 16'd0);
+		check("no request: no strobe", c_strobes > 0 && x_ack, 0);
+		f0 = c_frames;
+		core_ask(32'd3002);
+		core_wait(f0, 5000, ok);
+		check("the requested frame plays", ok, 1);
+		core_check("its payload (3000 and 3001 discarded)", 32'd3002, 0, SFRAME);
+		wait_word(C_IDX4, {16'd0, sec_head[15:0]}, 200, ok);
+		check("C_IDX[4] at the head once the last word's done is back", ok, 1);
+		n0 = rq_n;
+		core_ask(32'd3000);
+		rq_wait(n0, 2000, ok);
+		check("the discarded LBA is asked for again", ok && rq_lba_log[n0] == 32'd3000, 1);
+		f0 = c_frames;
+		sec_frame(32'd3000, 1); sec_publish;
+		core_wait(f0, 5000, ok);
+		core_check("the re-sent frame plays", 32'd3000, 1, SFRAME);
+	end
+endtask
+
+// S6. a disc swap: H_SECTOR bit 0 falls with 12 frames queued; none of them plays after the rebind
+task sec_case6;
+	integer f0, k, a, b;
+	begin
+		$display("-- SECTOR: a disc swap with 12 frames queued: the tail jumps to the head before C_BIND bit 0 = 0");
+		sec_session(16'h0C06, 0);
+		for (k = 0; k < 12; k = k + 1) sec_frame(32'd6000 + k, 0);
+		sec_publish;
+		repeat (8 << POLLC) @(posedge clk);
+		check("queued, unplayed: C_IDX[4] = 0", sec_tail(1'b0), 16'd0);
+		tl_n = 0; tl_on = 1;
+		poke(H_SECTOR, 32'd0);
+		wait_bind0(3000, ok);
+		tl_on = 0;
+		check("C_BIND bit 0 = 0", ok, 1);
+		check("every queued frame discarded: C_IDX[4] = the head", sec_tail(1'b0), sec_head[15:0]);
+		a = tl_find(0, C_IDX4, {16'd0, sec_head[15:0]}, 1, 1);
+		b = tl_find(0, C_BIND, 32'd0, 1, 1);
+		check("the C_IDX[4] store precedes the C_BIND bit-0 store", a >= 0 && b > a, 1);
+		check("the head was read for it (H_IDX[4] before the store)", tl_find(0, H_IDX4, 0, 0, 0) >= 0 &&
+		      tl_find(0, H_IDX4, 0, 0, 0) < a, 1);
+		for (k = 0; k < 12; k = k + 1) sec_frame(32'd6000 + k, 1);
+		sec_publish;
+		poke(H_SECTOR, 32'd1);
+		wait_word(C_BIND, 32'd1, 3000, ok);
+		check("the rebind", ok, 1);
+		for (k = 0; k < 12; k = k + 1) begin
+			f0 = c_frames;
+			core_ask(32'd6000 + k);
+			core_wait(f0, 5000, ok);
+			core_check($sformatf("after the swap, LBA %0d is the new disc's", 6000 + k), 32'd6000 + k, 1, SFRAME);
+		end
+	end
+endtask
+
+// S7. H_SECTOR dropped mid-frame: the frame finishes, the frame behind it is discarded
+task sec_case7;
+	integer f0, s0;
+	begin
+		$display("-- SECTOR: H_SECTOR bit 0 cleared mid-frame: that frame plays out whole, the next is discarded");
+		sec_session(16'h0C07, 0);
+		sec_frame(32'd8000, 0); sec_frame(32'd8001, 0); sec_publish;
+		f0 = c_frames; s0 = c_strobes;
+		core_ask(32'd8000);
+		i = 0; while (c_strobes < s0 + 40 && i < 400000) begin @(posedge clk); i = i + 1; end
+		poke(H_SECTOR, 32'd0);
+		core_wait(f0, 5000, ok);
+		check("the frame completes", ok, 1);
+		core_check("its payload is whole", 32'd8000, 0, SFRAME);
+		wait_bind0(3000, ok);
+		check("C_BIND bit 0 = 0 after it", ok, 1);
+		check("the frame behind it discarded: C_IDX[4] = the head", sec_tail(1'b0), sec_head[15:0]);
+		repeat (100) @(posedge clk_sys);
+		check("the mux is back on SPI", x_en, 0);
+	end
+endtask
+
+// S8. unbind while a REQUEST is part-written: the header and LBA stored, the head store pending
+task sec_case8;
+	integer n0, b, c, d, q, late;
+	begin
+		$display("-- SECTOR: H_SECTOR cleared while a REQUEST's head store is owed: the record completes first");
+		sec_session(16'h0C08, 0);
+		n0 = rq_n;
+		tl_n = 0; tl_on = 1;
+		stall_wd = 32'd7000; stall_n = 3000; stall_w_en = 1;    // the LBA's store: longer than a poll period
+		core_ask(32'd7000);
+		i = 0; while (!stall_on && i < 200000) begin @(posedge clk); i = i + 1; end
+		check("the REQUEST's LBA store is in flight", stall_on, 1);
+		poke(H_SECTOR, 32'd0);
+		wait_bind0(3000, ok);
+		repeat (20 << POLLC) @(posedge clk);
+		tl_on = 0;
+		check("C_BIND bit 0 = 0", ok, 1);
+		b = -1;
+		for (q = 0; q < tl_n; q = q + 1) if (b < 0 && tl_we[q] && tl_dat[q] == 32'd7000) b = q;
+		c = tl_find(b < 0 ? 0 : b, H_SECTOR, 32'd0, 1, 0);
+		d = tl_find(b < 0 ? 0 : b, C_IDX3, 0, 0, 1);
+		check("the LBA stored, then H_SECTOR read as 0, then the head stored", b >= 0 && c > b && d > c, 1);
+		check("C_BIND bit 0 = 0 only after the head store", tl_find(0, C_BIND, 32'd0, 1, 1) > d, 1);
+		late = 0;
+		for (q = tl_find(0, C_BIND, 32'd0, 1, 1); q >= 0 && q < tl_n; q = q + 1)
+			if (tl_we[q] && tl_dat[q] == REQ_HEADER) late = late + 1;
+		check("no REQUEST header after the C_BIND bit-0 store", late, 0);
+		rq_drain;
+		check("the one REQUEST is whole, for LBA 7000", rq_n - n0 == 1 && rq_lba_log[n0] == 32'd7000, 1);
+		core_drop;
+	end
+endtask
+
+// S9. RUN falls mid-frame; S10. the consumer's reset mid-frame
+task sec_case9;
+	integer f0, s0, z;
+	begin
+		$display("-- SECTOR: RUN falls mid-frame: the feeder zero-fills, the ack completes; C_STATE bit 20 next");
+		sec_session(16'h0C09, 0);
+		sec_frame(32'd8100, 0); sec_publish;
+		f0 = c_frames; s0 = c_strobes;
+		core_ask(32'd8100);
+		i = 0; while (c_strobes < s0 + 100 && i < 400000) begin @(posedge clk); i = i + 1; end
+		gpo_store(GPO_IO);
+		core_wait(f0, 5000, ok);
+		check("the core's ack completes", ok, 1);
+		z = 0; while (z < SFRAME && {cbuf[2*z+1], cbuf[2*z]} === sword(32'd8100, 0, z)) z = z + 1;
+		check("the words before the cut are the frame's", z >= 40, 1);
+		core_check("then zeros to the end", 32'd8100, 0, z);
+		wait_stopped(1000, ok);
+		reset_floor;
+		poke(H_SECTOR, 32'd1);
+		run_edge(0, 0); wait_armed(1000, ok);
+		poke(H_HELLO, {16'h4F43, 16'h0C0A});
+		wait_echo(16'h0C0A, 1000, ok);
+		peek(C_STATE, v); check("the next hello's C_STATE bit 20 (a SECTOR record abandoned)", v[20], 1);
+
+		$display("-- SECTOR: the consumer's reset mid-frame zero-fills it; the rest is consumed; the next frame plays");
+		sec_session(16'h0C0B, 0);
+		sec_frame(32'd8200, 0); sec_frame(32'd8201, 0); sec_publish;
+		f0 = c_frames; s0 = c_strobes;
+		core_ask(32'd8200);
+		i = 0; while (c_strobes < s0 + 60 && i < 400000) begin @(posedge clk); i = i + 1; end
+		@(negedge clk_sys); x_reset = 1'b1; @(negedge clk_sys); x_reset = 1'b0;
+		core_wait(f0, 5000, ok);
+		check("the ack completes", ok, 1);
+		z = 0; while (z < SFRAME && {cbuf[2*z+1], cbuf[2*z]} === sword(32'd8200, 0, z)) z = z + 1;
+		core_check("zeros from the next word", 32'd8200, 0, z);
+		f0 = c_frames;
+		core_ask(32'd8201);
+		core_wait(f0, 5000, ok);
+		core_check("the frame after it plays whole", 32'd8201, 0, SFRAME);
+		wait_word(C_IDX4, {16'd0, sec_head[15:0]}, 200, ok);
+		check("C_IDX[4] at the head once the last word's done is back", ok, 1);
+	end
+endtask
+
+// S11. a frozen clk_sys mid-frame; S12. the request withdrawn while SEC_HEAD crosses
+task sec_case11;
+	integer f0, s0, h1;
+	begin
+		$display("-- SECTOR: clk_sys stopped mid-frame: the master keeps polling; on thaw the frame completes whole");
+		sec_session(16'h0C0C, 0);
+		sec_frame(32'd8300, 0); sec_publish;
+		f0 = c_frames; s0 = c_strobes;
+		core_ask(32'd8300);
+		i = 0; while (c_strobes < s0 + 80 && i < 400000) begin @(posedge clk); i = i + 1; end
+		sys_run = 1'b0;
+		h1 = m_hello_reads;
+		repeat (20 << POLLC) @(posedge clk);
+		check("the master polls while clk_sys is stopped", m_hello_reads - h1 > 4, 1);
+		check("C_IDX[4] not stored while frozen", sec_tail(1'b0), 16'd0);
+		sys_run = 1'b1;
+		core_wait(f0, 5000, ok);
+		check("on thaw the frame completes", ok, 1);
+		core_check("its payload is whole", 32'd8300, 0, SFRAME);
+
+		$display("-- SECTOR: the request withdrawn while the frame's head crosses: answered 'no request', the frame waits");
+		sec_session(16'h0C0D, 0);
+		f0 = c_frames;
+		sec_frame(32'd8400, 0);
+		stall_ra = SEC_BASE + 16'd4; stall_n = 2000; stall_r_en = 1;   // the frame's LBA word
+		core_ask(32'd8400);
+		repeat (4) @(posedge clk_sys);
+		sec_publish;
+		i = 0; while (!stall_on && i < 400000) begin @(posedge clk); i = i + 1; end
+		check("the walker reads the frame's LBA for a standing request", stall_on, 1);
+		core_drop;
+		repeat (60 << POLLC) @(posedge clk);
+		check("no strobe for the withdrawn request", c_frames, f0);
+		check("the frame waits: C_IDX[4] = 0", sec_tail(1'b0), 16'd0);
+		core_ask(32'd8400);
+		core_wait(f0, 5000, ok);
+		check("asked again, it plays", ok, 1);
+		core_check("its payload", 32'd8400, 0, SFRAME);
+	end
+endtask
+
+// S13. OSD and SECTOR rings interleaved; S14. faults on rings 3 and 4 drop the bind
+task sec_case13;
+	integer f0, k, r0;
+	begin
+		$display("-- SECTOR: OSD rows and SECTOR frames interleaved: both rings drain, each payload whole");
+		sec_session(16'h0C0E, 1);
+		osd_clear;
+		for (r0 = 0; r0 < 8; r0 = r0 + 1) begin make_row(r0); spi_row(r0); end
+		for (k = 0; k < 4; k = k + 1) sec_frame(32'd8500 + k, 0);
+		sec_publish;
+		for (r0 = 0; r0 < 8; r0 = r0 + 1) osd_publish_row(r0);
+		osd_publish;
+		for (k = 0; k < 4; k = k + 1) begin
+			f0 = c_frames;
+			core_ask(32'd8500 + k);
+			core_wait(f0, 5000, ok);
+			core_check($sformatf("frame %0d among the rows", k), 32'd8500 + k, 0, SFRAME);
+		end
+		osd_wait_tail(8 * 65, 10000, ok);
+		check("every row drawn", ok, 1);
+		osd_compare(bad);
+		check("osd B's buffer equals osd A's", bad, 0);
+
+		$display("-- SECTOR: a FRAME length past the head stops ring 4 (C_STATE bit 12) and drops the bind");
+		sec_session(16'h0C0F, 0);
+		sec_put({8'h10, 8'd0, SFRAME[15:0] + 16'd1}); sec_put(32'd8600);
+		sec_publish;                               // two words published of a 590-word record
+		core_ask(32'd8600);
+		wait_bind0(3000, ok);
+		check("C_BIND bit 0 = 0", ok, 1);
+		peek(C_STATE, v); check("C_STATE bit 12", v[12], 1);
+		repeat (100) @(posedge clk_sys);
+		check("the mux is back on SPI", x_en, 0);
+		core_drop;
+
+		$display("-- SECTOR: a host EVT tail beyond the ring stops ring 3 (C_STATE bit 11) and drops the bind");
+		sec_session(16'h0C10, 0);
+		poke(H_IDX3, 32'h0000_7000);
+		wait_bind0(3000, ok);
+		check("C_BIND bit 0 = 0", ok, 1);
+		peek(C_STATE, v); check("C_STATE bit 11", v[11], 1);
+	end
+endtask
+
+// S15. the ring held part-full (never full) for many records, order and payload per record
+task sec_case15;
+	integer f0, k, nxt, ahead, bad15, lim;
+	begin
+		$display("-- SECTOR: 24 frames through a ring kept 3-10 frames ahead, never full: order and payload each");
+		sec_session(16'h0C11, 0);
+		nxt = 0; bad15 = 0;
+		for (k = 0; k < 24; k = k + 1) begin
+			lim = 3 + (($random(seed) & 32'h7FFF_FFFF) % 8);
+			while (nxt < 24 && (nxt - k) < lim) begin
+				ahead = ((sec_head - sec_tail(1'b0)) & 16'hFFFF);
+				if (ahead + SREC > SEC_WORDS - SREC) bad15 = bad15 + 1;    // would fill: never let it
+				sec_frame(32'd9000 + nxt, 2); nxt = nxt + 1;
+			end
+			sec_publish;
+			f0 = c_frames;
+			core_ask(32'd9000 + k);
+			core_wait(f0, 5000, ok);
+			core_check($sformatf("record %0d, in order", k), 32'd9000 + k, 2, SFRAME);
+		end
+		check("the ring never held more than 12 records", bad15, 0);
+		wait_word(C_IDX4, {16'd0, sec_head[15:0]}, 200, ok);
+		check("C_IDX[4] at the head once the last word's done is back", ok, 1);
+		check("no REQUEST: every frame was ahead", rq_n, 0);
+	end
+endtask
+`endif
+
 // 26. an HPS reset in the middle of a row
 task case26;
 	begin
@@ -2167,6 +2764,93 @@ endtask
 
 ///////////////////////////////  the run  ///////////////////////////////////
 
+// OCRAM_TB_RATE: a rate run, not a check. The bridge model answers at a fixed 10 cycles, which reproduces the rig's
+// torture-sink and OSD rates; each consumer's words/s is timed from the head store to C_IDX = head, ring pre-filled.
+`ifdef OCRAM_TB_RATE
+real rt0, rt1, rto0, rto1, rts0, rts1;
+task rate_ts;
+	integer k, ok;
+	begin
+`ifdef MISTER_OCRAM_DIAG
+		reset_floor; fast_lat = 1'b0;
+		start_session(0, 0, 0, 16'h0E01, ok);
+		ts_reset;
+		rt0 = $realtime;
+		for (k = 0; k < 16; k = k + 1) begin ts_wait_room(1001); ts_record(1000, -1, 32'd0, 0); end
+		wait_ts_drain(20000, ok);
+		rt1 = $realtime;
+		$display("RATE tsink: %0d words in %0.1f us: %0.2f M words/s (ok %0d)", 16000, (rt1 - rt0) / 1000.0,
+		         16000.0 * 1000.0 / (rt1 - rt0), ok);
+`endif
+	end
+endtask
+task rate_osd_fill;
+	integer r;
+	begin osd_head = 0; for (r = 0; r < 16; r = r + 1) begin make_row(r); osd_publish_row(r); end end
+endtask
+task rate_osd;
+	integer ok;
+	begin
+		reset_floor; fast_lat = 1'b0;
+		start_session(0, 0, 0, 16'h0E02, ok);
+		osd_bind_now(16'h0E02, ok);
+		rate_osd_fill;
+		rto0 = $realtime; osd_publish;
+		osd_wait_tail(16 * 65, 20000, ok);
+		rto1 = $realtime;
+		$display("RATE osd alone: 16 rows (1,024 payload words) in %0.1f us: %0.2f us a row, %0.0f ns a word, %0.2f M words/s (ok %0d)",
+		         (rto1 - rto0) / 1000.0, (rto1 - rto0) / 16000.0, (rto1 - rto0) / 1024.0, 1024.0 * 1000.0 / (rto1 - rto0), ok);
+	end
+endtask
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam integer RNF = 8192 / (SFRAME + 2);
+task rate_sec_core;
+	integer k, f0, ok;
+	begin
+		for (k = 0; k < RNF; k = k + 1) begin f0 = c_frames; core_ask(32'd3000 + k); core_wait(f0, 20000, ok); end
+		rts1 = $realtime;
+	end
+endtask
+task rate_sec(input integer both);
+	integer k, ok;
+	begin
+		sec_session(both ? 16'h0E04 : 16'h0E03, both);
+		for (k = 0; k < RNF; k = k + 1) sec_frame(32'd3000 + k, 0);
+		sec_publish;
+		if (both) rate_osd_fill;
+		rts0 = $realtime; rto0 = rts0;
+		fork
+			rate_sec_core;
+			if (both) begin osd_publish; osd_wait_tail(16 * 65, 20000, ok); rto1 = $realtime; end
+		join
+		$display("RATE sector %0s: %0d frames (%0d payload words) in %0.1f us: %0.0f ns a word, %0.2f M words/s",
+		         both ? "beside osd" : "alone", RNF, RNF * SFRAME, (rts1 - rts0) / 1000.0, (rts1 - rts0) / (RNF * SFRAME),
+		         RNF * SFRAME * 1000.0 / (rts1 - rts0));
+		if (both) begin
+			$display("RATE osd beside sector: 1,024 payload words in %0.1f us: %0.2f us a row, %0.2f M words/s",
+			         (rto1 - rto0) / 1000.0, (rto1 - rto0) / 16000.0, 1024.0 * 1000.0 / (rto1 - rto0));
+			$display("RATE aggregate while both ran: %0.2f M words/s over the osd's %0.1f us",
+			         (1024.0 + SFRAME * (rto1 - rto0) * 1.0 * RNF / (rts1 - rts0)) * 1000.0 / (rto1 - rto0), (rto1 - rto0) / 1000.0);
+		end
+	end
+endtask
+`endif
+task rate_run;
+	begin
+		$display("RATE clk_sys half period %0.3f ns", SYS_HP);
+		rate_ts;
+`ifdef MISTER_OCRAM_OSD
+		rate_osd;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		rate_sec(0);
+		rate_sec(1);
+`endif
+		$finish;
+	end
+endtask
+`endif
+
 initial begin
 	if (!$value$plusargs("lw_seed=%d", seed)) seed = 1;
 	$display("ocram_tb: seed %0d, POLL %0d, MARK %0d, DIAG %0d, OSD %0d, ROWS %0d",
@@ -2181,6 +2865,9 @@ initial begin
 
 	$display("-- present: the floor drives GPI bit 26");
 	check("present is the constant 1", present_wire, 1);
+`ifdef OCRAM_TB_RATE
+	rate_run;
+`endif
 
 	case1;
 	case2;
@@ -2217,6 +2904,19 @@ initial begin
 	case27;
 `endif
 	case26;
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+	sec_case1;
+	sec_case2;
+	sec_case3;
+	sec_case4;
+	sec_case6;
+	sec_case7;
+	sec_case8;
+	sec_case9;
+	sec_case11;
+	sec_case13;
+	sec_case15;
+`endif
 
 	$display("-- the protocol monitor over the whole suite");
 	check("protocol invariant failures", mon_err, 0);
