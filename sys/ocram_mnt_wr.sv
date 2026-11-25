@@ -73,7 +73,7 @@ localparam [2:0] M_IDLE = 3'd0, M_HGO = 3'd1, M_ANS = 3'd2, M_TOK = 3'd3, M_WD =
 reg   [2:0] ms = M_IDLE;
 reg         w_started = 1'b0;          // the master has begun its WRITE record
 reg         m_end = 1'b0;              // the next token is the end token
-reg   [1:0] done_q = 2'd0;
+reg   [1:0] w_done_q = 2'd0;
 
 wire        ans = ms == M_ANS && done_v;
 assign job    = ms != M_IDLE;
@@ -85,12 +85,12 @@ assign x_d    = (ms == M_TOK) ? {TG_DATA, 3'd0, 31'd0, m_end} : {TG_SHEAD, 1'b1,
 assign k_zero = ans && done_c == A_ACCEPT;
 assign k_step = ms == M_WH && m_wtake;
 assign fin    = (ans && done_c != A_ACCEPT) || (ms == M_WD && done_v && m_end);
-assign w_done = done_q;
+assign w_done = w_done_q;
 
 always @(posedge clk) begin
-	done_q <= done_q & ~land;
+	w_done_q <= w_done_q & ~land;
 	if (m_start && job) w_started <= 1'b1;   // once: the slot's next record may land before the ack's fall
-	if (s_hello) begin ms <= M_IDLE; m_end <= 1'b0; done_q <= 2'd0; end
+	if (s_hello) begin ms <= M_IDLE; m_end <= 1'b0; w_done_q <= 2'd0; end
 	else if (!s_live) ms <= M_IDLE;           // the session ended: abandoned
 	else begin
 		if (go) begin ms <= M_HGO; w_started <= 1'b0; m_end <= 1'b0; end
@@ -100,11 +100,11 @@ always @(posedge clk) begin
 		M_ANS: if (done_v) begin
 			// accepted: the ack is up and the words follow; else it is over for this record
 			if (done_c == A_ACCEPT) ms <= M_TOK;
-			else begin done_q[slot == 2'd2] <= 1'b1; ms <= M_IDLE; end
+			else begin w_done_q[slot == 2'd2] <= 1'b1; ms <= M_IDLE; end
 		end
 		M_TOK: if (!fwd_busy) ms <= M_WD;         // x_go launches the token
 		M_WD: if (done_v) begin
-			if (m_end) begin done_q[slot == 2'd2] <= 1'b1; ms <= M_IDLE; end   // ack down
+			if (m_end) begin w_done_q[slot == 2'd2] <= 1'b1; ms <= M_IDLE; end   // ack down
 			else if (evt_stop) begin m_end <= 1'b1; ms <= M_TOK; end
 			else ms <= M_WH;
 		end

@@ -135,8 +135,8 @@ localparam [15:0] FIO_BASE  = (FIO_RING == 32'd13) ? 16'h7000 : 16'h1000;
 localparam [15:0] FIO_WORDS = 16'd1 << FIO_RING[3:0];
 localparam [15:0] MNT_BASE  = 16'h6000;
 localparam [15:0] MNT_WORDS = 16'd1024;
-// FIO_SELS, the selects an LFRAME may name ({osd_vga, osd_hdmi, fpga, uio}), is sys_top's OCRAM_FIO_SELS, the same
-// parameter hps_ocram_master declares in C_K[9].
+// FIO_SELS, the selects an LFRAME may name ({osd_vga, osd_hdmi, fpga, uio}), is ocram_cfg.vh's OCRAM_FIO_SELS (sys_top
+// passes it), the value hps_ocram_master declares in C_K[9].
 localparam  [7:0] LAST_ROW  = ROWS - 1;
 localparam [15:0] SEC_LEN   = FRAME[15:0] + 16'd1;      // a FRAME record's len: the LBA and the words
 localparam [13:0] SEC_K     = FRAME[13:0] + 14'd1;      // its last payload word

@@ -30,9 +30,10 @@
 //  * drop abandons the record open: its head is not stored. A head store already in flight still lands and
 //    publishes; kill (an HPS reset's rise, a run's start) and ended (a run ends this cycle) make a done
 //    publish nothing.
-//  * The store's offset, data and the room are registers or a mux of them: the head store's value (head_nx_q),
-//    whether the next store is the head (last_q) and the free words (free_q) are computed when rec_k steps or the
-//    head or the tail moves, ahead of their first read.
+//  * The store's data and the room are registers or a mux of them: the head store's value (head_nx_q), whether
+//    the next store is the head (last_q) and the free words (free_q) are computed when rec_k steps or the head or
+//    the tail moves, ahead of their first read. The offset is one 16-bit add of registers (head_q + rec_k), and the
+//    pick is one compare per variable-length source (free_q > len).
 //  * Every address is C_IDX[3] or EVT_BASE + ((index & (EVT_WORDS - 1)) << 2). tb/static.sh holds it.
 
 module ocram_evt_wr #(parameter integer N = 7)

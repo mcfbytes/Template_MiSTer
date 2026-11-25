@@ -21,8 +21,8 @@
 // The mailbox's access layer: one bus request port per requester, {req, we, off, wdata, counted} held until grant,
 // and a pick of one in an idle cycle for ocram_axi.sv. Ports 0 to F-1 go in fixed order, port 0 first; then the
 // two consumer ports F and F + 1, round robin between them (the last granted goes last). The pick is a mux of the
-// ports' own values: each requester holds its offset and data in registers or reads them from a small table, so
-// no requester's arithmetic sits in front of the engine's registers.
+// ports' own values, registers or a small table's words but for the EVT writer's (ocram_evt_wr.sv): its offset is
+// one 16-bit add of registers, and its pick is one compare per variable-length source.
 //
 //  * en is the engine's idle cycle less every cycle the session forbids a start.
 //  * A consumer port's completion is its own: c_done[n] is the done of the transaction it was granted, and kill
@@ -61,8 +61,8 @@ reg  c_act_port = 1'b0;
 reg  c_act_we = 1'b0;
 
 reg  [F+1:0] sel;
-integer i;
-always @(*) begin
+always @(*) begin : pick
+	integer i;
 	sel = {(F+2){1'b0}};
 	if (req[F+1] && (!req[F] || !c_last)) sel[F+1] = 1'b1;
 	if (req[F] && (!req[F+1] || c_last)) sel = {{(F+1){1'b0}}, 1'b1} << F;
@@ -72,7 +72,8 @@ end
 assign grant = en ? sel : {(F+2){1'b0}};
 assign t_go  = grant != {(F+2){1'b0}};
 
-always @(*) begin
+always @(*) begin : mux
+	integer i;
 	t_we = 1'b0; t_off = 16'h0000; t_wdata = 32'd0; t_counted = 1'b1;
 	for (i = 0; i < F + 2; i = i + 1)
 		if (sel[i]) begin

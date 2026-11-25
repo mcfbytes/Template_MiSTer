@@ -39,14 +39,14 @@
 //
 //  * clk_100m: the walker. It takes the master's consumer port 0, one transaction at a time, and serves the rings at
 //    record granularity, round robin over those with work (ring ids 0 OSD, 1 SECTOR, 2 download, 3 mount).
-//    Per ring it keeps its tail and avail = head - tail, read
-//    at a head read; a head more than the ring's size ahead, or a length past avail, stops that ring for the session
-//    with a one-cycle fault. One adder addresses every ring word: tail + k (the header is k = 0, the tail store is
-//    the same sum at the record's end), and each request's data word is that sum, registered as the request is
-//    raised (idle, the sum is the next request's ring's). Every read response is registered before a decision, except a payload
-//    word, which goes straight into the forward cell's hold register (the one register rdata reaches); no read
-//    whose response the cell takes is issued while the cell is busy. A head is read only when the ring is caught
-//    up and a poll tick, a finished record or (SECTOR) a new request asks for it.
+//    Per ring it keeps its tail and avail = head - tail, read at a head read; a head more than the ring's size ahead,
+//    or a length past avail, stops that ring for the session with a one-cycle fault. One adder addresses every ring
+//    word: tail + k (the header is k = 0, the tail store is the same sum at the record's end), and each request's data
+//    word is that sum, registered as the request is raised (idle, the sum is the next request's ring's). A read
+//    response is decoded in its own cycle: rdata reaches each register it sets through that cycle's decode, and a
+//    payload word goes straight into the forward cell's hold register. No read whose response the cell takes is issued
+//    while the cell is busy. A head is read only when the ring is caught up and a poll tick, a finished record or
+//    (SECTOR) a new request asks for it.
 //  * The forward lw_xfer carries {tag, d}: 0 OSD_HEAD (the ROW header, row in d[20:16]), 1 SEC_HEAD (the LBA), 2
 //    DATA (of the last head's ring), 3 FIO_HEAD (the LFRAME header as read). The done lw_xfer answers each: 0 took,
 //    1 accept, 2 mismatch, 3 no request. One word is outstanding at a time. With MNT_EN the forward word is

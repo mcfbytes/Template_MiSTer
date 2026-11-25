@@ -173,10 +173,10 @@ crossings (`ocram_xing`, `hps_ocram_evt`) has one clock. A boundary between them
 tier's port, and the DIAG modules sit in `sys/hps_ocram_master.sv`. Three port bundles carry everything between
 the layers:
 
-- **B1, the bus request** (requester to `ocram_arb`): `req`, `we`, `off[15:0]`, `wdata[31:0]`, one of each a port,
-  held until `grant`; the engine's done then completes it, a consumer port's as `c_done` and `c_rdata` with the
-  engine's ok. The walker's port is `c_req`, `c_we`, `c_off`, `c_wdata`, back `c_grant`, `c_done`, `c_ok`,
-  `c_rdata`. `ocram_evt_wr` asks on the same bundle, a store each.
+- **B1, the bus request** (requester to `ocram_arb`): `req`, `we`, `off[15:0]`, `wdata[31:0]` and `counted` (the DIAG
+  counters time it), one of each a port, held until `grant`; the engine's done then completes it, a consumer port's as
+  `c_done` and `c_rdata` with the engine's ok. The walker's port is `c_req`, `c_we`, `c_off`, `c_wdata`, back
+  `c_grant`, `c_done`, `c_ok`, `c_rdata`. `ocram_evt_wr` asks on the same bundle, a store each.
 - **B2, the record source** (source to `ocram_evt_wr`): `post`, `hdr[31:0]` (the header as stored), `wv`, `wd[31:0]`;
   back `start` (the header store's launch), `wtake` (a payload word's) and `pub` (the head store's done: published).
   The writer's `drop` abandons the record open. Its sources, in priority order: BIND, the SECTOR slot's REQUEST, a
@@ -503,13 +503,14 @@ walker serves it in every session.
 - **A record is an LFRAME,** `{0x30, arg, len}` with `arg = {odd[7], 0[6:2], sel[1:0]}` and `len` ring words. Each
   ring word carries two link words, low half first; `odd` drops the last word's high half. Only a `sel` in C_K[9]'s
   mask is served: 1 (the FPGA select, the file-I/O block), and with `MISTER_OCRAM_UIO` also 0, 2 and 3 (below). A
-  record of any other kind, a `sel` outside the mask, a non-zero `arg[6:2]` or a zero length is skipped by its
-  length, silently: it is not a fault, and nothing of it reaches the link, so a host gates what it sends on C_K[9]
-  (and on C_CAPS for the bits above `sel`). A head more than the ring ahead, or a length past the head, stops the ring on a fault (C_STATE bit 9); a
-  session that ends mid-record sets bit 17 at the next hello.
+  record of any other kind, a `sel` outside the mask, a non-zero `arg[6:2]` or a zero length is skipped by its length,
+  silently: it is not a fault, and nothing of it reaches the link, so a host gates what it sends on C_K[9] (and on
+  C_CAPS for the bits above `sel`). A head more than the ring ahead, or a length past the head, stops the ring on a
+  fault (C_STATE bit 9); a session that ends mid-record sets bit 17 at the next hello.
 - **The walker** reads H_IDX[1] once it has caught up with the last head it read, and on each poll tick, and serves
   ring 1 at record granularity, in turn with rings 0, 2 and 4. An LFRAME holds it for the whole play, so those rings
-  wait through every `ioctl_wait` the core raises. Each header and ring word crosses to `clk_sys`; after the record's last word is answered it stores C_IDX[1].
+  wait through every `ioctl_wait` the core raises. Each header and ring word crosses to `clk_sys`; after the record's
+  last word is answered it stores C_IDX[1].
 - **The player** (`clk_sys`) plays a frame as the LW lane's player does, through `lw_link`: it takes the link's nets
   only between link transactions (no select up, the I/O view on), raises the select, strobes each link word GAP
   cycles apart, holds the next strobe while `ioctl_wait` (or the link's own wait) is up, and drops the select
