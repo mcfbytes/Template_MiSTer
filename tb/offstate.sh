@@ -25,7 +25,7 @@
 #      theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
 #      with MISTER_LW or MISTER_OCRAM. sys/lw_lane.sv serves a tier of each floor (the LW lane, the OCRAM download
 #      tier): empty without both pairs, under each set, with either floor alone or both; the lane with its own pair,
-#      lw_link with either.
+#      lw_link and lw_link_seq with either.
 #   3. Every framework-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro), or
 #      `ifdef MISTER_OCRAM, first (sys/lw_lane.sv: each pair defining its local macros, then their guard); `default_nettype none first inside it, `default_nettype wire last. Each macro
 #      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
@@ -98,7 +98,7 @@ XFLOOR = {'lw_lane.sv': ([('MISTER_LW', 'MISTER_LW_LANE'), ('MISTER_OCRAM', 'MIS
                           '`define', 'LW_LINK_BUILT', '`endif', '`endif', '`endif',
                           '`ifdef', 'LW_LINK_BUILT', '`default_nettype', 'none'],
                          ['`default_nettype', 'wire', '`endif', '`undef', 'LW_LANE_BUILT', '`undef', 'LW_LINK_BUILT'],
-                         'lw_lane', 'lw_link')}
+                         'lw_lane', ('lw_link', 'lw_link_seq'))}
 TIER.pop('lw_lane.sv')
 checks = fails = 0
 
@@ -358,9 +358,10 @@ for x in lw:
                  for fl in [[f] for f in fls] + [fls] for label, defs in sets]
         for k, (fl, tm) in enumerate(pairs):
             t, e = pp(f, [fl, tm])
-            check(t is not None and shared in t and ((own in t) == (k == 0)),
-                  '%s: with %s and %s, %s %s and %s %s' % (f, fl, tm, shared, 'missing' if not t or shared not in t
-                  else 'present', own, 'present' if t and own in t else 'missing'))
+            sh_in = t is not None and all(m in t for m in shared)
+            check(sh_in and ((own in t) == (k == 0)),
+                  '%s: with %s and %s, %s %s and %s %s' % (f, fl, tm, ' and '.join(shared), 'present' if sh_in
+                  else 'missing', own, 'present' if t and own in t else 'missing'))
     if x in EITHER:
         fl, tm, _ = EITHER[x]
         runs += [(fl + ' without ' + ' or '.join(tm) + ', ' + label, [fl] + defs) for label, defs in sets]

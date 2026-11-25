@@ -15,9 +15,12 @@ played into `hps_io`'s download block through `lw_link`, with a mark line on `f2
 built"). `MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` add two mount slots beside the SECTOR slot: their
 reads from ring 0 and their writes as EVT records ("The mount slots as built"). `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters, the GPO 27/26
 test knobs, the GPO 25 freeze knob and the host-to-fabric torture sink (below); it cannot be built with the SECTOR
-tier. Nothing else in this document is built: no EVT, LANE or PAD tier. The SECTOR, download and mount tiers are benched, not yet fitted
-or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
-core and host authors can read both paths side by side and say which they would build.
+tier. `MISTER_OCRAM_UIO` widens ring 1 to the UIO and OSD selects, `MISTER_OCRAM_EVT` posts the events tier's records
+and `MISTER_OCRAM_LANE` the capture frames' REPLY records ("Records"), each PROVISIONAL. Nothing else in this document
+is built: no PAD ring, and no H_BIND LANE or PAD function. The SECTOR, download, mount, UIO, events and capture
+tiers are benched, not yet fitted or run on hardware; several facts the floor rests on are unverified ("What is not
+verified", at the end). It is published with the LW framework so that core and host authors can read both paths
+side by side and say which they would build.
 
 - **The core sees nothing new.** OSD rows land in the same `osd_buffer`, blocks arrive as the same
   `sd_ack`/`sd_buff_wr`/`sd_buff_dout` strobes, exactly as with the LW tiers.
@@ -164,6 +167,7 @@ crossings (`ocram_xing`, `hps_ocram_evt`) has one clock. A boundary between them
 | mount write | `ocram_mnt_wr` | `sys/ocram_mnt_wr.sv` | `clk_100m` | a mount WRITE's words, pulled from the feeder through the crossing for its record |
 | crossing | `ocram_xing` | `sys/ocram_xing.sv` | both | every `lw_xfer`, `lw_sync` and `lw_fence` between the walker and the sinks |
 | sinks | `ocram_osd_wr`, `hps_ocram_sfeed`, `hps_ocram_fplay`, `ocram_blk_req` | `sys/ocram_osd_wr.sv`, `sys/hps_ocram_rx.sv` (both), `sys/ocram_blk_req.sv` | `clk_sys` | one consumer's rules each: the OSD writer, the SECTOR feeder, the download player, the block slots' request records |
+| link words | `lw_link_seq` | `sys/lw_lane.sv` | `clk_sys` | a player's link-word sequencer (own, hold, the select, the strobe, the gap), shared by the download player and the LW lane's; each player keeps its source and answers |
 
 `hps_ocram_rx` (`sys/hps_ocram_rx.sv`) wires the walker, the crossing and the sinks; `hps_ocram_evt`, the events
 tier's port, and the DIAG modules sit in `sys/hps_ocram_master.sv`. Three port bundles carry everything between

@@ -659,18 +659,13 @@ module hps_ocram_fplay #(parameter [2:0] GAP = 3'd4)   // 4..7
 	/* verilator lint_on UNUSEDSIGNAL */
 	input  wire        l_busy,       // any of the link's own selects, or its ID view
 	input  wire        l_wait,       // io_wait | vs_wait: the term that withholds the link's ack
-	output reg         own    = 1'b0,// the player drives the link nets
-	output reg         hold   = 1'b0,// own, plus one cycle: the link's ack path stays frozen
-	output reg   [3:0] sel    = 4'd0,// {osd_vga, osd_hdmi, fpga, uio}
-	output reg         strobe = 1'b0,
+	output wire        own,          // the player drives the link nets
+	output wire        hold,         // own, plus one cycle: the link's ack path stays frozen
+	output wire  [3:0] sel,          // {osd_vga, osd_hdmi, fpga, uio}
+	output wire        strobe,
 	output wire [15:0] din           // the link word in hand: held from the cycle before its strobe
 );
 
-localparam [2:0] S_IDLE = 3'd0, S_STB = 3'd1, S_ACK = 3'd2, S_NEXT = 3'd3, S_GAP = 3'd4, S_REL = 3'd5;
-
-reg   [2:0] ps    = S_IDLE;
-reg   [2:0] cnt   = 3'd0;
-reg   [1:0] quiet = 2'd0;              // cycles the link's selects have been low, saturating at 2
 reg   [1:0] ml    = 2'd0;              // cycles with the enable low and no word in hand, saturating at 2
 reg         fpend = 1'b0;              // a header is taken and its frame not started
 reg   [1:0] fsel  = 2'd0;
@@ -679,15 +674,25 @@ reg         have  = 1'b0;              // a ring word is in w_d
 reg         half  = 1'b0;              // the link word in hand is the ring word's high half
 
 wire        wpres = have || (w_v && !w_head);
-wire        t_beg = ps == S_IDLE && fpend && wpres && quiet == 2'd2 && !l_busy && hen_s;
-wire        t_ack = ps == S_ACK && !l_wait && cnt == GAP - 3'd1;
+wire        s_idle, s_beg, s_stb, s_ack, s_rel;
+
+// the link words: a frame begins with its first word in hand and ends after its count, or at a word that does not
+// come with the enable low for two cycles
+/* verilator lint_off PINCONNECTEMPTY */   // the player reads no nxt
+lw_link_seq #(.GAP(GAP)) seq
+(
+	.clk_sys(clk_sys), .l_busy(l_busy), .l_wait(l_wait),
+	.start(fpend && wpres && hen_s), .fsel(fsel), .more(n != 15'd0 && wpres), .stop(n == 15'd0 || ml == 2'd2),
+	.own(own), .hold(hold), .sel(sel), .strobe(strobe),
+	.idle(s_idle), .beg(s_beg), .stb(s_stb), .ack(s_ack), .nxt(), .rel(s_rel)
+);
+/* verilator lint_on PINCONNECTEMPTY */
 
 assign din  = half ? w_d[31:16] : w_d[15:0];
-assign rest = ps == S_IDLE && !own && !hold && !strobe && sel == 4'd0 && !fpend && !have && !a_go;
+assign rest = s_idle && !own && !hold && !strobe && sel == 4'd0 && !fpend && !have && !a_go;
 
 always @(posedge clk_sys) begin
 	a_go  <= 1'b0;
-	quiet <= l_busy ? 2'd0 : (quiet == 2'd2) ? 2'd2 : quiet + 2'd1;
 	ml    <= (hen_s || wpres) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
 
 	// an entry: a header opens a frame (with the enable up) and is answered at once; a word waits in w_d
@@ -699,74 +704,34 @@ always @(posedge clk_sys) begin
 	end
 	else if (w_v) have <= 1'b1;
 
-	case (ps)
-		S_IDLE: if (t_beg) begin
-			own   <= 1'b1;
-			hold  <= 1'b1;
-			sel   <= 4'b0001 << fsel;
-			half  <= 1'b0;
-			fpend <= 1'b0;
-			ps    <= S_STB;
+	// the sequencer's states, after the entry: a state's write wins
+	if (s_beg) begin
+		half  <= 1'b0;
+		fpend <= 1'b0;
+	end
+	else if (s_idle) begin
+		if (fpend && !hen_s) fpend <= 1'b0;          // the session ended before the frame began
+		if (have && !fpend) begin                    // a word with no frame: answered unplayed
+			have <= 1'b0;
+			a_go <= 1'b1;
 		end
-		else begin
-			own    <= 1'b0;
-			hold   <= 1'b0;
-			sel    <= 4'd0;
-			strobe <= 1'b0;
-			if (fpend && !hen_s) fpend <= 1'b0;          // the session ended before the frame began
-			if (have && !fpend) begin                    // a word with no frame: answered unplayed
-				have <= 1'b0;
-				a_go <= 1'b1;
-			end
-		end
-		S_STB: begin
-			strobe <= 1'b1;
-			cnt    <= 3'd0;
-			n      <= n - 15'd1;
-			ps     <= S_ACK;
-		end
-		S_ACK: begin
-			strobe <= 1'b0;
-			if (l_wait) cnt <= 3'd0;
-			else if (t_ack) begin
-				ps <= S_NEXT;
+	end
+	if (s_stb) n <= n - 15'd1;
+	if (s_ack) begin
 `ifdef MISTER_OCRAM_LANE
-				// the reply as the HPS reads it at this word's acknowledge: a low half alone, or both halves
-				a_d <= half ? {l_dout, a_d[15:0]} : {16'd0, l_dout};
+		// the reply as the HPS reads it at this word's acknowledge: a low half alone, or both halves
+		a_d <= half ? {l_dout, a_d[15:0]} : {16'd0, l_dout};
 `endif
-				if (n != 15'd0) begin
-					// the ring word's second half is acknowledged: answer it; the frame's last waits for its end
-					if (half) begin have <= 1'b0; a_go <= 1'b1; end
-					half <= ~half;
-				end
-			end
-			else cnt <= cnt + 3'd1;
+		if (n != 15'd0) begin
+			// the ring word's second half is acknowledged: answer it; the frame's last waits for its end
+			if (half) begin have <= 1'b0; a_go <= 1'b1; end
+			half <= ~half;
 		end
-		S_NEXT: if (n != 15'd0 && wpres) ps <= S_STB;
-		else if (n == 15'd0 || ml == 2'd2) begin
-			sel <= 4'd0;
-			cnt <= 3'd0;
-			ps  <= S_GAP;
-		end
-		S_GAP: if (cnt == 3'd1) begin
-			own <= 1'b0;
-			ps  <= S_REL;
-		end
-		else cnt <= cnt + 3'd1;
-		S_REL: begin
-			hold <= 1'b0;
-			half <= 1'b0;
-			if (have) begin have <= 1'b0; a_go <= 1'b1; end
-			ps   <= S_IDLE;
-		end
-		default: begin
-			own    <= 1'b0;
-			hold   <= 1'b0;
-			sel    <= 4'd0;
-			strobe <= 1'b0;
-			ps     <= S_IDLE;
-		end
-	endcase
+	end
+	if (s_rel) begin
+		half <= 1'b0;
+		if (have) begin have <= 1'b0; a_go <= 1'b1; end
+	end
 end
 
 endmodule

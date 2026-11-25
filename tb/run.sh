@@ -82,9 +82,9 @@
 #   O  the OCRAM floor's and OSD tier's bench (tb/ocram_tb.sv) under Icarus, every seed of LW_TB_SEEDS once
 #      plain and once with the crossing cells' delay models (LW_TB_CDC), compiled twice: with DIAG (MARK records,
 #      the torture sink, the freeze knob) and without (the OSD cases in the shipping shape); and verilator
-#      --lint-only -Wall on hps_ocram_master.sv and hps_ocram_rx.sv (and its hps_ocram_sfeed) with lw_cdc.sv,
-#      under each OCRAM macro set, which must be warning-free. A third shape builds the SECTOR tier
-#      (MISTER_OCRAM_SECTOR_SLOT, a 588-word frame) beside the OSD, and a fourth the download tier (MISTER_OCRAM_FIO,
+#      --lint-only -Wall on hps_ocram_master.sv and hps_ocram_rx.sv (and its hps_ocram_sfeed) with lw_cdc.sv and
+#      lw_lane.sv (the player's lw_link_seq), under each OCRAM macro set, which must be warning-free. A third shape
+#      builds the SECTOR tier (MISTER_OCRAM_SECTOR_SLOT, a 588-word frame) beside the OSD, and a fourth the download tier (MISTER_OCRAM_FIO,
 #      with lw_link and a real hps_io: the mark line's rise, fall and never unarmed; a 6,000-word window with the
 #      mark half a ring behind the head, never dry, PLAYED once; a link transaction at every frame edge; RUN, the
 #      ID view and a core reset through GPO mid-frame; a stopped clk_sys) beside the OSD; each shape also runs with
@@ -244,7 +244,7 @@ export XFAIL
 
 # lint LOG: arm V's slang runs; status 0 if every run elaborates without an error
 LWF="sys/lw_cdc.sv sys/hps_lw_bridge.sv sys/lw_sys_window.sv sys/lw_pad.sv sys/lw_evt.sv sys/lw_sector.sv sys/lw_lane.sv sys/lw_osd.sv sys/lw_blk_mux.sv"
-LWM="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window lw_pad lw_evt lw_sector lw_lane lw_link lw_osd lw_blk_mux lw_save_mux"
+LWM="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window lw_pad lw_evt lw_sector lw_lane lw_link lw_link_seq lw_osd lw_blk_mux lw_save_mux"
 LW0="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sys_window"
 LWD="-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_LW_LANE -DMISTER_LW_OSD"
 lint() {
@@ -399,7 +399,7 @@ ocram() {
         [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";;
           fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; mnt) G="-GOSD_EN=0 -GSEC_EN=1 -GMNT_EN=2'b11";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
-             > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
+             sys/lw_lane.sv > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
       done
@@ -584,7 +584,7 @@ uarm() {
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
         [ $t = hps_ocram_rx ] && case $vn in uioall) G="-GSEC_EN=1 -GFIO_EN=1";; *) G="-GOSD_EN=0 -GFIO_EN=1";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
-             > "$O/uioV_${t}_$vn.log" 2>&1 || [ -s "$O/uioV_${t}_$vn.log" ]; then
+             sys/lw_lane.sv > "$O/uioV_${t}_$vn.log" 2>&1 || [ -s "$O/uioV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/uioV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
       done
@@ -635,7 +635,7 @@ aarm() {
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
         [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=2'b01";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
-             > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
+             sys/lw_lane.sv > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/laneV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
       done
@@ -863,7 +863,7 @@ hps_ocram_rx #(.OSD_EN(0), .SEC_EN(0), .FIO_EN(1), .MNT_EN(2'b01)) mr();
 endmodule
 EOS
   XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_sys_window.sv sys/lw_sector.sv"
-  XOF="$XOF sys/osd.v"
+  XOF="$XOF sys/osd.v sys/lw_lane.sv"
   while IFS='|' read -r want guard what d; do
     echo "-- $what" >> "$1"
     iverilog -g2012 $d -I sys -s lw_xo_top -o "$O/lw_xo.vvp" $XOF > "$O/lw_xo.err" 2>&1

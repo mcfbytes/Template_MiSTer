@@ -1695,8 +1695,9 @@ assign tr_osd = !win.osd.osd.hen_s && !win.osd.osd.hd &&
 assign tr_osd = 1'b1;
 `endif
 `ifdef MISTER_LW_LANE
-assign tr_lane = !win.lane.lane.hen_s && win.lane.lane.ps == 0 && !win.lane.lane.own && !win.lane.lane.hold &&
-                 !win.lane.lane.strobe && win.lane.lane.sel == 0 && win.lane.lane.rptr == tb_g2b(win.lane.lane.wg_s) &&
+assign tr_lane = !win.lane.lane.hen_s && win.lane.lane.seq.ps == 0 && !win.lane.lane.seq.own &&
+                 !win.lane.lane.seq.hold && !win.lane.lane.seq.strobe && win.lane.lane.seq.sel == 0 &&
+                 win.lane.lane.rptr == tb_g2b(win.lane.lane.wg_s) &&
                  win.lane.lane.lane_r_lwgray == (win.lane.lane.rptr ^ (win.lane.lane.rptr >> 1)) &&
                  win.lane.lane.lane_rw_lwgray == (win.lane.lane.rwp ^ (win.lane.lane.rwp >> 1));
 `else
@@ -5008,10 +5009,10 @@ task scramble;
 `endif
 `ifdef MISTER_LW_LANE
 		win.lane.lane.rptr = $random; win.lane.lane.q = $random; win.lane.lane.fresh = $random;
-		win.lane.lane.ps = $random; win.lane.lane.quiet = $random; win.lane.lane.cnt = $random;
+		win.lane.lane.seq.ps = $random; win.lane.lane.seq.quiet = $random; win.lane.lane.seq.cnt = $random;
 		win.lane.lane.capf = $random; win.lane.lane.rwp = $random; win.lane.lane.ml = $random;
-		win.lane.lane.own = $random; win.lane.lane.hold = $random; win.lane.lane.sel = $random;
-		win.lane.lane.strobe = $random; win.lane.lane.lane_r_lwgray = $random; win.lane.lane.lane_rw_lwgray = $random;
+		win.lane.lane.seq.own = $random; win.lane.lane.seq.hold = $random; win.lane.lane.seq.sel = $random;
+		win.lane.lane.seq.strobe = $random; win.lane.lane.lane_r_lwgray = $random; win.lane.lane.lane_rw_lwgray = $random;
 		win.lane.lane.pt_lwx = $random; win.lane.lane.rdt_lwx = $random;
 		win.lane.lane.wg_sync.lws0_q = $random; win.lane.lane.wg_sync.lws1_q = $random;
 		win.lane.lane.rrg_sync.lws0_q = $random; win.lane.lane.rrg_sync.lws1_q = $random;

@@ -56,8 +56,8 @@
 // includes the link's ID view (sys_top), so no frame starts while it is selected.
 // Crossings, each through lw_sync (lw_cdc.sv): the four Gray pointers of the two FIFOs, each recomputed from its
 // binary pointer in every cycle, the played and reply-drop toggles, and the enable link's two levels.
-// lw_link, below, is built with this block or with the OCRAM download tier (MISTER_OCRAM_FIO), whose player in
-// hps_ocram_rx.sv takes the same p_* side; a build has one player.
+// lw_link and lw_link_seq, below, are built with this block or with the OCRAM download tier (MISTER_OCRAM_FIO), whose
+// player in hps_ocram_rx.sv takes the same p_* side and the same sequencer; a build has one player.
 
 `ifdef LW_LANE_BUILT
 module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 8)   // GAP: 2..7
@@ -82,10 +82,10 @@ module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 
 	input wire         l_busy,       // any of the link's own selects, or its ID view
 	input wire         l_wait,       // io_wait | vs_wait: the term that withholds the link's ack
 	input wire  [15:0] l_dout,       // the link's reply word (io_dout | io_dout_sys)
-	output reg         own    = 0,   // the player drives the link nets
-	output reg         hold   = 0,   // own, plus one cycle: the link's ack path stays frozen
-	output reg   [3:0] sel    = 0,   // {osd_vga, osd_hdmi, fpga, uio}
-	output reg         strobe = 0,
+	output wire        own,          // the player drives the link nets
+	output wire        hold,         // own, plus one cycle: the link's ack path stays frozen
+	output wire  [3:0] sel,          // {osd_vga, osd_hdmi, fpga, uio}
+	output wire        strobe,
 	output wire [15:0] din           // the head entry's data: held from the cycle before its strobe
 );
 
@@ -246,8 +246,6 @@ end
 
 /////////////////////////////// clk_sys ///////////////////////////////////
 
-localparam [2:0] S_IDLE = 3'd0, S_STB = 3'd1, S_ACK = 3'd2, S_NEXT = 3'd3, S_GAP = 3'd4, S_REL = 3'd5;
-
 wire [AW:0]  wg_s;
 wire [RAW:0] rrg_s;
 lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(lane_w_lwgray), .q(wg_s));
@@ -255,9 +253,6 @@ lw_sync #(.W(RAW + 1), .GRAY(1)) rrg_sync (.clk(clk_sys), .d(lane_rr_lwgray), .q
 reg  [AW:0] rptr  = 0;
 reg  [19:0] q     = 0;
 reg         fresh = 0;                      // q holds fram[rptr]
-reg   [2:0] ps    = S_IDLE;
-reg   [1:0] quiet = 0;                      // cycles the link's selects have been low, saturating at 2
-reg   [2:0] cnt   = 0;
 reg         capf  = 0;                      // the frame playing records its replies
 reg [RAW:0] rwp   = 0;
 reg   [1:0] ml    = 0;                      // cycles the FIFO has read empty with the enable level low, to 2
@@ -266,18 +261,25 @@ wire [AW:0] rnext = rptr + 1'd1;
 wire        empty = rptr == g2b(wg_s);
 wire        avail = fresh && lane_r_lwgray != wg_s;
 wire  [1:0] qk    = q[19:18];
-wire        t_beg = ps == S_IDLE && avail && qk[0] && quiet == 2'd2 && !l_busy && hen_s;
-wire        t_odd = ps == S_IDLE && avail && !qk[0] && hen_s;   // a stray entry
-wire        t_dis = ps == S_IDLE && !empty && !hen_s;            // without the enable: every entry, every cycle
-wire        t_ack = ps == S_ACK && !l_wait && cnt == GAP - 1'd1;
-wire        t_wrd = ps == S_NEXT && avail && qk == K_WORD;
-wire        t_end = ps == S_NEXT && avail && qk == K_END;
-wire        t_cut = ps == S_NEXT && !avail && !hen_s && empty && ml == 2'd2;   // a word that cannot come
-wire        pop   = t_odd | t_dis | ps == S_STB | t_end;   // q still holds the entry through its strobe cycle
+wire        s_idle, s_beg, s_stb, s_ack, s_nxt, s_rel;
+// the link words: a frame begins at a BEGIN entry (its first link word) and ends at its END, or at a word that
+// cannot come (the enable low, the FIFO empty for two cycles)
+lw_link_seq #(.GAP(GAP)) seq
+(
+	.clk_sys(clk_sys), .l_busy(l_busy), .l_wait(l_wait),
+	.start(avail && qk[0] && hen_s), .fsel(q[17:16]), .more(avail && qk == K_WORD),
+	.stop(avail || (!hen_s && empty && ml == 2'd2)),
+	.own(own), .hold(hold), .sel(sel), .strobe(strobe),
+	.idle(s_idle), .beg(s_beg), .stb(s_stb), .ack(s_ack), .nxt(s_nxt), .rel(s_rel)
+);
+wire        t_odd = s_idle && avail && !qk[0] && hen_s;   // a stray entry
+wire        t_dis = s_idle && !empty && !hen_s;            // without the enable: every entry, every cycle
+wire        t_end = s_nxt && avail && qk == K_END;
+wire        pop   = t_odd | t_dis | s_stb | t_end;   // q still holds the entry through its strobe cycle
 
-assign rest = !hen_s && ps == S_IDLE && !own && !hold && !strobe && sel == 4'd0 && empty &&
+assign rest = !hen_s && s_idle && !own && !hold && !strobe && sel == 4'd0 && empty &&
               lane_r_lwgray == (rptr ^ (rptr >> 1)) && lane_rw_lwgray == (rwp ^ (rwp >> 1));
-wire        r_push = t_ack & capf;
+wire        r_push = s_ack & capf;
 wire [RAW:0] r_used = rwp - g2r(rrg_s);
 wire        r_full = r_used[RAW];
 wire [RAW:0] rwnext = rwp + 1'd1;
@@ -291,7 +293,6 @@ always @(posedge clk_sys) begin
 	fresh <= ~pop;
 	if (pop) rptr <= rnext;
 	lane_r_lwgray <= rptr ^ (rptr >> 1);
-	quiet <= l_busy ? 2'd0 : (quiet == 2'd2) ? 2'd2 : quiet + 2'd1;
 	ml    <= (hen_s || !empty) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
 
 	// the reply to the strobe just acknowledged; the gray pointer follows rwp a cycle later, after the word is in
@@ -302,55 +303,8 @@ always @(posedge clk_sys) begin
 	end
 	lane_rw_lwgray <= rwp ^ (rwp >> 1);
 
-	case (ps)
-		S_IDLE: if (t_beg) begin
-			own  <= 1;
-			hold <= 1;
-			sel  <= 4'b0001 << q[17:16];
-			capf <= qk[1];
-			ps   <= S_STB;
-		end
-		else begin
-			own    <= 0;
-			hold   <= 0;
-			sel    <= 0;
-			strobe <= 0;
-		end
-		S_STB: begin
-			strobe <= 1;
-			cnt    <= 0;
-			ps     <= S_ACK;
-		end
-		S_ACK: begin
-			strobe <= 0;
-			if (l_wait) cnt <= 0;
-			else if (t_ack) ps <= S_NEXT;
-			else cnt <= cnt + 1'd1;
-		end
-		S_NEXT: if (t_wrd) ps <= S_STB;
-		else if (avail || t_cut) begin
-			sel <= 0;
-			cnt <= 0;
-			ps  <= S_GAP;
-		end
-		S_GAP: if (cnt == 1) begin
-			own <= 0;
-			ps  <= S_REL;
-		end
-		else cnt <= cnt + 1'd1;
-		S_REL: begin
-			hold   <= 0;
-			pt_lwx <= ~pt_lwx;
-			ps     <= S_IDLE;
-		end
-		default: begin
-			own    <= 0;
-			hold   <= 0;
-			sel    <= 0;
-			strobe <= 0;
-			ps     <= S_IDLE;
-		end
-	endcase
+	if (s_beg) capf <= qk[1];
+	if (s_rel) pt_lwx <= ~pt_lwx;
 end
 
 endmodule
@@ -358,6 +312,7 @@ endmodule
 
 // The link's ack path (sys_top's rack/io_ack, unchanged) and the mux that hands the link nets to the lane
 // player: while it holds them the link's strobe and ack stay frozen, so a link word is delayed, never lost.
+/* verilator lint_off DECLFILENAME */   // lw_link and lw_link_seq share lw_lane's file: either floor builds them
 module lw_link
 (
 	input wire         clk_sys,
@@ -393,6 +348,101 @@ always @(posedge clk_sys) begin
 end
 
 endmodule
+
+// The link-word sequencer of a player (lw_lane's, and the OCRAM download tier's hps_ocram_fplay): it takes the link
+// nets between link transactions and strobes one link word at a time, the player's source supplying the words. A
+// frame begins once start is up, both selects have been low for two cycles and the link is not busy: own and hold
+// rise with the select (fsel). Each word is one strobe, then GAP consecutive cycles with l_wait low (ack); the next
+// word's strobe follows if more, else the frame ends if stop: the select drops, own two cycles later, hold one after
+// that (rel). The state strobes tell the player where it is; none of its inputs may read them.
+module lw_link_seq #(parameter [2:0] GAP = 3'd4)   // 2..7
+(
+	input  wire       clk_sys,
+	input  wire       l_busy,        // any of the link's own selects, or its ID view
+	input  wire       l_wait,        // io_wait | vs_wait: the term that withholds the link's ack
+	input  wire       start,         // a frame can begin (the enable in it)
+	input  wire [1:0] fsel,          // its select, read with beg
+	input  wire       more,          // read in nxt: the next link word is in hand
+	input  wire       stop,          // read in nxt with more low: the frame ends
+	output reg        own    = 1'b0, // the player drives the link nets
+	output reg        hold   = 1'b0, // own, plus one cycle: the link's ack path stays frozen
+	output reg  [3:0] sel    = 4'd0, // {osd_vga, osd_hdmi, fpga, uio}
+	output reg        strobe = 1'b0,
+	output wire       idle,          // no frame
+	output wire       beg,           // one cycle: the frame begins
+	output wire       stb,           // the strobe cycle
+	output wire       ack,           // one cycle: the word is acknowledged
+	output wire       nxt,           // the cycle after an ack
+	output wire       rel            // the frame's last cycle
+);
+
+localparam [2:0] S_IDLE = 3'd0, S_STB = 3'd1, S_ACK = 3'd2, S_NEXT = 3'd3, S_GAP = 3'd4, S_REL = 3'd5;
+
+reg   [2:0] ps    = S_IDLE;
+reg   [2:0] cnt   = 3'd0;
+reg   [1:0] quiet = 2'd0;            // cycles the link's selects have been low, saturating at 2
+
+assign idle = ps == S_IDLE;
+assign beg  = idle && start && quiet == 2'd2 && !l_busy;
+assign stb  = ps == S_STB;
+assign ack  = ps == S_ACK && !l_wait && cnt == GAP - 3'd1;
+assign nxt  = ps == S_NEXT;
+assign rel  = ps == S_REL;
+
+always @(posedge clk_sys) begin
+	quiet <= l_busy ? 2'd0 : (quiet == 2'd2) ? 2'd2 : quiet + 2'd1;
+
+	case (ps)
+		S_IDLE: if (beg) begin
+			own  <= 1'b1;
+			hold <= 1'b1;
+			sel  <= 4'b0001 << fsel;
+			ps   <= S_STB;
+		end
+		else begin
+			own    <= 1'b0;
+			hold   <= 1'b0;
+			sel    <= 4'd0;
+			strobe <= 1'b0;
+		end
+		S_STB: begin
+			strobe <= 1'b1;
+			cnt    <= 3'd0;
+			ps     <= S_ACK;
+		end
+		S_ACK: begin
+			strobe <= 1'b0;
+			if (l_wait) cnt <= 3'd0;
+			else if (ack) ps <= S_NEXT;
+			else cnt <= cnt + 3'd1;
+		end
+		S_NEXT: if (more) ps <= S_STB;
+		else if (stop) begin
+			sel <= 4'd0;
+			cnt <= 3'd0;
+			ps  <= S_GAP;
+		end
+		S_GAP: if (cnt == 3'd1) begin
+			own <= 1'b0;
+			ps  <= S_REL;
+		end
+		else cnt <= cnt + 3'd1;
+		S_REL: begin
+			hold <= 1'b0;
+			ps   <= S_IDLE;
+		end
+		default: begin
+			own    <= 1'b0;
+			hold   <= 1'b0;
+			sel    <= 4'd0;
+			strobe <= 1'b0;
+			ps     <= S_IDLE;
+		end
+	endcase
+end
+
+endmodule
+/* verilator lint_on DECLFILENAME */
 
 `default_nettype wire
 `endif
