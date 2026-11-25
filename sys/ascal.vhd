@@ -345,6 +345,7 @@ ARCHITECTURE rtl OF ascal IS
 	TYPE arr_int9 IS ARRAY (natural RANGE <>) OF integer RANGE -256 TO 255;
 	TYPE arr_uint12 IS ARRAY (natural RANGE <>) OF uint12;
 	TYPE arr_frac IS ARRAY (natural RANGE <>) OF unsigned(11 DOWNTO 0);
+	TYPE arr_div IS ARRAY (natural RANGE <>) OF unsigned(20 DOWNTO 0);
 
 	----------------------------------------------------------
 	-- Input image
@@ -483,7 +484,6 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_copyv : unsigned(0 TO 14);
 	SIGNAL o_adrs : unsigned(31 DOWNTO 0); -- Avalon address
 	SIGNAL o_adrs_pre : natural RANGE 0 TO 2**24-1;
-	SIGNAL o_vaadr : unsigned(23 DOWNTO 0) :=(OTHERS =>'0'); -- o_vacpt * o_stride, accumulated
 	SIGNAL o_stride : unsigned(13 DOWNTO 0);
 	SIGNAL o_adrsa,o_adrsb,o_rline : std_logic;
 	SIGNAL o_ad,o_ad1,o_ad2,o_ad3 : natural RANGE 0 TO 2*BLEN-1;
@@ -547,19 +547,9 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_vpix_inner : arr_pix(0 TO 6);
 
 	SIGNAL o_vpe : std_logic;
+	SIGNAL o_div : arr_div(0 TO 2); --uint12;
 	SIGNAL o_dir : arr_frac(0 TO 2);
-	ATTRIBUTE ramstyle OF o_dir : SIGNAL IS "logic"; -- avoid blockram shift register
-	-- Horizontal phase carried along the DDA: 256*o_hacc = o_hq*2*o_hsize + remainder,
-	-- and 256*o_hacc_next = o_hqn*2*o_hsize + o_hrn
-	SIGNAL o_hq,o_hqn : unsigned(9 DOWNTO 0) :=(OTHERS =>'0');
-	SIGNAL o_hrn : unsigned(12 DOWNTO 0) :=(OTHERS =>'0');
-	-- The same for o_hacc_ini (o_hqi, o_hri) and for the step 2*o_ihsize (o_hqs, o_hrs)
-	SIGNAL o_hqi,o_hqs : unsigned(9 DOWNTO 0) :=(OTHERS =>'0');
-	SIGNAL o_hri,o_hrs : unsigned(12 DOWNTO 0) :=(OTHERS =>'0');
-	SIGNAL o_hrsd : unsigned(13 DOWNTO 0) :=(OTHERS =>'0'); -- o_hrs - 2*o_hsize
-	SIGNAL o_hdd,o_hdr : unsigned(12 DOWNTO 0) :=(OTHERS =>'0');
-	SIGNAL o_hdq : unsigned(8 DOWNTO 0) :=(OTHERS =>'0');
-	SIGNAL o_hdcpt : natural RANGE 0 TO 9 :=0;
+	ATTRIBUTE ramstyle OF o_div, o_dir : SIGNAL IS "logic"; -- avoid blockram shift register
 	SIGNAL o_vdivi : unsigned(12 DOWNTO 0);
 	SIGNAL o_vdivr : unsigned(24 DOWNTO 0);
 	SIGNAL o_divstart : std_logic;
@@ -1871,40 +1861,6 @@ BEGIN
 	END PROCESS ODivider;
 
 	-----------------------------------------------------------------------------
-	-- Horizontal phase constants. A free-running restoring divider:
-	-- 256*o_ihsize = Q*2*o_hsize + R after 8 steps, and 512*o_ihsize after 9.
-	-- o_hacc_ini = o_hsize + o_ihsize, so its quotient is 128 + Q, remainder R.
-	HDivider:PROCESS (o_clk) IS
-		VARIABLE t_v : unsigned(13 DOWNTO 0);
-	BEGIN
-		IF rising_edge(o_clk) THEN
-			IF o_hdcpt=9 THEN
-				o_hqi<=to_unsigned(128,10) + o_hdq(7 DOWNTO 0);
-				o_hri<=o_hdr;
-			END IF;
-			IF o_hdcpt=0 THEN
-				o_hqs<=resize(o_hdq,10);
-				o_hrs<=o_hdr;
-				o_hrsd<=resize(o_hdr,14) - resize(o_hdd,14);
-				o_hdd<=to_unsigned(2*o_hsize,13);
-				o_hdr<=to_unsigned(o_ihsize,13);
-				o_hdq<=(OTHERS =>'0');
-				o_hdcpt<=1;
-			ELSE
-				t_v:=o_hdr & '0';
-				IF t_v>=o_hdd THEN
-					t_v:=t_v-o_hdd;
-					o_hdq<=o_hdq(7 DOWNTO 0) & '1';
-				ELSE
-					o_hdq<=o_hdq(7 DOWNTO 0) & '0';
-				END IF;
-				o_hdr<=t_v(12 DOWNTO 0);
-				o_hdcpt<=(o_hdcpt+1) MOD 10;
-			END IF;
-		END IF;
-	END PROCESS HDivider;
-
-	-----------------------------------------------------------------------------
 	Scalaire:PROCESS (o_clk,o_reset_na) IS
 		VARIABLE lev_inc_v,lev_dec_v : std_logic;
 		VARIABLE prim_v,last_v,bib_v : std_logic;
@@ -1913,9 +1869,6 @@ BEGIN
 		VARIABLE hcarry_v,vcarry_v : boolean;
 		VARIABLE dif_v : natural RANGE 0 TO 8*OHRESH-1;
 		VARIABLE off_v : natural RANGE 0 TO 15;
-		VARIABLE hra_v,hrb_v : unsigned(13 DOWNTO 0);
-		VARIABLE hrn_v : unsigned(12 DOWNTO 0);
-		VARIABLE hqa_v : unsigned(9 DOWNTO 0);
 	BEGIN
 		IF o_reset_na='0' THEN
 			o_copy<=sWAIT;
@@ -2140,14 +2093,12 @@ BEGIN
 						o_vacc     <=o_vacc_ini;
 						o_vacc_next<=o_vacc_ini + 2*o_ivsize;
 						o_vacpt <=x"001";
-						o_vaadr <=resize(o_stride,24);
 						o_vacptl<="01";
 						vcarry_v:=false;
 					END IF;
 
 					IF vcarry_v THEN
 						o_vacpt<=o_vacpt+1;
-						o_vaadr<=o_vaadr + o_stride;
 					END IF;
 					IF vcarry_v AND o_prim THEN
 						o_vacptl<=o_vacptl+1;
@@ -2207,14 +2158,18 @@ BEGIN
 			-- To counteract the severe vibrating/motion with bob deinterlacing, we need to offset one field
 			-- by a half-line. This is done by only reading the first line of the 'even' frame once
 
-			-- o_vacpt * o_stride, held in o_vaadr; a bob line that reads o_vacpt-1, or o_vacpt
-			-- with its low bit cleared, is one stride back
-			IF o_inter='1' AND o_bob_deint='1' AND
-				((o_iwfl(o_obuf0)='0' AND o_vacpt/=0 AND o_rline='0') OR
-				 (o_iwfl(o_obuf0)='1' AND o_vacpt(0)='1')) THEN
-				o_adrs_pre<=to_integer(o_vaadr - o_stride);
+			IF o_inter='1' AND o_bob_deint='1' THEN
+				IF o_iwfl(o_obuf0)='0' THEN
+					IF o_vacpt=0 OR o_rline='1' THEN
+						o_adrs_pre <= to_integer(o_vacpt) * to_integer(o_stride);
+					ELSE
+						o_adrs_pre <= (to_integer(o_vacpt)-1) * to_integer(o_stride);
+					END IF;
+				ELSE
+					o_adrs_pre <= to_integer(o_vacpt(11 DOWNTO 1) & "0") * to_integer(o_stride);
+				END IF;
 			ELSE
-				o_adrs_pre<=to_integer(o_vaadr);
+				o_adrs_pre<=to_integer(o_vacpt) * to_integer(o_stride);
 			END IF;
 
 			IF o_adrsa='1' THEN
@@ -2231,18 +2186,6 @@ BEGIN
 			END IF;
 
 			------------------------------------------------------
-			-- Phase step for o_hacc_next: remainder plus o_hrs modulo 2*o_hsize,
-			-- quotient plus o_hqs and the remainder's carry
-			hra_v:=resize(o_hrn,14) + resize(o_hrs,14);
-			hrb_v:=resize(o_hrn,14) + o_hrsd;
-			IF hrb_v(13)='0' THEN
-				hrn_v:=hrb_v(12 DOWNTO 0);
-				hqa_v:=o_hqn + o_hqs + 1;
-			ELSE
-				hrn_v:=hra_v(12 DOWNTO 0);
-				hqa_v:=o_hqn + o_hqs;
-			END IF;
-
 			-- Copy from buffered memory to pixel lines
 			o_sh<='0';
 			o_dcpt_clr <= '0';
@@ -2265,9 +2208,6 @@ BEGIN
 						o_ihsizem<=o_ihsize + o_off(0) - 2;
 						o_hacc     <=o_hacc_ini;
 						o_hacc_next<=o_hacc_ini + 2*o_ihsize;
-						o_hq <=o_hqi;
-						o_hqn<=o_hqi; -- one step behind o_hacc_next until o_dshi=2
-						o_hrn<=o_hri;
 						o_hacpt    <=x"000";
 						o_dcpt_clr <= '1';
 						o_dshi<=2;
@@ -2301,23 +2241,14 @@ BEGIN
 						IF dif_v>=4*OHRESH THEN
 							o_hacc<=o_hacc_next;
 							o_hacc_next<=o_hacc_next + 2*o_ihsize;
-							o_hq <=o_hqn;
-							o_hqn<=hqa_v;
 							hcarry_v:=false;
 						ELSE
 							o_hacc<=dif_v;
 							o_hacc_next<=(dif_v + 2*o_ihsize + (4*OHRESH)) MOD (4*OHRESH);
-							o_hq <=o_hqn - 256;
-							o_hqn<=hqa_v - 256;
 							hcarry_v:=true;
 						END IF;
-						o_hrn<=hrn_v;
 						o_dcpt_inc <= '1';
 					ELSE
-						IF o_dshi=2 THEN
-							o_hqn<=hqa_v;
-							o_hrn<=hrn_v;
-						END IF;
 						o_dshi<=o_dshi-1;
 						hcarry_v:=false;
 					END IF;
@@ -2610,31 +2541,89 @@ BEGIN
 	-----------------------------------------------------------------------------
 	-- Horizontal Scaler
 	HSCAL:PROCESS(o_clk) IS
+		VARIABLE div_v : unsigned(20 DOWNTO 0);
 		VARIABLE dir_v : unsigned(11 DOWNTO 0);
 	BEGIN
 		IF rising_edge(o_clk) THEN
 			-- Pipeline signals
 			-----------------------------------
-			-- Horizontal phase: floor(256*o_hacc / (2*o_hsize)), all ones from o_hacc = 2*o_hsize,
-			-- as FRAC bits rounded up to an even count. Three stages keep the divider's latency.
+			-- Pipelined 8 bits non-restoring divider. Cycle 1
 			dir_v:=x"000";
-			IF o_hq(9 DOWNTO 8)/="00" THEN
-				dir_v(11 DOWNTO 4):=x"FF";
+			div_v:=to_unsigned(o_hacc * 256,21);
+
+			div_v:=div_v-to_unsigned(o_hsize*256,21);
+			dir_v(11):=NOT div_v(20);
+			IF div_v(20)='0' THEN
+				div_v:=div_v-to_unsigned(o_hsize*128,21);
 			ELSE
-				dir_v(11 DOWNTO 4):=o_hq(7 DOWNTO 0);
+				div_v:=div_v+to_unsigned(o_hsize*128,21);
 			END IF;
-			IF FRAC<=6 THEN
-				dir_v(5 DOWNTO 4):="00";
-			END IF;
-			IF FRAC<=4 THEN
-				dir_v(7 DOWNTO 6):="00";
-			END IF;
+			dir_v(10):=NOT div_v(20);
+
+			o_div(0)<=div_v;
 			o_dir(0)<=dir_v;
-			o_dir(1)<=o_dir(0);
-			o_dir(2)<=o_dir(1);
+
+			-- Cycle 2
+			div_v:=o_div(0);
+			dir_v:=o_dir(0);
+			IF div_v(20)='0' THEN
+				div_v:=div_v-to_unsigned(o_hsize*64,21);
+			ELSE
+				div_v:=div_v+to_unsigned(o_hsize*64,21);
+			END IF;
+			dir_v( 9):=NOT div_v(20);
+
+			IF div_v(20)='0' THEN
+				div_v:=div_v-to_unsigned(o_hsize*32,21);
+			ELSE
+				div_v:=div_v+to_unsigned(o_hsize*32,21);
+			END IF;
+			dir_v( 8):=NOT div_v(20);
+
+			o_div(1)<=div_v;
+			o_dir(1)<=dir_v;
+
+			-- Cycle 3
+			div_v:=o_div(1);
+			dir_v:=o_dir(1);
+			IF FRAC>4 THEN
+				IF div_v(20)='0' THEN
+					div_v:=div_v-to_unsigned(o_hsize*16,21);
+				ELSE
+					div_v:=div_v+to_unsigned(o_hsize*16,21);
+				END IF;
+				dir_v(7):=NOT div_v(20);
+
+				IF div_v(20)='0' THEN
+					div_v:=div_v-to_unsigned(o_hsize*8,21);
+				ELSE
+					div_v:=div_v+to_unsigned(o_hsize*8,21);
+				END IF;
+				dir_v(6):=NOT div_v(20);
+			END IF;
+			o_div(2)<=div_v;
+			o_dir(2)<=dir_v;
+
+			div_v:=o_div(2);
+			dir_v:=o_dir(2);
+			IF FRAC>6 THEN
+				IF div_v(20)='0' THEN
+					div_v:=div_v-to_unsigned(o_hsize*4,21);
+				ELSE
+					div_v:=div_v+to_unsigned(o_hsize*4,21);
+				END IF;
+				dir_v(5):=NOT div_v(20);
+
+				IF div_v(20)='0' THEN
+					div_v:=div_v-to_unsigned(o_hsize*2,21);
+				ELSE
+					div_v:=div_v+to_unsigned(o_hsize*2,21);
+				END IF;
+				dir_v(4):=NOT div_v(20);
+			END IF;
 
 			-----------------------------------
-			o_hfrac(1)<=o_dir(2);
+			o_hfrac(1)<=dir_v;
 			o_hfrac(2 TO 9) <= o_hfrac(1 TO 8);
 
 			o_copyv(1 TO 14)<=o_copyv(0 TO 13);
