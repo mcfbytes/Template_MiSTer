@@ -1121,7 +1121,7 @@ def lw_lines(path):
         if any(b for b, _ in stack): out.append((n, l))
     return out
 wfiles = [(p, None) for p in lwfiles + [SDC] * os.path.exists(SDC)] + [(p, 'lw') for p in stock + ['sys/emu_ports.vh']]
-wfiles += [(d + '/' + x, None) for d in ('tb', 'tb/hps') if os.path.isdir(d)
+wfiles += [(d + '/' + x, None) for d in ('tb', 'tb/hps', 'tb/golden') if os.path.isdir(d)
            for x in sorted(os.listdir(d)) if re.search(r'\.(s?v|sh|c|h)$', x)]
 GUIDE = 'docs/LW_BRIDGE.md'
 wfiles += [(GUIDE, None)]
