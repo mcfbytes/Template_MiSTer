@@ -315,6 +315,14 @@ wire [31:0] ocram_rq_lba;
 wire        ocram_e_ask, ocram_e_v;
 wire [41:0] ocram_e_d;
 `endif
+`ifdef MISTER_OCRAM_LANE
+// The capture lane (MISTER_OCRAM_LANE): the walker's capture frame, its replies, and the master's REPLY record.
+wire [15:0] ocram_e_free;
+wire        ocram_p_post, ocram_p_wv, ocram_p_start, ocram_p_wtake;
+wire  [7:0] ocram_p_arg;
+wire [10:0] ocram_p_n;
+wire [31:0] ocram_p_wd;
+`endif
 // The download tier: the mark line (f2h_irq[12]), the ring's tail and its fault and mid levels; constants without it.
 wire        ocram_mline, ocram_c0_ffault, ocram_c0_fmid;
 wire [15:0] ocram_fio_tail;
@@ -1100,6 +1108,25 @@ hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_
 	.e_ask(),
 	.e_v(1'b0),
 	.e_d(42'd0),
+`endif
+`ifdef MISTER_OCRAM_LANE
+	.e_free(ocram_e_free),
+	.p_post(ocram_p_post),
+	.p_arg(ocram_p_arg),
+	.p_n(ocram_p_n),
+	.p_wv(ocram_p_wv),
+	.p_wd(ocram_p_wd),
+	.p_start(ocram_p_start),
+	.p_wtake(ocram_p_wtake),
+`else
+	.e_free(),
+	.p_post(1'b0),
+	.p_arg(8'd0),
+	.p_n(11'd0),
+	.p_wv(1'b0),
+	.p_wd(32'd0),
+	.p_start(),
+	.p_wtake(),
 `endif
 
 	.awid(ocram_awid),
@@ -2267,6 +2294,27 @@ hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_E
 	.m_start(ocram_m_start),
 	.m_wtake(ocram_m_wtake),
 	.m_pub(ocram_m_pub),
+`ifdef MISTER_OCRAM_LANE
+	.p_post(ocram_p_post),
+	.p_arg(ocram_p_arg),
+	.p_n(ocram_p_n),
+	.p_wv(ocram_p_wv),
+	.p_wd(ocram_p_wd),
+	.e_free(ocram_e_free),
+	.p_start(ocram_p_start),
+	.p_wtake(ocram_p_wtake),
+	.l_dout(io_dout | io_dout_sys),           // the link's reply word, as gp_in carries it to the HPS
+`else
+	.p_post(),
+	.p_arg(),
+	.p_n(),
+	.p_wv(),
+	.p_wd(),
+	.e_free(16'd0),
+	.p_start(1'b0),
+	.p_wtake(1'b0),
+	.l_dout(16'd0),
+`endif
 
 	.c_req(ocram_c0_req),
 	.c_we(ocram_c0_we),

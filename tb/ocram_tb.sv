@@ -49,6 +49,9 @@
 // each STATUS, INFO, UPLOAD and RUMBLE record against the twin's reply; nothing while C_BIND bit 8 is clear; the
 // causes standing at the bind; a STATUS torn by a second transfer abandoned; a REQUEST owed with a STATUS first.
 // With MISTER_DISABLE_SPI_EVT (arm Y) the link's replies read 0 and the records are held to the driven values.
+// With MISTER_OCRAM_LANE (arm A, beside the SECTOR, download and UIO tiers) capture LFRAMEs on the UIO select: each
+// REPLY against the twin hps_io's in-band replies to the same words, odd and even frames, the tag echoed; a capture
+// frame held while the EVT ring lacks len + 1 words, the OSD and SECTOR rings served meanwhile.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -240,10 +243,16 @@ localparam RME_B = 1;
 `else
 localparam RME_B = 0;
 `endif
+`ifdef MISTER_OCRAM_LANE
+localparam LANE_B = 1;
+`else
+localparam LANE_B = 0;
+`endif
 localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0) |
                                (FIO_B ? 32'h2 : 32'h0) | (SEC_B ? 32'h400 : 32'h0) | (MNT_B ? 32'h1 : 32'h0)
                                | (RMB_B ? 32'h1_0000 : 32'h0) | (RMO_B ? 32'h2_0000 : 32'h0)
-                               | (EVT_B ? 32'h800 : 32'h0) | (RME_B ? 32'h4_0000 : 32'h0);
+                               | (EVT_B ? 32'h800 : 32'h0) | (RME_B ? 32'h4_0000 : 32'h0)
+                               | (LANE_B ? 32'h1000 : 32'h0);
 localparam [31:0] C_K8_EXP   = {ROWS16, 16'd256};
 
 localparam integer M_NORMAL = 0, M_SECURE_REFUSE = 1, M_NEVER = 2;
@@ -327,6 +336,13 @@ wire [41:0] e_d;
 assign e_v = 1'b0;
 assign e_d = 42'd0;
 `endif
+// the capture lane's REPLY between the walker and the master, and the link's reply word for the player
+wire [15:0] e_free;
+wire        p_post, p_wv, p_start, p_wtake;
+wire  [7:0] p_arg;
+wire [10:0] p_n;
+wire [31:0] p_wd;
+wire [15:0] l_dout_m;
 // the SECTOR slot's core side (the window's xsec nets): the bench's consumer model drives the request
 reg         x_reset = 1'b0, x_hps_ack = 1'b0, x_req = 1'b0, x_commit = 1'b0;
 reg  [31:0] x_lba = 32'd0;
@@ -365,6 +381,8 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 	.c0_wide(c0_wide), .rq_post(rq_post), .rq_lba(rq_lba), .rq_start(rq_start),
 	.f_tail(f_tail), .c0_ffault(c0_ffault), .c0_fmid(c0_fmid), .mark_line(mark_out),
 	.e_ask(e_ask), .e_v(e_v), .e_d(e_d),
+	.e_free(e_free), .p_post(p_post), .p_arg(p_arg), .p_n(p_n), .p_wv(p_wv), .p_wd(p_wd), .p_start(p_start),
+	.p_wtake(p_wtake),
 	.c0_mfault(c0_mfault), .c0_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
 	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
 	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst),
@@ -421,6 +439,8 @@ hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP
 	.f_tail(f_tail), .c_ffault(c0_ffault), .c_fmid(c0_fmid),
 	.c_mfault(c0_mfault), .c_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
 	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
+	.p_post(p_post), .p_arg(p_arg), .p_n(p_n), .p_wv(p_wv), .p_wd(p_wd), .e_free(e_free), .p_start(p_start),
+	.p_wtake(p_wtake), .l_dout(l_dout_m),
 	.xm_hps_ack(2'd0), .xm_rd(mc_rd), .xm_wr(mc_wr), .xm_lba(xm_lba), .xm_cnt({mc_cnt2, mc_cnt1}),
 	.xm_en(xm_en), .xm_ack(xm_ack),
 	.l_busy(l_busy_m), .l_wait(l_wait_m),
@@ -961,6 +981,11 @@ integer    ev_n = 0;
 reg [15:0] ev_log [0:1023];
 // the events tier's records as the host takes them: {kind, arg} and up to four payload words each
 integer    evd_n = 0, evd_published = 0, evd_abandoned = 0;
+// the capture lane's REPLY records as the host takes them: the header and the payload words, from rp_at[i]
+integer    rp_n = 0, rp_published = 0, rp_wn = 0;
+reg [31:0] rp_hdr [0:255];
+integer    rp_at [0:255];
+reg [31:0] rp_w [0:4095];
 reg [15:0] evd_ka [0:1023];
 reg [31:0] evd_w [0:4095];
 integer    bind_n = 0;
@@ -1232,6 +1257,8 @@ always @(posedge clk) begin
 					if (wdata[15:0] !== 16'd0) merr("an INFO or UPLOAD header's length");
 				end else if (EVT_B && rec_kind_m == 8'h2A) begin
 					if (wdata[15:0] !== 16'd1 || wdata[23:16] > 8'd5) merr("a RUMBLE header word");
+				end else if (LANE_B && rec_kind_m == 8'h22) begin
+					if (wdata[15:0] == 16'd0 || wdata[15:0] > 16'd1020 || !wdata[18]) merr("a REPLY header word");
 				end else merr("an EVT header of an unknown kind");
 				if (SEC_B && bind_owed) begin
 					if (rec_kind_m != 8'h27) merr("a record between a C_BIND store and its BIND");
@@ -1265,6 +1292,7 @@ always @(posedge clk) begin
 				else if (rec_kind_m == 8'h27) bind_published = bind_published + 1;
 				else if (EVT_B && (rec_kind_m == 8'h20 || rec_kind_m == 8'h28 || rec_kind_m == 8'h29 ||
 				                   rec_kind_m == 8'h2A)) evd_published = evd_published + 1;
+				else if (LANE_B && rec_kind_m == 8'h22) rp_published = rp_published + 1;
 				else verdict_published = verdict_published + 1;
 				b = (pub_head - (tail_seen & 16'hFFFF)) & 16'hFFFF;
 				if (b <= EVT_WORDS && b > m_deepest) m_deepest = b;
@@ -1337,6 +1365,15 @@ task evt_take(output integer got);
 					check("a BIND record: its length", hdr[15:0], 16'd0);
 					if (bind_n < 256) bind_log[bind_n] = hdr[23:16];
 					bind_n = bind_n + 1;
+				end else if (LANE_B && kind == 8'h22) begin
+					if (rp_n < 256) begin
+						rp_hdr[rp_n] = hdr; rp_at[rp_n] = rp_wn;
+						for (i = 0; i < len; i = i + 1) begin
+							if (rp_wn < 4096) rp_w[rp_wn] = evt_word(host_tail + 1 + i[15:0]);
+							rp_wn = rp_wn + 1;
+						end
+					end
+					rp_n = rp_n + 1;
 				end else if (EVT_B && (kind == 8'h20 || kind == 8'h28 || kind == 8'h29 || kind == 8'h2A)) begin
 					if (evd_n < 1024) begin
 						evd_ka[evd_n] = hdr[31:16];
@@ -3922,6 +3959,7 @@ endtask
 `ifndef MISTER_OCRAM_FIO
 assign l_busy_m = 1'b0;
 assign l_wait_m = 1'b0;
+assign l_dout_m = 16'd0;
 `else
 ////////////////////////  the download tier's cases  ////////////////////////
 
@@ -3949,13 +3987,23 @@ wire [45:0] fbus;
 assign fbus[45:38] = 8'd0;
 assign fbus[35:33] = {m_sel[1], m_sel[0], m_strobe};
 assign fbus[31:16] = m_din;
+assign l_dout_m = fbus[15:0];             // io_dout, as sys_top's io_dout | io_dout_sys with no sys_top reply
 wire        io_dl, io_wr;
 wire [15:0] io_ix, io_do;
 wire [26:0] io_ad;
+`ifdef MISTER_OCRAM_LANE
+// arm A: the replies the capture frames read, the same on the twin
+reg [127:0] a_st = 128'd0;
+reg         a_ss = 1'b0;
+reg  [15:0] a_r2 = 16'd0;
+`define A_IO_PORTS , .status_in(a_st), .status_set(a_ss), .joystick_2_rumble(a_r2)
+`else
+`define A_IO_PORTS
+`endif
 hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) fio_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(fbus), .ioctl_wait(f_wait), .ioctl_din(16'd0),
-	.sd_rd(1'b0), .sd_wr(1'b0),
+	.sd_rd(1'b0), .sd_wr(1'b0) `A_IO_PORTS,
 	.ioctl_download(io_dl), .ioctl_index(io_ix), .ioctl_wr(io_wr), .ioctl_addr(io_ad), .ioctl_dout(io_do)
 );
 
@@ -4362,7 +4410,9 @@ assign tbus[31:16] = tw_din;
 hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) tw_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(tbus), .ioctl_wait(1'b0), .ioctl_din(16'd0), .sd_rd(1'b0), .sd_wr(1'b0)
+	`A_IO_PORTS
 );
+`undef A_IO_PORTS
 `ifdef MISTER_OCRAM_OSD
 `define U_OSD_PORT , .lw_we(1'b0), .lw_addr(13'd0), .lw_byte(8'd0)
 `else
@@ -4585,7 +4635,9 @@ task uio_case2;
 		// a capture frame, a tag without capture: skipped whole, nothing on the link, no fault; the next frame plays
 		n0 = usn_m;
 		u_words(8'h1E, 8);
+`ifndef MISTER_OCRAM_LANE
 		u_frame(2'd0, 4'd0, 1'b1, "U2 a capture frame (no MISTER_OCRAM_LANE)");
+`endif
 		u_frame(2'd0, 4'd5, 1'b0, "U2 a tag without capture");
 		check("U2: refused frames: no UIO strobe", usn_m, n0);
 		u_words(8'h1E, 8);
@@ -4595,6 +4647,160 @@ task uio_case2;
 		check("U2: the walker took no fault", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
 	end
 endtask
+`ifdef MISTER_OCRAM_LANE
+////////////////////////  the capture lane (MISTER_OCRAM_LANE, arm A)  ////////////////////////
+
+// The twin's transaction with each word's reply as the HPS reads it at the word's acknowledge (io_dout)
+reg  [15:0] ur [0:63];
+task a_txn;
+	integer m;
+	begin
+		@(negedge clk_sys); tw_l = 4'b0001;
+		repeat (2) @(negedge clk_sys);
+		for (m = 0; m < un; m = m + 1) begin tw_word(uw[m]); ur[m] = tbus[15:0]; end
+		@(negedge clk_sys); tw_l = 4'd0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+// the words uw[0..un-1] as one capture LFRAME on the UIO select with tag t, published
+task a_put(input [3:0] t);
+	integer j, len;
+	begin
+		len = (un + 1) / 2;
+		fio_put({8'h30, un[0], t, 1'b1, 2'd0, len[15:0]});
+		for (j = 0; j < len; j = j + 1) fio_put({(2 * j + 1 < un) ? uw[2 * j + 1] : 16'd0, uw[2 * j]});
+		fio_publish;
+	end
+endtask
+// the next REPLY, at most us microseconds away: its header and words against the twin's replies ur[]
+task a_check(input integer r0, input [3:0] t, input integer us, input string what);
+	integer j, len, bad, tt, got;
+	reg [31:0] w;
+	begin
+		len = (un + 1) / 2;
+		tt = 0;
+		while (rp_n <= r0 && tt < us * 20) begin evt_take(got); if (!got) begin repeat (5) @(posedge clk); tt = tt + 1; end end
+		check({what, ": a REPLY record"}, rp_n > r0, 1);
+		check({what, ": its header {0x22, the frame's arg, len}"}, rp_hdr[r0], {8'h22, un[0], t, 1'b1, 2'd0, len[15:0]});
+		bad = 0;
+		for (j = 0; j < len; j = j + 1) begin
+			w = {(2 * j + 1 < un) ? ur[2 * j + 1] : 16'd0, ur[2 * j]};
+			if (rp_w[rp_at[r0] + j] !== w) begin
+				if (bad < 4) $display("   %s: word %0d got %h, the link's replies %h", what, j, rp_w[rp_at[r0] + j], w);
+				bad = bad + 1;
+			end
+		end
+		check({what, ": each word the in-band replies, low half first"}, bad, 0);
+	end
+endtask
+task a_status(input [127:0] v);
+	begin
+		@(negedge clk_sys); a_st = v; a_ss = 1'b1;
+		repeat (3) @(negedge clk_sys); a_ss = 1'b0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+// 0x29 with n words of 0: the flag, then the status halves
+task a_words29(input integer n);
+	integer j;
+	begin uw[0] = 16'h0029; un = 1 + n; for (j = 1; j <= n; j = j + 1) uw[j] = 16'd0; end
+endtask
+
+// A1. capture frames: odd and even, the tag echoed, each REPLY word the in-band replies
+task lane_case1;
+	integer r0, ok1;
+	begin
+		$display("-- A1: capture frames on the UIO select: each REPLY against the link's in-band replies");
+		fio_session(16'h0A01);
+		e_drain_a;
+		a_status({$random(seed), $random(seed), $random(seed), $random(seed)});
+		check("A1: C_CAPS bit 12", mem[C_CAPS >> 2][12], 1);
+		// odd: 0x29 and eight words (nine link words, five ring words)
+		a_words29(8); r0 = rp_n;
+		a_put(4'h9);
+		fio_wait_played(5000, ok1);
+		check("A1 odd: C_IDX[1] reaches the frame's end", ok1, 1);
+		a_txn;
+		a_check(r0, 4'h9, 2000, "A1 odd (0x29, 9 link words)");
+		// even: 0x29 and seven words
+		a_status({$random(seed), $random(seed), $random(seed), $random(seed)});
+		a_words29(7); r0 = rp_n;
+		a_put(4'h3);
+		fio_wait_played(5000, ok1);
+		a_txn;
+		a_check(r0, 4'h3, 2000, "A1 even (0x29, 8 link words)");
+		// one word: pad 2's rumble level
+		@(negedge clk_sys); a_r2 = $random(seed);
+		uw[0] = 16'h023F; un = 1; r0 = rp_n;
+		a_put(4'hF);
+		fio_wait_played(5000, ok1);
+		a_txn;
+		a_check(r0, 4'hF, 2000, "A1 one word (0x23F)");
+		check("A1: the level read", rp_w[rp_at[r0]], {16'd0, a_r2});
+		// a write frame between captures plays as before and posts nothing
+		u_words(8'h1E, 8); r0 = rp_n;
+		tw_txn(4'b0001);
+		u_frame(2'd0, 4'd0, 1'b0, "A1 a write frame");
+		u_same("A1 the write frame");
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain_a;
+		check("A1: no REPLY for a frame without capture", rp_n, r0);
+		check("A1: REPLY records the monitor saw", rp_published, rp_n);
+	end
+endtask
+task e_drain_a;
+	integer got;
+	begin got = 1; while (got) evt_take(got); end
+endtask
+
+// A2. a capture frame is held while the EVT ring lacks len + 1 words; the OSD and SECTOR rings are served meanwhile
+task lane_case2;
+	integer r0, n0, f0, ok1, h, t0;
+	begin
+		$display("-- A2: a capture frame held for room in the EVT ring; rings 2 and 4 still served");
+		sec_session(16'h0A02, 1);
+		fio_head = 0;
+		e_drain_a;
+		a_words29(8); r0 = rp_n; n0 = usn_m;
+		// the host's tail shown 2,045 words behind the head: 3 words free, the frame needs 6
+		h = mem[C_IDX3 >> 2];
+		mem[H_IDX3 >> 2] = {16'd0, h[15:0] - 16'd2045};
+		repeat (8 << POLLC) @(posedge clk);
+		a_put(4'h6);
+		repeat (40 << POLLC) @(posedge clk);
+		check("A2: the held frame is not consumed (C_IDX[1])", mem[C_IDX1 >> 2], 32'd0);
+		check("A2: nothing played on the UIO select", usn_m, n0);
+		check("A2: no REPLY", rp_n, r0);
+		check("A2: no fault on ring 1", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
+		// ring 2: an OSD row
+		t0 = osd_head;
+		osd_publish_row(3); osd_publish;
+		osd_wait_tail(osd_head[15:0], 2000, ok1);
+		check("A2: the OSD ring is served while the frame is held", ok1, 1);
+		// ring 4: a request (its REQUEST fits in the 3 words, and is left in the ring: a take stores the real tail)
+		// and its frame
+		f0 = c_frames; n0 = rq_published;
+		core_ask(32'd2200);
+		t0 = 0;
+		while (rq_published == n0 && t0 < 200000) begin @(posedge clk); t0 = t0 + 1; end
+		check("A2: a REQUEST fits beside the held frame", rq_published - n0, 1);
+		sec_frame(32'd2200, 0); sec_publish;
+		core_wait(f0, 5000, ok1);
+		check("A2: the SECTOR ring is served while the frame is held", ok1, 1);
+		check("A2: still held", mem[C_IDX1 >> 2], 32'd0);
+		// the real tail: room, the frame plays, its REPLY against the twin
+		mem[H_IDX3 >> 2] = {16'd0, host_tail};
+		e_drain_a;
+		fio_wait_played(5000, ok1);
+		check("A2: with room the frame plays", ok1, 1);
+		a_txn;
+		a_check(r0, 4'h6, 2000, "A2 the held frame");
+		core_drop;
+		repeat (40 << POLLC) @(posedge clk);
+		e_drain_a;
+	end
+endtask
+`endif
 `endif
 `endif
 
@@ -4691,6 +4897,10 @@ initial begin
 `ifdef MISTER_OCRAM_UIO
 	uio_case1;
 	uio_case2;
+`ifdef MISTER_OCRAM_LANE
+	lane_case1;
+	lane_case2;
+`endif
 `endif
 `endif
 

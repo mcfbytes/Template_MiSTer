@@ -427,6 +427,20 @@ ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
 ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
 `endif
 `endif
+// MISTER_OCRAM_LANE captures the replies of the download tier's frames into REPLY records, which the SECTOR tier's
+// record writer writes: without either there is no frame or no writer.
+`ifdef MISTER_OCRAM_LANE
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_FIO
+ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
+`endif
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT ocram_lane_sec_guard();
+`endif
+`else
+ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
+`endif
+`endif
 
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;

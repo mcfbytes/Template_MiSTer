@@ -105,6 +105,15 @@
 #      into two osds each (no sel-2 strobe without HDMI); a capture frame and a tagged frame skipped by length, no
 #      fault; and every download case of arm O's shape in the same run. Then verilator lints the master, the walker
 #      and the player with the macro, with and without MISTER_DEBUG_NOHDMI
+#   A  the capture lane (MISTER_OCRAM_LANE, the lean profile's L1; arm X has its guards): tb/ocram_tb.sv's shape
+#      with MISTER_LW, the SECTOR, download and UIO tiers and MISTER_OCRAM_LANE, every seed, plain and with the
+#      crossing models, at 33.8688 and 20 MHz: C_CAPS bit 12 in the hello's exact word; capture frames on the UIO
+#      select, odd and even and of one word, each REPLY {0x22, the frame's arg, len} with the tag echoed and each
+#      word the twin hps_io's in-band replies to the same link words, low half first; a write frame between them
+#      posts none; a capture frame held while the EVT ring lacks len + 1 words, unconsumed and unplayed, while the
+#      OSD and SECTOR rings are served, then played once there is room; and every case of arm O's SECTOR and
+#      download shapes and arm U's in the same run (a capture frame on a build without the lane: arm U's U2). Then
+#      verilator lints the master, the walker and the player with the macro
 #   I  the events tier's records (MISTER_OCRAM_EVT, the lines design's E1; arm X has its guards, arm Y its removal):
 #      tb/ocram_tb.sv's SECTOR shape with MISTER_LW and MISTER_OCRAM_EVT, a real hps_io on the event port through
 #      hps_ocram_evt and a twin hps_io polled over its own link, every seed, plain and with the crossing models, at
@@ -508,6 +517,57 @@ uarm() {
   else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
 
+# aarm LOG: arm A. tb/ocram_tb.sv's capture shape, each shape compiled once, run under every seed, plain and with
+# the crossing models; then verilator on the master, the walker and the player with the macro.
+AB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
+AD="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
+AD="$AD -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE"
+aarm() {
+  : > "$1"; n=0; f=0
+  for m in plain cdc; do
+    for c in lane33 lane20; do
+      case $c in lane33) D="$AD -DOCRAM_TB_SYS_HP_PS=14762";; lane20) D="$AD -DOCRAM_TB_SYS_HP_PS=25000";; esac
+      d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      echo "-- the bench compiles ($c, $m)" >> "$1"
+      if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/laneA_${c}_$m.vvp" $AB > "$O/laneA_${c}_$m.err" 2>&1; then
+        echo "pass bench: compiles ($c, $m)" >> "$1"; n=$((n + 1))
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          vvp -n "$O/laneA_${c}_$m.vvp" +lw_seed=$s > "$O/laneA_${c}_$m.$s.log" 2>&1 &
+        done; wait
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          echo "== seed $s $c $m" >> "$1"; cat "$O/laneA_${c}_$m.$s.log" >> "$1"
+          grep -Eq '^(PASSED|FAILED): [0-9]' "$O/laneA_${c}_$m.$s.log" || echo "FAIL bench $s $c $m: gave no result" >> "$1"
+        done
+      else
+        f=$((f + 1)); echo "FAIL bench: does not compile ($c, $m)" >> "$1"; head -20 "$O/laneA_${c}_$m.err" | sed 's/^/   /' >> "$1"
+      fi
+    done
+  done
+  echo "-- verilator --lint-only -Wall on the master, the walker and the player with MISTER_OCRAM_LANE" >> "$1"
+  if command -v verilator >/dev/null 2>&1; then
+    vok=1
+    for VS in "lane:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE" \
+              "laneall:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE -DMISTER_OCRAM_EVT"; do
+      vn=${VS%%:*}; VF=${VS#*:}
+      for t in hps_ocram_master hps_ocram_rx hps_ocram_fplay; do
+        G=""; fl=$t
+        [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
+        [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=1";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
+             > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
+          vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/laneV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
+        fi
+      done
+    done
+    if [ $vok -eq 1 ]; then echo "pass verilator: no warning" >> "$1"; n=$((n + 1))
+    else f=$((f + 1)); fi
+  else
+    echo "SKIPPED verilator: not on PATH" >> "$1"
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
+}
+
 # iarm LOG: arm I. tb/ocram_tb.sv's SECTOR shape with the events tier, each shape compiled once, run under every
 # seed, plain and with the crossing models; then verilator on the master and the port with the macro.
 IB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
@@ -714,6 +774,12 @@ ok|-|MISTER_OCRAM_EVT with the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_O
 bad|spi_evt_off_needs_MISTER_OCRAM_EVT|MISTER_DISABLE_SPI_EVT alone|-DMISTER_DISABLE_SPI_EVT
 bad|spi_evt_off_needs_MISTER_OCRAM_EVT|MISTER_DISABLE_SPI_EVT with MISTER_LW_EVT only|-DMISTER_LW -DMISTER_LW_EVT -DMISTER_DISABLE_SPI_EVT
 ok|-|MISTER_DISABLE_SPI_EVT with the OCRAM events tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_EVT -DMISTER_DISABLE_SPI_EVT -DXO_MASTER
+bad|ocram_lane_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_LANE without the download tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_LANE
+bad|ocram_lane_needs_MISTER_OCRAM_FIO|MISTER_OCRAM_LANE without the floor|-DMISTER_LW -DMISTER_OCRAM_LANE
+bad|ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_LANE without the SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE
+bad|ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT|the master with MISTER_OCRAM_LANE and no SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE -DXO_MASTER
+bad|ocram_lane_needs_MISTER_OCRAM_FIO|the master with MISTER_OCRAM_LANE and no download tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_LANE -DXO_MASTER
+ok|-|MISTER_OCRAM_LANE with the SECTOR and download tiers|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE -DXO_MASTER
 ok|-|MISTER_OCRAM_UIO with the download tier, no HDMI osd|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_DEBUG_NOHDMI -DXO_MASTER -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=4
 bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT0_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT0_SLOT=2
 bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT1_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT1_SLOT=3
@@ -995,6 +1061,15 @@ for g in $ARMS; do
     rmy "$O/rmY.log"
     grep -v "^pass " "$O/rmY.log" | grep -v '^== seed'
     V=$(verdict Y "$O/rmY.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = A ]; then
+    echo "== arm A: tb/ocram_tb.sv with MISTER_OCRAM_LANE: capture frames and their REPLY records"
+    aarm "$O/laneA.log"
+    grep -v "^pass " "$O/laneA.log" | grep -v '^== seed'
+    V=$(verdict A "$O/laneA.log") || rc=1
     R="$R$V
 "
     continue

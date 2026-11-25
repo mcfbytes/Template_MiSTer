@@ -63,7 +63,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_DISABLE_SPI_BLK` (PROVISIONAL, test-only), `MISTER_DISABLE_SPI_BLK_UNUSED` (a slot mask, default 0) | removes `hps_io`'s block arms (`0x16`-`0x18`) and ties the commit mark to 0; declared by C_CAPS bit 16 | every slot below VDNUM on the SECTOR or a mount slot, or in the mask, never both (`spi_blk_off_needs_a_block_tier`, `spi_blk_off_slot_without_a_tier`, `spi_blk_off_unused_slot_on_a_tier`); the LW SECTOR family is not counted | -60 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_EVT` (PROVISIONAL) | `hps_io`'s core->host flags as STATUS, INFO, UPLOAD and RUMBLE records on the EVT ring, bound by H_BIND bit 8; declared by C_CAPS bit 11 | `MISTER_OCRAM_SECTOR_SLOT` (`ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT`), `MISTER_LW` (`ocram_evt_needs_MISTER_LW`), never `MISTER_LW_EVT` (`evt_on_two_tiers`) | 90-110 ALMs (ESTIMATED) |
 | `MISTER_DISABLE_SPI_EVT` (PROVISIONAL, test-only) | removes `hps_io`'s event replies (`0x29`, `0x36`, `0x3C`, `0x?3F`); declared by C_CAPS bit 18 | `MISTER_OCRAM_EVT` (`spi_evt_off_needs_MISTER_OCRAM_EVT`) | -40 ALMs (ESTIMATED) |
-| `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
+| `MISTER_OCRAM_LANE` (PROVISIONAL) | capture LFRAMEs on ring 1: the download tier's player samples each link word's reply and the master posts one REPLY record a frame on the EVT ring; declared by C_CAPS bit 12 | `MISTER_OCRAM_FIO` (`ocram_lane_needs_MISTER_OCRAM_FIO`) and `MISTER_OCRAM_SECTOR_SLOT` (`ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT`); not `MISTER_OCRAM_EVT` | 60-80 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
 | `MISTER_OCRAM_CONFSTR` | the configuration string as one record after the hello | `MISTER_OCRAM_EVT` | 30-50 ALMs |
 | `MISTER_OCRAM_BELL` | an LW register whose store starts a poll at once (only if the poll proves too slow) | both floors | 10-20 ALMs |
@@ -198,7 +198,7 @@ replaces the firewall").
 | `0x30` + 4*r* | H_MARK[*r*] | host | a host-to-core ring's mark, where its descriptor declares a line: `[31]` armed, `[15:0]` an index. Only H_MARK[1] (`0x34`) is built (PROVISIONAL) |
 | `0x80` | C_HELLO | fabric | the master's state, below; in a session, the echo of H_HELLO, stored last |
 | `0x84` | C_VERSION | fabric | `{major, minor}` of the layout |
-| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; `[10]` the master posts a BIND record after every C_BIND store (PROVISIONAL); `[11]` the events tier's records (`MISTER_OCRAM_EVT`, PROVISIONAL); `[16]` the link's block arms are not built (`MISTER_DISABLE_SPI_BLK`), `[17]` nor its OSD row writes (`MISTER_DISABLE_SPI_OSD`), `[18]` nor its event replies (`MISTER_DISABLE_SPI_EVT`) (PROVISIONAL); the rest 0 |
+| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; `[10]` the master posts a BIND record after every C_BIND store (PROVISIONAL); `[11]` the events tier's records (`MISTER_OCRAM_EVT`, PROVISIONAL); `[12]` capture LFRAMEs and REPLY (`MISTER_OCRAM_LANE`, PROVISIONAL); `[16]` the link's block arms are not built (`MISTER_DISABLE_SPI_BLK`), `[17]` nor its OSD row writes (`MISTER_DISABLE_SPI_OSD`), `[18]` nor its event replies (`MISTER_DISABLE_SPI_EVT`) (PROVISIONAL); the rest 0 |
 | `0x8C` | C_STATE | fabric | `[7:0]` hellos taken since configuration; `[12:8]` ring *r* is stopped on a fault; `[20:16]` ring *r* ended the session before this one mid-record |
 | `0x90` + 4*r* | C_IDX[*r*] | fabric | its tail of a host-to-core ring, its head of a core-to-host ring |
 | `0xA4` | C_BIND | fabric | the binds in effect: H_BIND's bits, bit 0 = the SECTOR slot's mux is on the mailbox side, bits 1, 2 = each mount slot's is (PROVISIONAL). Stored at every change; a bind or its drop has taken effect when this word shows it |
@@ -317,7 +317,7 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 | EVT | `0x21` REQUEST, `arg` = `{blk_cnt[5:0], k[1:0]}` | the LBA | the bound slot's request stands and the ring holds no answer, including a request that already stood when the bind arrived |
 | EVT | `0x26` WRITE, `arg` = `{blk_cnt[5:0], k[1:0]}`, `len` = 1 + n | the LBA, then the block's n words | mount slot k's write, read from the core's buffer; its head store is the publish (PROVISIONAL) |
 | EVT | `0x27` BIND, `arg` = C_BIND[7:0], `len` 0 | none | posted after every C_BIND store (PROVISIONAL) |
-| EVT | `0x22` REPLY | reply words | the frame lane's captured replies |
+| EVT | `0x22` REPLY, `arg` = the capture frame's `arg`, echoed whole, `len` = its `len` | word *i* = `{reply[2i+1], reply[2i]}`, low half first; past an odd frame's end the high half is 0 | one capture frame played; `reply[j]` is `io_dout \| io_dout_sys` at link word *j*'s acknowledge, *j* = 0 the opcode's (PROVISIONAL) |
 | EVT | `0x23` MARK, `arg` = ring | its deepest fill | a ring's high-water mark, for sizing |
 | EVT | `0x24` CONFSTR | the string, four bytes a word | the configuration string, once after the hello |
 | LANE | `0x30` LFRAME, `arg` = `{odd[7], tag[6:3], capture[2], sel[1:0]}` | the opcode word, then data words, two a ring word | one link transaction on select `sel`, as the LW frame lane plays it; `tag` and `capture` 0 unless `MISTER_OCRAM_LANE` (PROVISIONAL) |
@@ -330,6 +330,13 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   both directions: the frame's length is C_K[4]'s.
 - **BIND `0x27`:** `arg` = C_BIND[7:0], no payload. Posted after every C_BIND store, under the rule that holds the
   bit-0 drop behind a record in flight. A REQUEST read before a BIND record that shows its slot's bit clear is void.
+- **Capture (`MISTER_OCRAM_LANE`, PROVISIONAL).** An LFRAME with capture (`arg[2]`) takes any tag and a `len` of
+  1-1,020; one without capture still needs tag 0. It is held, unconsumed and unplayed, until the EVT ring has
+  `len + 1` words free, and the frames behind it on ring 1 wait with it while rings 0, 2 and 4 are served. Then
+  its REPLY's header is written, the frame plays, and each ring word's two replies follow as payload: one REPLY a
+  capture frame, in frame order. The record is open while the frame plays, so other records wait behind it; it
+  goes after an owed BIND, REQUEST or WRITE and before the events tier's records, and needs no H_BIND bit. A build
+  without the lane skips a capture frame by length. A host gates capture frames on C_CAPS bit 12.
 - **The events tier's records (`MISTER_OCRAM_EVT`, PROVISIONAL).** Each cause is latched in `hps_io` on its edge,
   bound or not, as the link's `0x29`/`0x36`/`0x3C` replies latch it; a record is posted only while C_BIND bit 8 is
   stored 1, so a cause standing at the bind is its first record. STATUS is one transfer, whole: a later transfer
@@ -574,7 +581,8 @@ share the master at record granularity, so two running together split one budget
 - The SECTOR tier, the mount slots and `hps_ocram_rx.sv`: benched only (`tb/ocram_tb.sv`, `tb/sfeed_tb.sv`), not
   fitted, not run on hardware. The UIO and OSD frames (`MISTER_OCRAM_UIO`) the same: arm U only. The events tier
   (`MISTER_OCRAM_EVT`, arm I) and `MISTER_DISABLE_SPI_EVT` (arm Y) the same; `sys_top`'s port wiring is not
-  simulated, only the master, `hps_ocram_evt` and `hps_io`.
+  simulated, only the master, `hps_ocram_evt` and `hps_io`. The capture lane (`MISTER_OCRAM_LANE`, arm A) the same;
+  its reply word is `hps_io`'s `io_dout` alone in the bench, not `sys_top`'s `io_dout | io_dout_sys`.
 - A greenfield host driving a real core's menu over the ring on hardware (the probe has; the host path is in diagnosis).
 - A stock Main host.
 - A warm reset with `warmramgrp.enable` cleared: stock U-Boot hangs on a hardware warm reset with or without this
