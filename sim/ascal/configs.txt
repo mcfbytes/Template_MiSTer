@@ -1,0 +1,25 @@
+# name | tb_ascal generics (see run.sh for the @ presets)
+# Output presets: @1080 1920x1080p60, @720 1280x720p60, @480 640x480p60 (CEA timings).
+# Input presets: per field, active WxH in a HTOTxVTOT raster; the input clock is faster
+# than a real core's so that a complete input frame lands in DDR within the first output frame.
+# Interlaced input needs a second output frame: the first triple-buffer swap after reset shows
+# a buffer nothing has written yet (buf_next(0,1) = 2), as on hardware.
+# MODE: ascal mode word as sys_top drives it: bit 3 triple buffering (off = low lag), bit 2 polyphase.
+nes-1080-poly    | @nes @1080 -gHMIN=240 -gHMAX=1679 -gMODE=12 -gPOLY=1
+nes-1080-nn      | @nes @1080 -gHMIN=240 -gHMAX=1679 -gMODE=8 -gPOLY=0
+psx-1080-lowlat  | @psx @1080 -gHMIN=230 -gHMAX=1689 -gMODE=4 -gPOLY=1 -gG_DOWNSCALE_NN=true
+snes-720-adapt   | @nes @720 -gHMIN=160 -gHMAX=1119 -gMODE=12 -gPOLY=2
+gen-720-nn       | @gen @720 -gHMIN=160 -gHMAX=1119 -gMODE=0 -gPOLY=0
+pal576i-1080     | @pal576i @1080 -gHMIN=240 -gHMAX=1679 -gMODE=12 -gPOLY=1 -gNFRAMES=2
+pal576i-480-down | @pal576i @480 -gHMIN=0 -gHMAX=639 -gMODE=12 -gPOLY=1 -gNFRAMES=2
+pal576i-480-dnn  | @pal576i @480 -gHMIN=0 -gHMAX=639 -gMODE=8 -gPOLY=1 -gG_DOWNSCALE_NN=true -gNFRAMES=2
+ntsc480i-720-bob | @ntsc480i @720 -gHMIN=160 -gHMAX=1119 -gMODE=12 -gPOLY=1 -gBOB=true -gNFRAMES=2
+vga-480-1to1     | @vga @480 -gHMIN=0 -gHMAX=639 -gMODE=8 -gPOLY=0
+svga-480-down    | @svga @480 -gHMIN=0 -gHMAX=639 -gMODE=12 -gPOLY=1
+nes-720-dsoff    | @nes @720 -gHMIN=160 -gHMAX=1119 -gMODE=12 -gPOLY=1 -gG_DOWNSCALE=false
+burst2048-720    | @nes @720 -gHMIN=160 -gHMAX=1119 -gMODE=12 -gPOLY=1 -gG_NBURST=2048
+lfb-1080-rgb32   | @nes @1080 -gHMIN=240 -gHMAX=1679 -gMODE=12 -gPOLY=1 -gFB_ENA=true -gFB_W=640 -gFB_H=480 -gFB_FMT=6
+lfb-720-565-strd | @nes @720 -gHMIN=160 -gHMAX=1119 -gMODE=8 -gPOLY=0 -gFB_ENA=true -gFB_W=320 -gFB_H=240 -gFB_FMT=4 -gFB_STRIDE=1024
+lfb-480-pal8     | @nes @480 -gHMIN=0 -gHMAX=639 -gMODE=12 -gPOLY=1 -gFB_ENA=true -gFB_W=512 -gFB_H=384 -gFB_FMT=3
+lfb-480-rgb24    | @nes @480 -gHMIN=0 -gHMAX=639 -gMODE=8 -gPOLY=0 -gFB_ENA=true -gFB_W=640 -gFB_H=480 -gFB_FMT=5
+switch-480       | @nes @480 -gHMIN=64 -gHMAX=575 -gMODE=12 -gPOLY=1 -gNFRAMES=3 -gSW_FRAME=1 -gIN2_W=320 -gIN2_H=240 -gSW_HMIN=0 -gSW_HMAX=639 -gSWBLACK=true
