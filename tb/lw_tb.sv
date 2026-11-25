@@ -5917,7 +5917,7 @@ task rm_osd_case;
 		for (r = 0; r < 8; r = r + 1) lw_row(r, 7);
 		osd_drain;
 		ob_cmp("rows 0-7 over LW", 0, 8);
-		osd_check("rows 0-7 over LW, drawn", 64, 3);
+		osd_check("rows 0-7 over LW, drawn", 64, 6);   // the enable shows after up to 5 frames
 		$display("-- MISTER_DISABLE_SPI_OSD: an SPI row write changes nothing, highres included");
 		spi_osd_begin(8'h22);
 		for (i = 0; i < 256; i = i + 1) spi_w({8'h00, ~ob[2*256 + i]});
