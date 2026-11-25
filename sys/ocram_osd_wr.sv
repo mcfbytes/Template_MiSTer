@@ -28,7 +28,7 @@
 `ifdef LW_OCRAM_OSD_WR_BUILT
 `default_nettype none
 
-// The OSD writer, on clk_sys, a record sink (B3: w_v, w_head, w_d; back a_go, rest): a ROW's head names the row
+// The OSD writer, on clk_sys, a record sink (w_v, w_head, w_d; back a_go, rest): a ROW's head names the row
 // and is answered at once; each DATA word waits in the crossing's capture register (w_d) while its four bytes are
 // written, little-endian, one a cycle, under the OSDBUF guard (both osd selects low and the I/O view, in that
 // cycle and the two before), and is answered after the fourth. A word met with the enable low is answered

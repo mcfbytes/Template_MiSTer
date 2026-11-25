@@ -30,7 +30,7 @@
 
 // hps_ocram_rx's crossing, the one module of the consumer on two clocks: every lw_xfer, lw_sync and lw_fence, and
 // every register a crossing reads. Forward, one held-data word at a time {tag, wr, k, d}: 0 OSD_HEAD, 1 SEC_HEAD, 2
-// DATA (of the last head's ring), 3 FIO_HEAD; on clk_sys it is a record sink entry (B3) for the OSD writer, the
+// DATA (of the last head's ring), 3 FIO_HEAD; on clk_sys it is a record sink entry for the OSD writer, the
 // SECTOR feeder or the download player, held in the capture register (w_d) until answered. Back, the answer {d,
 // code} (0 took, 1 accept, 2 mismatch, 3 no request), one a cycle in a fixed order (feeder, player, OSD writer: a
 // word is outstanding alone, so they never meet). Without MNT_EN and the capture lane only {tag, d} and the code
