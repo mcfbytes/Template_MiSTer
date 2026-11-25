@@ -406,7 +406,7 @@ PROVISIONAL.
 
 - **The binds:** H_SECTOR bit k asks for mount slot k and C_BIND bit k answers, under the SECTOR slot's rules, with
   no flush: no frame waits in ring 0.
-- **A request** crosses from `clk_sys` as `{k, wr, blk_cnt, offered, lba}`, one slot's at a time; a block longer
+- **A request** crosses from `clk_sys` as `{k, wr, blk_cnt, offered, lba}`, the two slots' records in turn; a block longer
   than `MISTER_OCRAM_MOUNT_FRAME` is never offered. The save-slot bits of `HPS_BUS` carry no `blk_cnt`, so the
   Template ties it to 0: one block a request.
 - **A read** is posted at once as REQUEST `{0x21, {blk_cnt, k}, 1}` then the LBA. The host answers with one FRAME on
@@ -416,6 +416,8 @@ PROVISIONAL.
   `lw_save_mux`, whose LBA field carries the buffer word while the slot's mux and ack are up. The master posts WRITE
   `{0x26, {blk_cnt, k}, 1 + n}`, the LBA and the n words, behind a room check of n + 2 words; the ack falls once the
   head store has landed. With no room the WRITE waits, its ack up.
+- **A WRITE holds the walker** from its accept to the ack's fall, so rings 1, 2 and 4 wait up to one block (1,020
+  words at most) behind it.
 - **The record writer** posts every record one at a time: a REQUEST or WRITE starts only while its slot's C_BIND
   bit is stored 1 and no C_BIND store or BIND is owed; a C_BIND store waits for a record in flight.
 - **A fault** on ring 0 (C_STATE bit 8) drops both mount binds; a session that ends mid-record sets bit 16 at the

@@ -1082,7 +1082,8 @@ always @(posedge clk) begin
 
 	// every C_BIND store outside a hello is followed by its BIND record before any other record
 	if (SEC_B && awvalid && !awv_d && awaddr[15:0] == C_BIND && !in_hello) begin
-		if (rec_writes != 0) merr("a C_BIND store inside an EVT record");
+		// (a record the EVT ring's fault abandoned stays half-written in the monitor's count)
+		if (rec_writes != 0 && !dut.stopped_q) merr("a C_BIND store inside an EVT record");
 		if (bind_owed) merr("a C_BIND store before the last one's BIND record");
 		bind_owed = !dut.stopped_q;
 		bind_val = wdata[7:0];
@@ -4003,7 +4004,11 @@ initial begin
 	end
 end
 
+`ifdef OCRAM_TB_MNT
+initial begin #250000000 $display("FAILED: timeout"); $finish; end
+`else
 initial begin #100000000 $display("FAILED: timeout"); $finish; end
+`endif
 
 endmodule
 

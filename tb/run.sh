@@ -312,11 +312,11 @@ ocram() {
       vn=${VS%%:*}; VF=${VS#*:}
       for t in hps_ocram_master hps_ocram_rx hps_ocram_sfeed hps_ocram_fplay; do
         G=""; fl=$t
-        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both|fioall) fl=hps_ocram_rx;; mnt) fl=hps_ocram_rx; G="-GMNT_EN=3";;
+        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both|fioall) fl=hps_ocram_rx;; mnt) fl=hps_ocram_rx; G="-GMNT_EN=2'b11";;
           *) continue;; esac; }
         [ $t = hps_ocram_fplay ] && { case $vn in fio|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
         [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";;
-          fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; mnt) G="-GOSD_EN=0 -GSEC_EN=1 -GMNT_EN=3";; esac
+          fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; mnt) G="-GOSD_EN=0 -GSEC_EN=1 -GMNT_EN=2'b11";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
              > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
