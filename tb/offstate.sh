@@ -14,7 +14,7 @@
 #      0x1A, 0x3D), under each of those macro sets.
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
-#      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without both of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
+#      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without every one of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
 #      with MISTER_LW or MISTER_OCRAM. sys/lw_lane.sv serves a tier of each floor (the LW lane, the OCRAM download
 #      tier): empty without both pairs, under each set, with either floor alone or both; the lane with its own pair,
 #      lw_link with either.
@@ -62,9 +62,10 @@ TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.s
         'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE', 'lw_osd.sv': 'MISTER_LW_OSD'}
 # the OCRAM tiers: the floor's macro instead of MISTER_LW
 OTIER = {}
-# files built under either of two tier macros: (floor, [tier macros], local macro); empty without the floor or
-# without both tiers, opened as the floor, then each tier defining the local macro, then the local macro's guard
-EITHER = {'hps_ocram_rx.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_OCRAM_RX_BUILT'),
+# files built under any of their tier macros: (floor, [tier macros], local macro); empty without the floor or
+# without every tier, opened as the floor, then each tier defining the local macro, then the local macro's guard
+EITHER = {'hps_ocram_rx.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT',
+                                             'MISTER_OCRAM_FIO'], 'LW_OCRAM_RX_BUILT'),
           'lw_blk_mux.sv': ('MISTER_LW', ['MISTER_LW_SECTOR_SLOT', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_BLK_MUX_BUILT')}
 TIER.pop('lw_blk_mux.sv')
 # files built by a tier of either floor: [(floor, tier)], the local macro each pair defines (the first pair's own

@@ -559,6 +559,16 @@ function hj_has(input [4:0] k);
 	end
 endfunction
 
+// The step after k. Without the download tier its three steps take no cycle: C_HELLO follows C_K5's step at once.
+function [4:0] hj_next(input [4:0] k);
+	begin
+		hj_next = k + 5'd1;
+`ifndef MISTER_OCRAM_FIO
+		if (k == 5'd15) hj_next = 5'd19;
+`endif
+	end
+endfunction
+
 function [15:0] hj_off(input [4:0] k);
 	begin
 		case (k)
@@ -1170,7 +1180,7 @@ always @(posedge clk) begin
 					prev_mid_ts_q  <= 1'b0;
 					prev_mid_fio_q <= 1'b0;
 				end
-				else hj_k <= hj_k + 5'd1;
+				else hj_k <= hj_next(hj_k);
 			end
 		end
 `ifdef MISTER_OCRAM_DIAG
@@ -1199,7 +1209,7 @@ always @(posedge clk) begin
 	end
 
 	// a hello step that this build does not store is passed without a transaction
-	if (hj_act && !hj_has(hj_k)) hj_k <= hj_k + 5'd1;
+	if (hj_act && !hj_has(hj_k)) hj_k <= hj_next(hj_k);
 
 	if (t_done && (rd_act != R_NONE) && !run_ended) begin
 		rd_act <= R_NONE;

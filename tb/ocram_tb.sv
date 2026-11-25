@@ -2923,10 +2923,12 @@ wire [45:0] fbus;
 assign fbus[45:38] = 8'd0;
 assign fbus[35:33] = {m_sel[1], m_sel[0], m_strobe};
 assign fbus[31:16] = m_din;
-reg  [31:0] fz_lba [0:0];
-reg   [5:0] fz_cnt [0:0];
-reg  [15:0] fz_din [0:0];
-initial begin fz_lba[0] = 0; fz_cnt[0] = 0; fz_din[0] = 0; end
+wire [31:0] fz_lba [1];
+wire  [5:0] fz_cnt [1];
+wire [15:0] fz_din [1];
+assign fz_lba[0] = 0;
+assign fz_cnt[0] = 0;
+assign fz_din[0] = 0;
 wire        io_dl, io_wr;
 wire [15:0] io_ix, io_do;
 wire [26:0] io_ad;

@@ -162,10 +162,12 @@ wire [DW:0] do_a, do_b;
 wire [31:0] fx_a, fx_b;
 
 // the block ports' arrays, idle
-reg  [31:0] z_lba [0:0];
-reg   [5:0] z_cnt [0:0];
-reg  [DW:0] z_din [0:0];
-initial begin z_lba[0] = 0; z_cnt[0] = 0; z_din[0] = 0; end
+wire [31:0] z_lba [1];
+wire  [5:0] z_cnt [1];
+wire [DW:0] z_din [1];
+assign z_lba[0] = 0;
+assign z_cnt[0] = 0;
+assign z_din[0] = 0;
 
 hps_io #(.CONF_STR("FIO;;"), .WIDE(WIDE)) io_a
 (
