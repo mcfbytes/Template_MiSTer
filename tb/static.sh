@@ -134,7 +134,15 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                                          'MISTER_OCRAM_MOUNT_FRAME=256', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
                                          'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD']),
                ('ocram-sec-mnt1-fio-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=2', 'MISTER_OCRAM_MOUNT1_SLOT=4',
-                                          'MISTER_OCRAM_FIO', 'MISTER_LW'])]
+                                          'MISTER_OCRAM_FIO', 'MISTER_LW']),
+               # the lean disc profile's set, its slots permuted (the core's: SECTOR 1, mount 2 and 3): the
+               # Template's hps_io has VDNUM = the SECTOR slot + 1, so the SECTOR slot is the highest, slot 0 unused
+               ('ocram-lean-disc', ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_OCRAM', 'MISTER_OCRAM_OSD',
+                                   'MISTER_OCRAM_SECTOR_SLOT=3', 'MISTER_OCRAM_SECTOR_FRAME=588',
+                                   'MISTER_OCRAM_SECTOR_GAP=2', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_OCRAM_MOUNT0_SLOT=1',
+                                   'MISTER_OCRAM_MOUNT1_SLOT=2', 'MISTER_OCRAM_MOUNT_FRAME=256', 'MISTER_OCRAM_FIO',
+                                   'MISTER_DISABLE_SPI_PAD', 'MISTER_DISABLE_SPI_OSD', 'MISTER_DISABLE_SPI_BLK',
+                                   'MISTER_DISABLE_SPI_BLK_UNUSED=1', 'LW_DIAG=0'])]
 OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
 CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k

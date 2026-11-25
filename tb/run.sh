@@ -137,8 +137,10 @@
 #      word the twin hps_io's in-band replies to the same link words, low half first; a write frame between them
 #      posts none; a capture frame held while the EVT ring lacks len + 1 words, unconsumed and unplayed, while the
 #      OSD and SECTOR rings are served, then played once there is room; and every case of arm O's SECTOR and
-#      download shapes and arm U's in the same run (a capture frame on a build without the lane: arm U's U2). Then
-#      verilator lints the master, the walker and the player with the macro
+#      download shapes and arm U's in the same run (a capture frame on a build without the lane: arm U's U2). A
+#      second shape has the lane without the SECTOR tier (at 33.8688 MHz): the same cases, A2's frame held beside
+#      the OSD ring alone. Then verilator lints the master, the walker and the player with the macro, with and
+#      without the SECTOR tier
 #   I  the events tier's records (MISTER_OCRAM_EVT, the lines design's E1; arm X has its guards, arm Y its removal):
 #      tb/ocram_tb.sv's SECTOR shape with MISTER_LW and MISTER_OCRAM_EVT, a real hps_io on the event port through
 #      hps_ocram_evt and a twin hps_io polled over its own link, every seed, plain and with the crossing models, at
@@ -151,12 +153,15 @@
 #      and no BIND record at the bind. Then verilator lints the master and hps_ocram_evt with the macro, without the
 #      SECTOR tier, and with MISTER_DISABLE_SPI_EVT
 #   J  the twin (tb/golden/, frozen by tb/golden/freeze.sh from one commit): every tb/ocram_tb.sv shape that arms O,
-#      U, A, I and Y build (diag, osd, sec, fio, mnt at 33.8688 and 20 MHz, uio at both and without HDMI, lane, evt,
-#      and Y's three removal shapes; not arm I's events shape without SECTOR, which the frozen master stops),
-#      compiled with OCRAM_TB_TWIN: the gold master, rx (and hps_ocram_evt) on the live pair's bench inputs, every
-#      output of the pair compared x-aware after every edge of clk and clk_sys, the nets between master and rx not
-#      compared; plain only, under every seed. Passes when every run passes and prints
-#      "TWIN: N edges compared, 0 mismatches" with N above 0. The live files are sys/hps_ocram_*.sv and sys/ocram_*.sv
+#      U, A, I and Y build (diag, osd, sec, fio, mnt at 33.8688 and 20 MHz, uio at both and without HDMI, lane, evt, and
+#      Y's three removal shapes; not arm I's events shape nor arm A's lane shape without SECTOR, which the frozen master
+#      stops), and the lean disc profile's set at 33.8688 MHz less the LW pad tier and its removal (no pad tier here):
+#      MISTER_LW, the OSD, SECTOR (slot 1, 588 words, gap 2) and download tiers, BLKSZ 3, the mount slots 2 and 3 (256
+#      words), MISTER_DISABLE_SPI_OSD and MISTER_DISABLE_SPI_BLK with slot 0 named unused, compiled with OCRAM_TB_TWIN:
+#      the gold master, rx (and hps_ocram_evt) on the live pair's bench inputs, every output of the pair compared
+#      x-aware after every edge of clk and clk_sys, the nets between master and rx not compared; plain only, under every
+#      seed. Passes when every run passes and prints "TWIN: N edges compared, 0 mismatches" with N above 0. The live
+#      files are sys/hps_ocram_*.sv and sys/ocram_*.sv
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -604,11 +609,15 @@ uarm() {
 AB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
 AD="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
 AD="$AD -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE"
+# the capture lane without the SECTOR tier: A2 holds the frame beside the OSD ring alone
+AN="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_FRAME=588"
+AN="$AN -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE"
 aarm() {
   : > "$1"; n=0; f=0
   for m in plain cdc; do
-    for c in lane33 lane20; do
-      case $c in lane33) D="$AD -DOCRAM_TB_SYS_HP_PS=14762";; lane20) D="$AD -DOCRAM_TB_SYS_HP_PS=25000";; esac
+    for c in lane33 lane20 lanens33; do
+      case $c in lane33) D="$AD -DOCRAM_TB_SYS_HP_PS=14762";; lane20) D="$AD -DOCRAM_TB_SYS_HP_PS=25000";;
+        lanens33) D="$AN -DOCRAM_TB_SYS_HP_PS=14762";; esac
       d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
       echo "-- the bench compiles ($c, $m)" >> "$1"
       if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/laneA_${c}_$m.vvp" $AB > "$O/laneA_${c}_$m.err" 2>&1; then
@@ -629,12 +638,14 @@ aarm() {
   if command -v verilator >/dev/null 2>&1; then
     vok=1
     for VS in "lane:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_LANE" \
+              "lanens:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE" \
               "laneall:-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE -DMISTER_OCRAM_EVT"; do
       vn=${VS%%:*}; VF=${VS#*:}
       for t in hps_ocram_master hps_ocram_rx hps_ocram_fplay; do
         G=""; fl=$t
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
-        [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=2'b01";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
+        [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=2'b01";;
+          lanens) G="-GFIO_EN=1";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
              sys/lw_lane.sv > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/laneV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
@@ -713,8 +724,15 @@ twinj() {
   JS="$JE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
   JM="$JS -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
   JU="$JE -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO"
+  # the lean disc profile's set as far as this bench builds it: no LW pad tier here, so neither MISTER_LW_PAD nor
+  # its removal
+  JP="-DMISTER_LW $JE -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_SECTOR_GAP=2"
+  JP="$JP -DMISTER_OCRAM_BLKSZ=3 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
+  JP="$JP -DMISTER_OCRAM_MOUNT_FRAME=256"
+  JP="$JP -DMISTER_OCRAM_FIO -DMISTER_DISABLE_SPI_OSD -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1"
   H33=-DOCRAM_TB_SYS_HP_PS=14762; H20=-DOCRAM_TB_SYS_HP_PS=25000
   JC="diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20 uio33 uio20 uion33 lane33 lane20 evt33 evt20 yosd ymnt yevt"
+  JC="$JC lean33"
   for c in $JC; do
     case $c in
       diag) D="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10";;
@@ -724,9 +742,9 @@ twinj() {
       uio33) D="$JU $H33";; uio20) D="$JU $H20";; uion33) D="$JU -DMISTER_DEBUG_NOHDMI $H33";;
       lane33) D="$AD $H33";; lane20) D="$AD $H20";; evt33) D="$ID $H33";; evt20) D="$ID $H20";;
       yosd) D="$JE $H33 -DMISTER_DISABLE_SPI_OSD";; ymnt) D="$JM $H33 -DMISTER_DISABLE_SPI_OSD -DMISTER_DISABLE_SPI_BLK";;
-      yevt) D="$ID -DMISTER_DISABLE_SPI_EVT $H33";;
+      yevt) D="$ID -DMISTER_DISABLE_SPI_EVT $H33";; lean33) D="$JP $H33";;
     esac
-    X=""; case $c in fio*|uio*|lane*) X="sys/lw_lane.sv sys/hps_io.sv";; evt*|yevt) X="sys/hps_io.sv";; esac
+    X=""; case $c in fio*|uio*|lane*|lean*) X="sys/lw_lane.sv sys/hps_io.sv";; evt*|yevt) X="sys/hps_io.sv";; esac
     echo "-- the twin bench compiles ($c)" >> "$1"; rm -f "$O/twinJ_$c.vvp"
     if iverilog -g2012 $D -DOCRAM_TB_TWIN -I sys -s ocram_tb -o "$O/twinJ_$c.vvp" tb/ocram_tb.sv $JG $JL sys/lw_cdc.sv \
          sys/osd.v $X > "$O/twinJ_$c.err" 2>&1; then

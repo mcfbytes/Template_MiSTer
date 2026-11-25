@@ -38,8 +38,9 @@
 // With the mount slots (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT) two block-device cores sit on the window's save-slot
 // nets: each drops its request at its ack's rise, takes the shared strobes under its own ack, and shows its buffer
 // word at the strobe address one clk_sys later in its LBA field while its mux and ack are up (lw_save_mux's). The
-// bench sets each request's blk_cnt directly (the window carries none) and gives the walker BLKSZ 2 for the mount
-// slots, so a block is 128 words and blk_cnt 3 is 512 (MISTER_OCRAM_MOUNT_FRAME 512 in the shape).
+// bench sets each request's blk_cnt directly (the window carries none) and gives the walker MISTER_OCRAM_BLKSZ for
+// the mount slots (default 2: a block is 128 words, blk_cnt 3 is 512, MISTER_OCRAM_MOUNT_FRAME 512 in the mount
+// shape; arm J's lean shape has BLKSZ 3 and a 256-word frame, one block): the longest read fills the frame.
 // With MISTER_OCRAM_UIO (arm U, beside the download tier) a twin link stack (an lw_link with no player, a second
 // hps_io, two osds) takes each UIO and OSD frame's words over the link, and the cases compare it with the mailbox
 // side (fio_link's hps_io and two osds on the player's OSD selects): the UIO strobe streams, hps_io's and the osds'
@@ -50,9 +51,10 @@
 // while C_BIND bit 8 is clear; the causes standing at the bind, with a BIND record only beside the SECTOR tier; a
 // STATUS torn by a second transfer abandoned; with the SECTOR tier, a REQUEST owed with a STATUS first.
 // With MISTER_DISABLE_SPI_EVT (arm Y) the link's replies read 0 and the records are held to the driven values.
-// With MISTER_OCRAM_LANE (arm A, beside the SECTOR, download and UIO tiers) capture LFRAMEs on the UIO select: each
-// REPLY against the twin hps_io's in-band replies to the same words, odd and even frames, the tag echoed; a capture
-// frame held while the EVT ring lacks len + 1 words, the OSD and SECTOR rings served meanwhile.
+// With MISTER_OCRAM_LANE (arm A, beside the download and UIO tiers, with the SECTOR tier and in a second shape
+// without it) capture LFRAMEs on the UIO select: each REPLY against the twin hps_io's in-band replies to the same
+// words, odd and even frames, the tag echoed; a capture frame held while the EVT ring lacks len + 1 words, the OSD
+// ring (and the SECTOR ring, with its tier) served meanwhile.
 // With OCRAM_TB_TWIN (arm J, plain only) the frozen pair of tb/golden/ runs beside the live one on the same bench
 // inputs, and every output of the pair (OCRAM_TB_TWIN_OUTS, near the end) is compared with the gold one on every edge.
 
@@ -204,7 +206,14 @@ localparam MNT_B = MNT0_B || MNT1_B;
 localparam  [1:0] MNT_MASK = {MNT1_B != 0, MNT0_B != 0};
 localparam integer MK  = MNT0_B ? 1 : 2;                  // the first declared mount slot's index
 localparam integer MK2 = (MNT0_B && MNT1_B) ? 2 : 0;      // the other, 0 if none
-localparam  [2:0] MBLKSZ = 3'd2;                 // the mount slots' blocks in this bench: 128 words
+`ifdef MISTER_OCRAM_BLKSZ
+localparam  [2:0] MBLKSZ = `MISTER_OCRAM_BLKSZ;   // the mount slots' blocks: 128 words at 2, 256 at 3
+`else
+localparam  [2:0] MBLKSZ = 3'd2;
+`endif
+localparam integer MBW = 1 << (MBLKSZ + 5);       // a block's words
+localparam integer MCN = MFRAME / MBW - 1;        // the longest request within the frame: its blk_cnt
+localparam integer MCS = MCN ? MCN : 1;          // M1's blk_cnt step: 0, then the longest
 localparam [15:0] H_IDX0  = 16'h0010;
 localparam [15:0] C_IDX0  = 16'h0090;
 localparam [15:0] C_RING0 = 16'h00B0;
@@ -3469,6 +3478,10 @@ end
 function integer mwords(input integer cnt);
 	mwords = (cnt + 1) << (MBLKSZ + 5);
 endfunction
+// a blk_cnt other than c's, for a frame a read of c skips by its length: 0, the longest, or 1 when that is 0
+function integer mc_alt(input integer c);
+	mc_alt = (c != 0) ? 0 : (MCN != 0) ? MCN : 1;
+endfunction
 function [31:0] mword(input integer k, input [31:0] lba, input integer gen, input integer j);
 	mword = v_of({k[1:0], lba[9:0], gen[3:0], j[15:0]});
 endfunction
@@ -3606,7 +3619,7 @@ task mnt_session(input [15:0] nonce, input [1:0] mask);
 	end
 endtask
 
-// M1. mount reads, k = 1, 2, wide and byte, blk_cnt 0 and 3, each behind a stale frame
+// M1. mount reads, k = 1, 2, wide and byte, blk_cnt 0 and the longest (MCN), each behind a stale frame
 task mnt_case1;
 	integer w, kk, c, n, n0, f0;
 	reg [31:0] lba;
@@ -3615,7 +3628,7 @@ task mnt_case1;
 		for (w = 1; w >= 0; w = w - 1) begin
 			mnt_session(16'h0D01 + w[15:0], 2'b11);
 			x_wide = w[0];
-			for (kk = 1; kk <= 2; kk = kk + 1) if (MNT_MASK[kk - 1]) for (c = 0; c <= 3; c = c + 3) begin
+			for (kk = 1; kk <= 2; kk = kk + 1) if (MNT_MASK[kk - 1]) for (c = 0; c <= MCN; c = c + MCS) begin
 				lba = 100 * kk + 10 * w + c;
 				n = mwords(c);
 				mc_clear(kk);
@@ -3625,8 +3638,8 @@ task mnt_case1;
 				check($sformatf("k %0d blk_cnt %0d wide %0d: a mount REQUEST is posted", kk, c, w), ok, 1);
 				check("its arg {blk_cnt, k}", mrq_arg[n0], {c[5:0], kk[1:0]});
 				check("its LBA", mrq_lba[n0], lba);
-				mnt_room(mwords(3 - c) + n + 4, 3000, ok);
-				mnt_frame(kk, 3 - c, lba, 1);       // another blk_cnt: skipped by its length
+				mnt_room(mwords(mc_alt(c)) + n + 4, 3000, ok);
+				mnt_frame(kk, mc_alt(c), lba, 1);   // another blk_cnt: skipped by its length
 				mnt_frame(kk, c, lba, 0);
 				mnt_publish;
 				mc_wait(kk, f0, 20000, ok);
@@ -3640,7 +3653,7 @@ task mnt_case1;
 		$display("-- mount M1: a request longer than MISTER_OCRAM_MOUNT_FRAME is never offered");
 		mnt_session(16'h0D03, 2'b11);
 		n0 = mrq_n;
-		mc_ask(MK, 0, 32'd150, MFRAME / 128);
+		mc_ask(MK, 0, 32'd150, MCN + 1);
 		repeat (40 << POLLC) @(posedge clk);
 		rq_drain;
 		check("no REQUEST for it", mrq_n - n0, 0);
@@ -3648,7 +3661,9 @@ task mnt_case1;
 	end
 endtask
 
-// M2. WRITEs: the words, the ack's fall at the publish, the room check and the wrap
+// M2. WRITEs: the words, the ack's fall at the publish, the room check and the wrap: MWN of the longest fill the
+// EVT ring short of one more
+localparam integer MWN = EVT_WORDS / (MFRAME / MBW * MBW + 2);
 task mnt_case2;
 	integer w, n, n0, f0, b, j;
 	begin
@@ -3674,29 +3689,30 @@ task mnt_case2;
 		end
 		x_wide = 1'b1;
 
-		$display("-- mount M2: three 514-word WRITEs left in the ring: the fourth waits for room, then wraps it");
-		for (b = 0; b < 3; b = b + 1) begin
+		$display("-- mount M2: %0d %0d-word WRITEs left in the ring: the next waits for room, then wraps it", MWN,
+		         mwords(MCN) + 2);
+		for (b = 0; b < MWN; b = b + 1) begin
 			mc_pattern(MK); f0 = mc_frames(MK);
-			mc_ask(MK, 1, 32'd300 + b, 3);
+			mc_ask(MK, 1, 32'd300 + b, MCN);
 			mc_wait(MK, f0, 20000, ok);
 			check($sformatf("WRITE %0d completes with room", b), ok, 1);
 		end
 		n0 = wr_published;
 		mc_pattern(MK); f0 = mc_frames(MK);
-		mc_ask(MK, 1, 32'd303, 3);
+		mc_ask(MK, 1, 32'd300 + MWN, MCN);
 		repeat (40 << POLLC) @(posedge clk);
-		check("with no room for its 514 words the fourth is not published", wr_published, n0);
+		check("with no room for its words the next is not published", wr_published, n0);
 		check("its ack stays up: the core waits for the ring, not the host", xm_ack[MK - 1], 1'b1);
 		n0 = wr_n;
 		rq_drain;
-		check("the three are taken", wr_n - n0, 3);
-		wr_wait(n0 + 3, 20000, ok);
-		check("after the drain the fourth is published", ok, 1);
-		check("its LBA", wr_lba, 32'd303);
+		check("the earlier ones are taken", wr_n - n0, MWN);
+		wr_wait(n0 + MWN, 20000, ok);
+		check("after the drain the next is published", ok, 1);
+		check("its LBA", wr_lba, 32'd300 + MWN);
 		bad = 0;
-		for (j = 0; j < mwords(3); j = j + 1) if (wr_w[j] !== mc_word(MK, j)) bad = bad + 1;
+		for (j = 0; j < mwords(MCN); j = j + 1) if (wr_w[j] !== mc_word(MK, j)) bad = bad + 1;
 		check("its words are the buffer's", bad, 0);
-		check("the EVT ring wrapped under the four", pub_words > EVT_WORDS, 1);
+		check("the EVT ring wrapped under them", pub_words > EVT_WORDS, 1);
 		mc_wait(MK, f0, 2000, ok);
 		check("its ack falls at the publish", ok, 1);
 	end
@@ -4021,7 +4037,17 @@ assign a_ext_t[32] = 1'b0;
 `else
 `define A_IO_PORTS
 `endif
-hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) fio_io
+// the block tiers' BLKSZ; with MISTER_DISABLE_SPI_BLK also slots up to the highest tier slot (the rest named unused)
+function integer top_slot(input dummy);
+	begin
+		top_slot = SEC_B ? SSLOT : 0;
+		if (MNT0_B && MSLOT0 > top_slot) top_slot = MSLOT0;
+		if (MNT1_B && MSLOT1 > top_slot) top_slot = MSLOT1;
+	end
+endfunction
+localparam integer FVD = RMB_B ? top_slot(1'b0) + 1 : 1;
+localparam integer MBLKSZ_N = MBLKSZ;             // unsized, as a core passes BLKSZ
+hps_io #(.CONF_STR("FIO;;"), .WIDE(1), .VDNUM(FVD), .BLKSZ(MBLKSZ_N)) fio_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(fbus), .ioctl_wait(f_wait), .ioctl_din(16'd0),
 	.sd_rd(1'b0), .sd_wr(1'b0) `A_IO_PORTS
@@ -4429,7 +4455,7 @@ wire [45:0] tbus;
 assign tbus[45:38] = 8'd0;
 assign tbus[35:33] = {tw_sel[1], tw_sel[0], tw_stb};
 assign tbus[31:16] = tw_din;
-hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) tw_io
+hps_io #(.CONF_STR("FIO;;"), .WIDE(1), .VDNUM(FVD), .BLKSZ(MBLKSZ_N)) tw_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(tbus), .ioctl_wait(1'b0), .ioctl_din(16'd0), .sd_rd(1'b0), .sd_wr(1'b0)
 	`A_IO_PORTS
@@ -4779,12 +4805,21 @@ task e_drain_a;
 	begin got = 1; while (got) evt_take(got); end
 endtask
 
-// A2. a capture frame is held while the EVT ring lacks len + 1 words; the OSD and SECTOR rings are served meanwhile
+// A2. a capture frame is held while the EVT ring lacks len + 1 words; the OSD ring (and the SECTOR ring, with its
+// tier) is served meanwhile
 task lane_case2;
 	integer r0, n0, f0, ok1, h, t0;
 	begin
+`ifdef MISTER_OCRAM_SECTOR_SLOT
 		$display("-- A2: a capture frame held for room in the EVT ring; rings 2 and 4 still served");
 		sec_session(16'h0A02, 1);
+`else
+		$display("-- A2: a capture frame held for room in the EVT ring; ring 2 still served");
+		reset_floor;
+		osd_head = 0;
+		start_session(0, 0, 0, 16'h0A02, ok);
+		osd_bind_now(16'h0A02, ok);
+`endif
 		fio_head = 0;
 		e_drain_a;
 		a_words29(8); r0 = rp_n; n0 = usn_m;
@@ -4803,6 +4838,7 @@ task lane_case2;
 		osd_publish_row(3); osd_publish;
 		osd_wait_tail(osd_head[15:0], 2000, ok1);
 		check("A2: the OSD ring is served while the frame is held", ok1, 1);
+`ifdef MISTER_OCRAM_SECTOR_SLOT
 		// ring 4: a request (its REQUEST fits in the 3 words, and is left in the ring: a take stores the real tail)
 		// and its frame
 		f0 = c_frames; n0 = rq_published;
@@ -4813,6 +4849,7 @@ task lane_case2;
 		sec_frame(32'd2200, 0); sec_publish;
 		core_wait(f0, 5000, ok1);
 		check("A2: the SECTOR ring is served while the frame is held", ok1, 1);
+`endif
 		check("A2: still held", mem[C_IDX1 >> 2], 32'd0);
 		// the real tail: room, the frame plays, its REPLY against the twin
 		mem[H_IDX3 >> 2] = {16'd0, host_tail};
@@ -4821,7 +4858,9 @@ task lane_case2;
 		check("A2: with room the frame plays", ok1, 1);
 		a_txn;
 		a_check(r0, 4'h6, 2000, "A2 the held frame");
+`ifdef MISTER_OCRAM_SECTOR_SLOT
 		core_drop;
+`endif
 		repeat (40 << POLLC) @(posedge clk);
 		e_drain_a;
 	end
