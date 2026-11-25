@@ -26,6 +26,8 @@
 // start, and each player's l_busy is its core's wait (up or owed), so a wait held past a frame's end delays the
 // next frame's start on both alike instead of landing at a different edge of it. Every write the core sees is logged and checked against the window's words: none lost or doubled.
 // The core counts an overrun when an ioctl_wr arrives while a wait it owes is still pending or up.
+// In the plain runs a gold twin, lw_lane as frozen in tb/golden/, takes lw_lane's inputs, and every output of the
+// two is compared on every edge: the players' compare stays against the frozen LW player when lw_lane changes.
 // Macros: FIO_TB_GAP (4), FIO_TB_WIDE (1), FIO_TB_SYS_HP_PS (14762: 33.8688 MHz).
 
 `timescale 1ns/1ps
@@ -98,6 +100,39 @@ lw_lane #(.AW(10), .GAP(GAP), .RAW(8)) u_lane
 	.clk_sys(clk_sys), .l_busy(busy_a), .l_wait(wait_a), .l_dout(16'd0),
 	.own(own_a), .hold(hold_a), .sel(sel_a), .strobe(stb_a), .din(din_a)
 );
+
+`ifndef LW_TB_CDC
+// The gold twin: lw_lane as frozen in tb/golden/gold_lw_lane.sv on the same inputs, every output compared x-aware
+// 100 ps after every edge of clk and clk_sys, so the compare below still holds the mailbox player to the frozen LW
+// one when lw_lane itself changes. Plain only: under LW_TB_CDC each crossing cell draws its own delays.
+wire [31:0] g_rdata;
+wire        g_f_open, g_f_owned, g_f_idle, g_irq, g_own, g_hold, g_stb;
+wire  [3:0] g_sel;
+wire [15:0] g_din;
+gold_lw_lane #(.AW(10), .GAP(GAP), .RAW(8)) g_lane
+(
+	.clk(clk), .raddr(12'd0), .rdata(g_rdata), .waddr(waddr), .wsel(wsel), .write(write), .wdata(wdata),
+	.be(4'hF), .hen(hen), .take(take), .f_open(g_f_open), .f_owned(g_f_owned), .f_idle(g_f_idle), .irq(g_irq),
+	.clk_sys(clk_sys), .l_busy(busy_a), .l_wait(wait_a), .l_dout(16'd0),
+	.own(g_own), .hold(g_hold), .sel(g_sel), .strobe(g_stb), .din(g_din)
+);
+wire [58:0] tw_live = {rdata_a, f_open, f_owned, f_idle, irq_a, own_a, hold_a, sel_a, stb_a, din_a};
+wire [58:0] tw_gold = {g_rdata, g_f_open, g_f_owned, g_f_idle, g_irq, g_own, g_hold, g_sel, g_stb, g_din};
+integer tw_edges = 0, tw_bad = 0;
+task tw_cmp;
+	begin
+		tw_edges = tw_edges + 1;
+		if (tw_live !== tw_gold) begin
+			tw_bad = tw_bad + 1;
+			if (tw_bad <= 8)
+				$display("   at %0.3f ns: {rdata, open, owned, idle, irq, own, hold, sel, strobe, din} lw_lane %h, gold %h",
+				         $realtime, tw_live, tw_gold);
+		end
+	end
+endtask
+always @(clk) begin #0.1; tw_cmp; end
+always @(clk_sys) begin #0.1; tw_cmp; end
+`endif
 
 /////////////////////////////////  stack B  /////////////////////////////////
 
@@ -406,6 +441,11 @@ initial begin
 	check("F2 one cycle late: overruns shown (mailbox)", core_b.overruns - ov0 > 0, 1);
 
 	check("frames compared", fa > 30, 1);
+`ifndef LW_TB_CDC
+	$display("-- the gold twin: lw_lane against tb/golden/gold_lw_lane.sv, every output on every edge");
+	check("the twin: edges compared", tw_edges > 1000, 1);
+	check("the twin: edges where an output differs", tw_bad, 0);
+`endif
 	if (fails == 0) $display("PASSED: %0d checks, 0 failures", checks);
 	else $display("FAILED: %0d checks, %0d failures", checks, fails);
 	$finish;
