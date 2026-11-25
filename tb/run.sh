@@ -49,8 +49,11 @@
 #   H  the HPS-side probe, tb/hps/lw_probe.c, compiled with warnings as errors by the host's C compiler (cc, or
 #      $CC) and, where one is on PATH, by arm-linux-gnueabihf-gcc; the testbench never runs it. And its own logic
 #      run on the build host: tb/hps/lw_probe_test.c includes the probe against a model of the window (its cases
-#      in its header), compiled the same way and run once. It all runs before any container starts (the image
-#      has no C compiler). Without a C compiler the arm reports SKIPPED and does not fail.
+#      in its header), compiled the same way and run once. The OCRAM probe, tb/hps/ocram_probe.c, the same way
+#      (as built for the HPS, and with -DOCRAM_FAKE), and tb/hps/ocram_probe_test.c, which drives it against the
+#      model of tb/hps/ocram_probe_fake.h (its cases in its header, the part-full --band mode among them), run once.
+#      It all runs before any container starts (the image has no C compiler). Without a C compiler the arm reports
+#      SKIPPED and does not fail.
 #   O  the OCRAM floor's and OSD tier's bench (tb/ocram_tb.sv) under Icarus, every seed of LW_TB_SEEDS once
 #      plain and once with the crossing cells' delay models (LW_TB_CDC), compiled twice: with DIAG (MARK records,
 #      the torture sink, the freeze knob) and without (the OSD cases in the shipping shape); and verilator
@@ -84,12 +87,17 @@ probe() {
       [ $n -eq 0 ] && { echo "SKIPPED: no C compiler ($c) on PATH" >> "$1"; return 0; }
       continue
     fi
-    for src in lw_probe lw_probe_test; do
+    for src in lw_probe lw_probe_test ocram_probe ocram_probe_fake ocram_probe_test; do
       echo "-- $c: tb/hps/$src.c" >> "$1"; n=$((n + 1)); rm -f "$O/$src.$(basename "$c")"
-      x=""; [ $src = lw_probe_test ] && x=-pthread
-      if $c $W $x -o "$O/$src.$(basename "$c")" tb/hps/$src.c >> "$1" 2>&1; then
+      x=""; s=$src
+      case $src in
+        lw_probe_test) x=-pthread;;
+        ocram_probe_fake) x="-DOCRAM_FAKE -pthread"; s=ocram_probe;;
+        ocram_probe_test) x="-DOCRAM_FAKE -pthread";;
+      esac
+      if $c $W $x -o "$O/$src.$(basename "$c")" tb/hps/$s.c >> "$1" 2>&1; then
         echo "pass $c: compiles, no warning" >> "$1"
-      else f=$((f + 1)); echo "FAIL $c: $src.c does not compile without a warning" >> "$1"
+      else f=$((f + 1)); echo "FAIL $c: $s.c does not compile without a warning" >> "$1"
       fi
     done
   done
@@ -104,6 +112,18 @@ probe() {
       f=$((f + 1)); echo "FAIL lw_probe_test: status $st, no failed check named" >> "$1"
     fi
     r=${r:-0}
+  fi
+  # the OCRAM probe's own logic (--band and the first probe's modes), on the model of tb/hps/ocram_probe_fake.h
+  t=$O/ocram_probe_test.$(basename "${CC:-cc}"); q=0
+  if [ -x "$t" ]; then
+    "$t" > "$O/ocram_probe_test.log" 2>&1; st=$?
+    cat "$O/ocram_probe_test.log" >> "$1"
+    q=$(sed -n 's/^ocram_probe_test: \([0-9]*\) checks.*/\1/p' "$O/ocram_probe_test.log"); nf=$(grep -c '^FAIL ' "$O/ocram_probe_test.log")
+    f=$((f + nf))
+    if [ $nf -eq 0 ] && { [ $st -ne 0 ] || [ -z "$q" ]; }; then
+      f=$((f + 1)); echo "FAIL ocram_probe_test: status $st, no failed check named" >> "$1"
+    fi
+    r=$((r + ${q:-0}))
   fi
   if [ $f -eq 0 ]; then echo "PASSED: $n compiles, $r probe checks, 0 failures" >> "$1"
   else echo "FAILED: $n compiles, $r probe checks, $f failures" >> "$1"; fi
