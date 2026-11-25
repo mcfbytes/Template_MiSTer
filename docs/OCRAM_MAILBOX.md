@@ -5,14 +5,16 @@ A proposed third path between the HPS and a core, beside the GPO/GPI ("SPI") lin
 **on-chip RAM** (OCRAM, physical `0xFFFF0000`), and the core fetches them as an AXI master on the Cyclone V
 **FPGA-to-HPS bridge**, whose atom `sys/` already instantiates with no port connected.
 
-**Status: the floor, the OSD tier and the SECTOR tier are built, for test cores only.** `MISTER_OCRAM` builds the
+**Status: the floor, the OSD tier, the SECTOR tier and the download tier are built, for test cores only.** `MISTER_OCRAM` builds the
 bridge master, the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake.
 `MISTER_OCRAM_OSD` and `MISTER_OCRAM_SECTOR_SLOT` each build their half of `sys/hps_ocram_rx.sv`, one walker for both
 host-to-core rings: the OSD half writes the OSD ring's rows into every `osd`'s `osd_buffer` through the LW OSDBUF
 writer's port, and the SECTOR half plays block frames into one `hps_io` slot and posts its REQUEST records ("The
-SECTOR tier as built"). `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters, the GPO 27/26
+SECTOR tier as built"). `MISTER_OCRAM_FIO` adds a third host-to-core ring to that walker, ring 1: link frames
+played into `hps_io`'s download block through `lw_link`, with a mark line on `f2h_irq[12]` ("The download tier as
+built"). `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters, the GPO 27/26
 test knobs, the GPO 25 freeze knob and the host-to-fabric torture sink (below); it cannot be built with the SECTOR
-tier. Nothing else in this document is built: no EVT, LANE or PAD tier. The SECTOR tier is benched, not yet fitted
+tier. Nothing else in this document is built: no EVT, LANE or PAD tier. The SECTOR and download tiers are benched, not yet fitted
 or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
 core and host authors can read both paths side by side and say which they would build.
 
@@ -53,6 +55,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, the core-to-host ring's writer and its interrupt line, one GPI bit | - | 180-260 ALMs, no block memory |
 | `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor | 60-80 ALMs |
 | `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor and `MISTER_LW` (it drives the LW sector bits of `HPS_BUS`); not `MISTER_OCRAM_DIAG`, not `MISTER_LW_SECTOR_SLOT` | about 130 ALMs beside the OSD tier, about 250 alone |
+| `MISTER_OCRAM_FIO` (PROVISIONAL), `MISTER_OCRAM_FIO_GAP` (4-7, default 4), `MISTER_OCRAM_FIO_RING` (log2 words, 2-10 or 13, default 10) | file downloads: link frames from ring 1 into `hps_io`'s download block through `lw_link`, and ring 1's mark line | the floor; not `MISTER_LW_LANE` (`link_on_two_players`) | 110-150 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
@@ -185,6 +188,7 @@ replaces the firewall").
 | `0x08` | H_LINE | host | bit *r*: ring *r*'s interrupt line may rise |
 | `0x0C` | H_SECTOR | host | bit 0: the SECTOR slot is served here. It may change within a session ("Records") |
 | `0x10` + 4*r* | H_IDX[*r*] | host | its head of a host-to-core ring, its tail of a core-to-host ring |
+| `0x30` + 4*r* | H_MARK[*r*] | host | a host-to-core ring's mark, where its descriptor declares a line: `[31]` armed, `[15:0]` an index. Only H_MARK[1] (`0x34`) is built (PROVISIONAL) |
 | `0x80` | C_HELLO | fabric | the master's state, below; in a session, the echo of H_HELLO, stored last |
 | `0x84` | C_VERSION | fabric | `{major, minor}` of the layout |
 | `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; the rest 0 |
@@ -192,7 +196,7 @@ replaces the firewall").
 | `0x90` + 4*r* | C_IDX[*r*] | fabric | its tail of a host-to-core ring, its head of a core-to-host ring |
 | `0xA4` | C_BIND | fabric | the binds in effect: H_BIND's bits, and bit 0 = the SECTOR slot's mux is on the mailbox side. Stored at every change; a bind or its drop has taken effect when this word shows it |
 | `0xB0` + 4*r* | C_RING[*r*] | fabric | `{kind[31:27], line ordinal[26:22], log2 words[21:18], 0[17:14], offset in words[13:0]}`; kind is the function's kind in the LW directory (PAD 1, SECTOR 2, OSD 3, EVT 4, LANE 5); 0 = absent |
-| `0xD0` + 4*n* | C_K[*n*], *n* 0-11 | fabric | `[0..7]` SECTOR: the SECTOR block's K0-K7 for its one slot, with K0's FIFO field 0 and K2 = 1. `[8]` OSD: OSDBUF's K0, `{rows, row bytes}`. `[9..11]` 0 |
+| `0xD0` + 4*n* | C_K[*n*], *n* 0-11 | fabric | `[0..7]` SECTOR: the SECTOR block's K0-K7 for its one slot, with K0's FIFO field 0 and K2 = 1. `[8]` OSD: OSDBUF's K0, `{rows, row bytes}`. `[9]` the download tier: `{select mask[31:16], gap[15:0]}`, the mask `0x0002` (UIO select 1, the file-I/O block) (PROVISIONAL). `[10..11]` 0 |
 
 | C_HELLO | the master is | stored by |
 |---|---|---|
@@ -287,6 +291,10 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   re-reads the host's tail back to back, so the line falls within a few transactions of the store that empties the
   ring. A host that re-arms sooner sees one more interrupt and an empty ring; its drain must take one empty pass.
   A host with no interrupt node reads C_IDX from its loop instead: one memory read.
+- **The mark line: one per host-to-core ring that declares one.** It is high while H_MARK[*r*] is armed and the
+  ring's tail has reached its index (`(C_IDX[r] - index) & 0x8000` is 0), and while it is high the master re-reads
+  H_MARK[*r*] back to back, so it falls within a few transactions of a store that disarms it or moves the index
+  ahead. Only ring 1 builds it: ordinal 5, `f2h_irq[12]`. A host with no node for it reads C_IDX[1] instead.
 
 ### Records
 
@@ -371,6 +379,34 @@ K3, K6 and K7 read 0. The wire items (the kind, the K words, the REQUEST's `arg`
   four bytes, GAP apart, the first GAP after the ack. Each word is held in the crossing's capture register until its
   strobes have issued. It zero-fills the rest of a frame on the consumer's reset, or once the session's enable or the
   bind level has been low for two cycles while a word is awaited.
+
+### The download tier as built
+
+`MISTER_OCRAM_FIO` declares it, with `MISTER_OCRAM_FIO_GAP` (cycles between strobes, 4-7, default 4) and
+`MISTER_OCRAM_FIO_RING` (ring 1's log2 words, default 10). A ring of 2-10 sits at `0x1000`; a ring of 13 takes ring
+4's span at `0x7000` and so cannot be built beside the SECTOR tier or `MISTER_OCRAM_DIAG`
+(`ocram_fio_ring_on_ring4_span`). A gap or ring outside those ranges stops the build
+(`ocram_fio_unservable_geometry`), and so does `MISTER_LW_LANE` beside it (`link_on_two_players`: two players on one
+set of link nets). The hello stores C_CAPS bit 1, C_IDX[1] = 0, C_RING[1] = `{kind 5, line 5, log2, 0, offset}`
+(`0x29680400` at the defaults) and C_K[9]. Every wire item here is PROVISIONAL. No H_BIND bit takes ring 1: the
+walker serves it in every session.
+
+- **A record is an LFRAME,** `{0x30, arg, len}` with `arg = {odd[7], 0[6:2], sel[1:0]}` and `len` ring words. Each
+  ring word carries two link words, low half first; `odd` drops the last word's high half. Only `sel` 1 (UIO select
+  1, the file-I/O block) is served. Any other kind, select or a zero length stops the ring on a fault (C_STATE bit
+  9); a session that ends mid-record sets bit 17 at the next hello.
+- **The walker** reads H_IDX[1] in its session poll and serves ring 1 at record granularity, in turn with rings 2
+  and 4. Each header and ring word crosses to `clk_sys`; after the record's last word is answered it stores C_IDX[1].
+- **The player** (`clk_sys`) plays a frame as the LW lane's player does, through `lw_link`: it takes the link's nets
+  only between link transactions (no select up, the I/O view on), raises the select, strobes each link word GAP
+  cycles apart, holds the next strobe while `ioctl_wait` (or the link's own wait) is up, and drops the select
+  between frames. A core must raise `ioctl_wait` within GAP - 3 cycles of an `ioctl_wr` to stop the next one. The
+  last ring word is answered only once the select has dropped, so C_IDX[1] reaching a frame's end means the frame
+  has played. The session's enable falling ends a frame short: the select drops and the rest of the record is
+  discarded by the walker.
+- **The mark line** (ordinal 5, `f2h_irq[12]`): a host waiting for room stores H_MARK[1] armed half a ring behind
+  its head and waits on the line, and the fabric plays the other half meanwhile. A host waiting for the download to
+  finish stores the mark at its head; the line rises once the last frame has played.
 
 ## What a host must not assume
 

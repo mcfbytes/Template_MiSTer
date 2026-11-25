@@ -6,8 +6,9 @@
 #                           tier sets of {PAD, EVT, SECTOR, LANE, OSD}, each with no upstream macro, with
 #                           MISTER_DEBUG_NOHDMI and with MISTER_DUAL_SDRAM; and MISTER_OCRAM alone, with
 #                           MISTER_OCRAM_DIAG, with MISTER_OCRAM_OSD, with both, and beside every LW tier (with
-#                           and without the OSD tier), each with no upstream macro and with MISTER_DEBUG_NOHDMI
-#                           (111 configurations)
+#                           and without the OSD tier), the SECTOR tier's two, and the download tier's three (alone,
+#                           with the OSD tier and DIAG, beside the SECTOR tier and the LW tiers but the lane),
+#                           each with no upstream macro and with MISTER_DEBUG_NOHDMI (121 configurations)
 #   tb/static.sh --nets FILE MACRO...
 #                           FILE gets one Verilog check call per LW net of that configuration, for tb/top_tb.sv
 # A floor net is a net sys_top.v declares in this configuration whose declaration the off configuration of the
@@ -28,7 +29,9 @@
 #   2. f2h_irq: bits 1:0 are upstream's; bits 10:8 are the 3-bit net lw_sys_window's lines output drives, line
 #      ordinal k at bit 7+k, declared with no value and assigned nowhere else; every other bit is a constant 0.
 #      Under MISTER_OCRAM, bit 11 is the net ocram_line in exactly those configurations and 0 otherwise,
-#      connected to hps_ocram_master.line, a register assigned only on posedge clk.
+#      connected to hps_ocram_master.line, a register assigned only on posedge clk; bit 12 likewise the net
+#      ocram_mline, connected to hps_ocram_master.mark_line, and the constant ocram_mline is a net in every OCRAM
+#      configuration (0 there without MISTER_OCRAM_FIO).
 #   3. Every floor configuration has floor nets to check; the off configuration has none.
 # Then, once, the crossing structure, on every framework-only file (hps_lw_*, lw_*, hps_ocram_*) and the
 # floors' text of the stock files, with every tier:
@@ -106,7 +109,14 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                ('ocram-sec-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=1', 'MISTER_LW']),
                ('ocram-osd-sec-lw-pad', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
                                          'MISTER_OCRAM_SECTOR_FRAME=588', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
-                                         'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD', 'MISTER_DISABLE_SPI_PAD'])]
+                                         'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD', 'MISTER_DISABLE_SPI_PAD']),
+               # the download tier: alone, with the OSD tier and DIAG, beside the SECTOR tier and every LW tier but
+               # the lane (the lane and the download player cannot share the link)
+               ('ocram-fio', ['MISTER_OCRAM', 'MISTER_OCRAM_FIO']),
+               ('ocram-osd-fio-diag', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_FIO', 'MISTER_OCRAM_DIAG']),
+               ('ocram-osd-sec-fio-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
+                                         'MISTER_OCRAM_FIO', 'MISTER_OCRAM_FIO_GAP=7', 'MISTER_LW', 'MISTER_LW_PAD',
+                                         'MISTER_LW_EVT', 'MISTER_LW_OSD'])]
 OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
 CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
@@ -114,8 +124,9 @@ LINES_LO, LINES_W, LINES_PORT = 8, 3, 'lines'
 # gp_in bit -> (the net, the instance and its output that must drive it); the rest of gp_in[27:21] is 0
 GPI = {25: ('lw_present', 'hps_lw_bridge', 'present'), 24: ('lw_idle', 'hps_lw_bridge', 'idle'),
        22: ('lw_held', 'lw_sys_window', 'held')}
-# the EVT ring's line: framework ordinal 4 -> f2h_irq[7 + 4], the master's line output
-OCRAM_LINE, OCRAM_LINE_PORT = 11, 'line'
+# the master's lines: framework ordinal k -> f2h_irq[7 + k], {bit: (net, the master's output, the macro that builds
+# it)}; the EVT ring's line is ordinal 4, the download ring's mark line ordinal 5
+OCRAM_LINES = {11: ('ocram_line', 'line', None), 12: ('ocram_mline', 'mark_line', 'MISTER_OCRAM_FIO')}
 OCMACS = ['MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD']
 # the SECTOR tier's text (its REQUEST writer is the EVT writer of a build without DIAG)
 OCMACS_SEC = ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
@@ -420,12 +431,13 @@ for name, defs in CONFIGS:
                      D.get(t[0], (0, 0, 0))[2] is None and not any(s[:2] == ['assign', t[0]] for s in statements(top))
                 check(ok, '%s: f2h_irq[%d] is bit %d of %s, not bit %d of a %d-bit net driven by lw_sys_window.%s alone'
                       % (name, b, k, ' '.join(t), b - LINES_LO, LINES_W, LINES_PORT))
-            elif b == OCRAM_LINE and ocram:
-                ok = t == ['ocram_line'] and k == 0 and conno.get(OCRAM_LINE_PORT) == t and \
+            elif b in OCRAM_LINES and ocram:
+                net, port, mac = OCRAM_LINES[b]
+                ok = t == [net] and k == 0 and conno.get(port) == t and \
                      W.get(t[0]) == 1 and D.get(t[0], (0, 0, 0))[2] is None and \
                      not any(s[:2] == ['assign', t[0]] for s in statements(top))
                 check(ok, '%s: f2h_irq[%d] is %s, not the net driven by hps_ocram_master.%s alone'
-                      % (name, b, ' '.join(t), OCRAM_LINE_PORT))
+                      % (name, b, ' '.join(t), port))
             else:
                 check(len(t) == 1 and lit_value(t[0]) == 0, '%s: f2h_irq[%d] is %s, not 0' % (name, b, ' '.join(t)))
     check(bool(nets) == (lw or ocram), '%s: %d floor nets for arm E' % (name, len(nets)))
@@ -435,7 +447,8 @@ for name, defs in CONFIGS:
 
 # ---- The crossing structure: every crossing register in sys/lw_cdc.sv's cells, every source named ----
 LWALL = ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE', 'MISTER_LW_OSD',
-         'LW_DIAG=1', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
+         'LW_DIAG=1', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1',
+         'MISTER_OCRAM_FIO']
 CDC = 'sys/lw_cdc.sv'
 CELLREG = ('lws0_', 'lws1_', 'lwa0_', 'lwa1_', 'lwq_', 'lwsrc_', 'lwtg_')
 CELLSYNC = {'lws0_q', 'lws1_q', 'lwa0_q', 'lwa1_q'}
@@ -455,7 +468,7 @@ PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit c_wide
            'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
-           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide'),
+           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide l_busy l_wait'),
            'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide xsec_en '
                                         'xsec_ack xsec_wr xsec_dat xsec_adr')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
@@ -897,8 +910,8 @@ idq = [clk for clk, out in RB['blocks'] if any('idle_q' in lhs_names(lhs)[0] for
 check('idle_q' in RB['regs'] and idq == ['clk'] and 'idle_q' not in RB['comb'],
       'lw_axi_regbus: idle_q is not a register assigned only on posedge clk (blocks on %s)' % idq)
 
-# ---- The OCRAM floor's two top-level outputs: present is the constant 1, line a clk register ----
-print('-- hps_ocram_master: present is the constant 1 and line a clk register')
+# ---- The OCRAM floor's top-level outputs: present is the constant 1, line and mark_line clk registers ----
+print('-- hps_ocram_master: present is the constant 1, line and mark_line clk registers')
 OMTOK = module(tokens(pp('sys/hps_ocram_master.sv', OCMACS)), 'hps_ocram_master')
 OM = modules_of('sys/hps_ocram_master.sv', OCMACS)['hps_ocram_master']
 check(ports(OMTOK).get('present', '').split()[:2] == ['output', 'wire'],
@@ -907,11 +920,12 @@ check(assigns(OMTOK, 'present') == [["1'b1"]], 'hps_ocram_master: present is %s,
       % assigns(OMTOK, 'present'))
 check(not any('present' in idents(sum(con.values(), [])) for _, _, _, con in OM['insts']),
       'hps_ocram_master: present is connected to an instance')
-check(ports(OMTOK).get('line', '') == 'output reg line', 'hps_ocram_master: line is not an output reg')
-check(assigns(OMTOK, 'line') == [], 'hps_ocram_master: line has a continuous assignment')
-lq = [clk for clk, out in OM['blocks'] for lhs, _, _, _ in out if lhs_names(lhs)[0] == ['line']]
-check(lq == ['clk'] and 'line' not in OM['comb'],
-      'hps_ocram_master: line is not a register assigned once on posedge clk (blocks on %s)' % lq)
+for _, ln, _ in sorted(OCRAM_LINES.values()):
+    check(ports(OMTOK).get(ln, '') == 'output reg ' + ln, 'hps_ocram_master: %s is not an output reg' % ln)
+    check(assigns(OMTOK, ln) == [], 'hps_ocram_master: %s has a continuous assignment' % ln)
+    lq = [clk for clk, out in OM['blocks'] for lhs, _, _, _ in out if lhs_names(lhs)[0] == [ln]]
+    check(lq == ['clk'] and ln not in OM['comb'],
+          'hps_ocram_master: %s is not a register assigned once on posedge clk (blocks on %s)' % (ln, lq))
 
 # ---- hps_ocram_*: every address is {16'hFFFF, off}; off a control localparam, an EVT word or a consumer's
 # ---- ring word from a localparam base and a masked index ----
@@ -920,10 +934,11 @@ OTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS)))
 OSTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS_SEC)))
 ODTXT = ' '.join(tokens(pp('sys/hps_ocram_rx.sv', OCMACS_SEC)))
 ALLT = OTXT + ' ' + OSTXT + ' ' + ODTXT
-CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX2': 0x18, 'H_IDX3': 0x1c,
-        'H_IDX4': 0x20, 'C_HELLO': 0x80, 'C_VERSION': 0x84, 'C_CAPS': 0x88, 'C_STATE': 0x8c, 'C_IDX2': 0x98,
-        'C_IDX3': 0x9c, 'C_IDX4': 0xa0, 'C_BIND': 0xa4, 'C_RING2': 0xb8, 'C_RING3': 0xbc,
-        'C_RING4': 0xc0, 'C_K0': 0xd0, 'C_K1': 0xd4, 'C_K2': 0xd8, 'C_K4': 0xe0, 'C_K5': 0xe4, 'C_K8': 0xf0}
+CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX1': 0x14, 'H_IDX2': 0x18,
+        'H_IDX3': 0x1c, 'H_IDX4': 0x20, 'H_MARK1': 0x34, 'C_HELLO': 0x80, 'C_VERSION': 0x84, 'C_CAPS': 0x88,
+        'C_STATE': 0x8c, 'C_IDX1': 0x94, 'C_IDX2': 0x98, 'C_IDX3': 0x9c, 'C_IDX4': 0xa0, 'C_BIND': 0xa4,
+        'C_RING1': 0xb4, 'C_RING2': 0xb8, 'C_RING3': 0xbc, 'C_RING4': 0xc0, 'C_K0': 0xd0, 'C_K1': 0xd4,
+        'C_K2': 0xd8, 'C_K4': 0xe0, 'C_K5': 0xe4, 'C_K8': 0xf0, 'C_K9': 0xf4}
 LITS = dict(re.findall(r"localparam \[ 15 : 0 \] (\w+) = 16'h([0-9A-Fa-f]+) ;", ALLT))
 for n_, v_ in sorted(CTRL.items()):
     check(int(LITS.get(n_, '-1'), 16) == v_ and v_ < 0x100,
@@ -936,6 +951,13 @@ for b_, w_, bv, wv in (('EVT_BASE', 'EVT_WORDS', 0x4000, 2048), ('TS_BASE', 'TS_
           'hps_ocram_*: %s/%s are not 16''h%04X/%d' % (b_, w_, bv, wv))
     check(ew > 0 and bv + 4 * ew <= 0xF000,
           'hps_ocram_*: %s + 4*%s (%s) is not below 0xF000' % (b_, w_, bv + 4 * ew if ew > 0 else '?'))
+# the download ring: 2^FIO_RING words at 0x1000, or 8,192 at 0x7000, the geometry guard holding FIO_RING to 2-10 or
+# 13: 0x1000 + 4 * 1024 and 0x7000 + 4 * 8192 are each at most 0xF000
+check(re.search(r"localparam \[ 15 : 0 \] FIO_BASE = \( FIO_RING = = 32'd13 \) \? 16'h7000 : 16'h1000 ;", ODTXT) and
+      re.search(r"localparam \[ 15 : 0 \] FIO_WORDS = 16'd1 < < FIO_RING \[ 3 : 0 \] ;", ODTXT) and
+      re.search(r"FIO_RING > = 2 & & FIO_RING < = 10 \) \| \| FIO_RING = = 13 \) \) \) begin : g_fio_geometry",
+                ODTXT),
+      'hps_ocram_rx: FIO_BASE/FIO_WORDS are not 0x1000 or 0x7000 and 2^FIO_RING under the 2-10-or-13 guard')
 for OT_, OWHO in ((OTXT, 'DIAG'), (OSTXT, 'SECTOR')):
     for r_ in ('araddr', 'awaddr'):
         check(len(re.findall(r"assign %s = \{ 16'hFFFF , off_q \} ;" % r_, OT_)) == 1 and
@@ -973,8 +995,9 @@ def ring_wires(text, base, words, who):
     return got
 rx_named = consumer_offsets(ODTXT, 'hps_ocram_rx')
 rx_rings = ring_wires(ODTXT, 'OSD_BASE', 'OSD_WORDS', 'hps_ocram_rx') | \
-           ring_wires(ODTXT, 'SEC_BASE', 'SEC_WORDS', 'hps_ocram_rx')
-check(rx_named == rx_rings, 'hps_ocram_rx: an offset wire is not an OSD_BASE or SEC_BASE ring word: %s'
+           ring_wires(ODTXT, 'SEC_BASE', 'SEC_WORDS', 'hps_ocram_rx') | \
+           ring_wires(ODTXT, 'FIO_BASE', 'FIO_WORDS', 'hps_ocram_rx')
+check(rx_named == rx_rings, 'hps_ocram_rx: an offset wire is not an OSD_BASE, SEC_BASE or FIO_BASE ring word: %s'
       % (rx_named ^ rx_rings))
 ts_named = consumer_offsets(OTXT, 'hps_ocram_tsink') - {'evt_off'}
 check(ts_named == ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink'),
@@ -983,9 +1006,13 @@ check(ts_named == ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink'),
 # the generate-time guards: a span above 0xF000 or a control constant above 0xFF stops elaboration
 for pat, who in ((r"OSD_BASE \+ OSD_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
                  (r"SEC_BASE \+ SEC_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"FIO_BASE \+ FIO_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"H_IDX1 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"C_IDX1 > = 16'h0100", 'hps_ocram_rx'),
                  (r"H_IDX2 > = 16'h0100", 'hps_ocram_rx'),
                  (r"C_IDX2 > = 16'h0100", 'hps_ocram_rx'),
                  (r"H_SECTOR > = 16'h0100", 'hps_ocram_master'),
+                 (r"H_MARK1 > = 16'h0100", 'hps_ocram_master'),
                  (r"TS_BASE \+ TS_WORDS \* 4 > 16'hF000", 'hps_ocram_tsink'),
                  (r"H_IDX4 > = 16'h0100", 'hps_ocram_tsink'),
                  (r"C_IDX4 > = 16'h0100", 'hps_ocram_tsink'),
@@ -1043,6 +1070,17 @@ check(pm is not None and
       sorted(l.upper() for l, _ in pt) == sorted(b.upper() for _, b in pt) == sorted(b for _, b in terms),
       'lw_sys_window: PENDING does not put each line\'s level on its own entry\'s bit: %s' % pt)
 print('directory lines: %s' % ', '.join('%s ordinal %d' % (b, ORDS[b]) for b in sorted(ORDS) if ORDS[b]))
+# the mailbox's descriptors: each C_RING line ordinal its ring's own, none an LW entry's, and each one f2h_irq bit of
+# the f2h_irq check above (ordinal k at bit 7 + k)
+OFTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_FIO'])))
+ORING = {m.group(1): int(m.group(2)) for m in
+         re.finditer(r"localparam \[ 31 : 0 \] (C_RING\d_\w+) = \{ 5'd\d+ , 5'd(\d+) ,", OFTXT)}
+onz = sorted(o for o in ORING.values() if o)
+check(len(onz) == len(set(onz)) and not set(onz) & set(o for o in ORDS.values() if o) and
+      sorted(7 + o for o in onz) == sorted(OCRAM_LINES),
+      'hps_ocram_master: the descriptors\' line ordinals %s are not one a ring, apart from the LW entries\' %s, each '
+      'at its f2h_irq bit %s' % (ORING, ORDS, sorted(OCRAM_LINES)))
+print('mailbox lines: %s' % ', '.join('%s ordinal %d' % (r, o) for r, o in sorted(ORING.items()) if o))
 
 # ---- The wording: no word of the reference core's own devices in the framework's text ----
 print('-- wording: no reference-core device word in the LW files, the LW text of the stock files, tb/ or the guide; the guide in its own terms')

@@ -22,6 +22,9 @@
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 `define LW_OCRAM_RX_BUILT
 `endif
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_RX_BUILT
+`endif
 `ifdef LW_OCRAM_RX_BUILT
 `default_nettype none
 
@@ -29,10 +32,12 @@
 // one held-data word crossing each way, and the sinks on clk_sys. OSD_EN (MISTER_OCRAM_OSD) serves the OSD ring
 // (r = 2, base 0x2000, 2,048 words) into every osd's osd_buffer through the LW OSDBUF writer's port; SEC_EN
 // (MISTER_OCRAM_SECTOR_SLOT, which needs MISTER_LW) serves the SECTOR ring (r = 4, base 0x7000, 8,192 words) into
-// one hps_io slot through the window's xsec feeder nets and lw_blk_mux.
+// one hps_io slot through the window's xsec feeder nets and lw_blk_mux; FIO_EN (MISTER_OCRAM_FIO) serves the
+// download ring (r = 1, base 0x1000, 2^FIO_RING words; 8,192 at 0x7000) onto the link nets through lw_link.
 //
 //  * clk_100m: the walker. It takes the master's consumer port 0, one transaction at a time, and serves the rings at
-//    record granularity, alternating when both have work. Per ring it keeps its tail and avail = head - tail, read
+//    record granularity, round robin over those with work (ring ids 0 OSD, 1 SECTOR, 2 download; id 3 is free).
+//    Per ring it keeps its tail and avail = head - tail, read
 //    at a head read; a head more than the ring's size ahead, or a length past avail, stops that ring for the session
 //    with a one-cycle fault. One adder addresses every ring word: tail + k (the header is k = 0, the tail store is
 //    the same sum at the record's end). Every read response is registered before a decision, except a payload
@@ -40,8 +45,8 @@
 //    whose response the cell takes is issued while the cell is busy. A head is read only when the ring is caught
 //    up and a poll tick, a finished record or (SECTOR) a new request asks for it.
 //  * The forward lw_xfer carries {tag, d}: 0 OSD_HEAD (the ROW header, row in d[20:16]), 1 SEC_HEAD (the LBA), 2
-//    DATA (of the last head's ring). The done lw_xfer answers each: 0 took, 1 accept, 2 mismatch, 3 no request.
-//    One word is outstanding at a time.
+//    DATA (of the last head's ring), 3 FIO_HEAD (the LFRAME header as read). The done lw_xfer answers each: 0 took,
+//    1 accept, 2 mismatch, 3 no request. One word is outstanding at a time.
 //  * OSD: a ROW record crosses as its header and 64 DATA words. The writer on clk_sys writes each word's four bytes
 //    from the capture register, little-endian, one a cycle, under the OSDBUF guard (both osd selects low and the
 //    I/O view, in that cycle and the two before), and answers after the fourth; a word met with the enable low is
@@ -52,6 +57,15 @@
 //    the frame. No request: the frame stays until the request record changes or a poll tick. Other records are
 //    skipped by length. No REQUEST is asked for unless a head read made after the request landed finds the ring
 //    empty, once per request (rq_post, rq_start: the master's record writer).
+//  * Download: an LFRAME {0x30, {odd, 0, sel}, len}, then len words of two link words each, low half first; odd
+//    drops the last high half. The walker crosses its header as FIO_HEAD in the read's response cycle when the kind
+//    is 0x30, arg[6:2] is 0, sel is in the select mask (1, the FPGA select) and len is not 0, then each word as
+//    DATA; the tail is stored after the last word's answer, which the player gives once the frame has ended. Every
+//    other record is skipped by length. The ring is walked in every session; it has no bind.
+//  * The player (hps_ocram_fplay, clk_sys) is the LW lane player's: a frame starts with both link selects low for
+//    two cycles, the link not busy and the enable up; each strobe is followed by GAP consecutive cycles with
+//    l_wait low; the select drops between frames. A frame the session's end cuts ends short at the next word it
+//    waits for with the enable low for two cycles.
 //  * The bind: sec_ask (H_SECTOR bit 0) raises the bind level to clk_sys; c_sbind (C_BIND bit 0) is 1 once the
 //    feeder's en_sys reads back 1. When the bit clears (or ring 3 or 4 faults) a frame being streamed finishes,
 //    the level falls, the walker reads H_IDX[4] and stores C_IDX[4] = that head (every queued frame discarded), and
@@ -71,12 +85,14 @@
 //  * MISTER_OCRAM_DIAG (OSD only): GPO 25 is the freeze knob through lw_sync (no byte, no done, no rest while 1),
 //    and the rows finished and the deepest OSD fill for the VERDICT record.
 //
-// Address bound: H_IDX[2], H_IDX[4], C_IDX[2], C_IDX[4], or a ring word BASE + ((index & (WORDS - 1)) << 2). The
-// controls are below 0x100 and both spans end below 0xF000; generate-time guards stop elaboration otherwise.
+// Address bound: H_IDX[1], H_IDX[2], H_IDX[4], C_IDX[1], C_IDX[2], C_IDX[4], or a ring word
+// BASE + ((index & (WORDS - 1)) << 2). The controls are below 0x100 and every span ends below 0xF000; generate-time
+// guards stop elaboration otherwise.
 // tb/static.sh holds it.
 
 module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_EN = 0,
-                      parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2)
+                      parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2,
+                      parameter FIO_EN = 0, parameter [31:0] FIO_RING = 32'd10, parameter [31:0] FIO_GAP = 32'd4)
 (
 	input  wire        clk,          // clk_100m: the walker
 	input  wire        clk_sys,      // the core clock: the sinks
@@ -105,6 +121,9 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	input  wire        rq_start,     // one cycle: the master begins that REQUEST
 	output wire [15:0] osd_rows,     // ROW records finished this session (DIAG)
 	output wire [15:0] osd_deepest,  // the deepest OSD fill read this session (DIAG)
+	output wire [15:0] f_tail,       // the download ring's tail, as last stored in C_IDX[1]
+	output wire        c_ffault,     // one cycle: the download ring stopped on a fault
+	output wire        c_fmid,       // level: a download record is part-consumed
 
 	// The master's consumer port: one transaction at a time
 	output wire        c_req,
@@ -136,30 +155,62 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	output wire        x_ack,
 	output wire        x_wr,
 	output wire [15:0] x_dat,
-	output wire [13:0] x_adr
+	output wire [13:0] x_adr,
+
+	// The download player's side of lw_link, on clk_sys
+	/* verilator lint_off UNUSEDSIGNAL */   // without FIO_EN the player's inputs are not read
+	input  wire        l_busy,       // any of the link's own selects, or its ID view
+	input  wire        l_wait,       // io_wait | vs_wait
+	/* verilator lint_on UNUSEDSIGNAL */
+	output wire        l_own,
+	output wire        l_hold,
+	output wire  [3:0] l_sel,
+	output wire        l_strobe,
+	output wire [15:0] l_din
 );
 
+localparam [15:0] H_IDX1    = 16'h0014;     // host: the download ring's head
 localparam [15:0] H_IDX2    = 16'h0018;     // host: the OSD ring's head
 localparam [15:0] H_IDX4    = 16'h0020;     // host: the SECTOR ring's head
+localparam [15:0] C_IDX1    = 16'h0094;     // fabric: the download ring's tail
 localparam [15:0] C_IDX2    = 16'h0098;     // fabric: the OSD ring's tail
 localparam [15:0] C_IDX4    = 16'h00A0;     // fabric: the SECTOR ring's tail
 localparam [15:0] OSD_BASE  = 16'h2000;
 localparam [15:0] OSD_WORDS = 16'd2048;
 localparam [15:0] SEC_BASE  = 16'h7000;
 localparam [15:0] SEC_WORDS = 16'd8192;
+localparam [15:0] FIO_BASE  = (FIO_RING == 32'd13) ? 16'h7000 : 16'h1000;
+localparam [15:0] FIO_WORDS = 16'd1 << FIO_RING[3:0];
+localparam  [3:0] FIO_SELS  = 4'b0010;      // the selects an LFRAME may name: the FPGA select (1) alone
+`ifdef MISTER_OCRAM_DIAG
+localparam        TS_SPAN   = 1;            // the DIAG torture sink walks ring 4's span
+`else
+localparam        TS_SPAN   = 0;
+`endif
 localparam  [7:0] LAST_ROW  = ROWS - 1;
 localparam [15:0] SEC_LEN   = FRAME[15:0] + 16'd1;      // a FRAME record's len: the LBA and the words
 localparam [13:0] SEC_K     = FRAME[13:0] + 14'd1;      // its last payload word
 
 generate
-	if (OSD_BASE + OSD_WORDS * 4 > 16'hF000 || SEC_BASE + SEC_WORDS * 4 > 16'hF000) begin : g_rx_span
+	if (OSD_BASE + OSD_WORDS * 4 > 16'hF000 || SEC_BASE + SEC_WORDS * 4 > 16'hF000 ||
+	    FIO_BASE + FIO_WORDS * 4 > 16'hF000) begin : g_rx_span
 		ocram_rx_span_above_0xF000 guard();
 	end
-	if (H_IDX2 >= 16'h0100 || H_IDX4 >= 16'h0100 || C_IDX2 >= 16'h0100 || C_IDX4 >= 16'h0100) begin : g_rx_ctrl
+	if (H_IDX1 >= 16'h0100 || H_IDX2 >= 16'h0100 || H_IDX4 >= 16'h0100 || C_IDX1 >= 16'h0100 ||
+	    C_IDX2 >= 16'h0100 || C_IDX4 >= 16'h0100) begin : g_rx_ctrl
 		ocram_rx_control_constant_above_0xFF guard();
 	end
 	if (SEC_EN != 0 && (FRAME == 0 || FRAME > 4096 || GAP < 2 || GAP > 15)) begin : g_geometry
 		ocram_sector_unservable_geometry guard();
+	end
+	// the download ring: 2^2 to 2^10 words at 0x1000, or 2^13 at 0x7000; strobes 4 to 7 cycles apart
+	if (FIO_EN != 0 && (FIO_GAP < 4 || FIO_GAP > 7 || !((FIO_RING >= 2 && FIO_RING <= 10) || FIO_RING == 13)))
+	begin : g_fio_geometry
+		ocram_fio_unservable_geometry guard();
+	end
+	// at 0x7000 the download ring takes ring 4's span, which the SECTOR tier and the DIAG sink also walk
+	if (FIO_EN != 0 && FIO_RING == 13 && (SEC_EN != 0 || TS_SPAN != 0)) begin : g_fio_span
+		ocram_fio_ring_on_ring4_span guard();
 	end
 endgenerate
 
@@ -174,7 +225,8 @@ lw_sync #(.W(1)) frz_sync(.clk(clk_sys), .d(frz_lwx), .q(frz));
 wire frz = 1'b0;
 `endif
 
-localparam [1:0] TG_OHEAD = 2'd0, TG_SHEAD = 2'd1, TG_DATA = 2'd2;
+localparam [1:0] TG_OHEAD = 2'd0, TG_SHEAD = 2'd1, TG_DATA = 2'd2, TG_FHEAD = 2'd3;
+localparam [1:0] RG_OSD = 2'd0, RG_SEC = 2'd1, RG_FIO = 2'd2;          // the walker's ring ids
 localparam [1:0] A_TOOK = 2'd0, A_ACCEPT = 2'd1, A_MISMATCH = 2'd2;   // 3: no request
 
 wire [33:0] word_q;                    // clk_sys: the capture register {tag, d}
@@ -233,17 +285,18 @@ reg         req_we = 1'b0;
 reg  [15:0] req_off = 16'd0;
 reg         rd_pend = 1'b0;            // a ring word read is owed at tail + k
 reg         st_pend = 1'b0;            // the ring's tail store is owed: tail + k
-reg         ring = 1'b0;               // the record's ring: 0 OSD, 1 SECTOR
-reg         turn = 1'b0;               // the ring served last
-reg  [15:0] tail_o = 16'd0, tail_s = 16'd0;
+reg   [1:0] ring = RG_OSD;             // the record's ring
+reg   [1:0] turn = RG_OSD;             // the ring served last
+reg  [15:0] tail_o = 16'd0, tail_s = 16'd0, tail_f = 16'd0;
 reg  [11:0] avail_o = 12'd0;
-reg  [13:0] avail_s = 14'd0;
-reg         due_o = 1'b1, due_s = 1'b1;   // read the head when caught up
-reg         stop_o = 1'b0, stop_s = 1'b0;
+reg  [13:0] avail_s = 14'd0, avail_f = 14'd0;
+reg         due_o = 1'b1, due_s = 1'b1, due_f = 1'b1;   // read the head when caught up
+reg         stop_o = 1'b0, stop_s = 1'b0, stop_f = 1'b0;
 reg  [13:0] k = 14'd0;
-reg         mid_o = 1'b0, mid_s = 1'b0;
-reg         flt_o = 1'b0, flt_s = 1'b0;
+reg         mid_o = 1'b0, mid_s = 1'b0, mid_f = 1'b0;
+reg         flt_o = 1'b0, flt_s = 1'b0, flt_f = 1'b0;
 reg   [4:0] row_q = 5'd0;              // the ROW being sent: its OSD_HEAD carries the row alone
+reg  [13:0] flen_q = 14'd0;            // the LFRAME being sent: its len, the k of its last word
 `ifdef MISTER_OCRAM_DIAG
 reg         was_row = 1'b0;            // the OSD record being finished is a ROW
 `endif
@@ -261,24 +314,45 @@ assign osd_rows = 16'd0;
 assign osd_deepest = 16'd0;
 `endif
 
-wire [15:0] tl     = ring ? tail_s : tail_o;
+wire [15:0] tl     = (ring == RG_SEC) ? tail_s : (ring == RG_FIO) ? tail_f : tail_o;
 wire [15:0] widx   = tl + {2'd0, k};
 wire [15:0] osd_off = OSD_BASE + ((widx & (OSD_WORDS - 1)) << 2);
 wire [15:0] sec_off = SEC_BASE + ((widx & (SEC_WORDS - 1)) << 2);
+wire [15:0] fio_off = FIO_BASE + ((widx & (FIO_WORDS - 1)) << 2);
 // a response is decoded in its own cycle, as the bridge's rdata reaches each register in one stage
 wire [15:0] new_gap = c_rdata[15:0] - tl;
 wire [16:0] rlen    = {1'b0, c_rdata[15:0]} + 17'd1;
 wire        c_new   = c_done && c_ok;
 wire        c_bad   = c_done && !c_ok;
-wire [16:0] ravail  = ring ? {3'd0, avail_s} : {5'd0, avail_o};
+wire [16:0] ravail  = (ring == RG_SEC) ? {3'd0, avail_s} : (ring == RG_FIO) ? {3'd0, avail_f} : {5'd0, avail_o};
+wire [15:0] rwords  = (ring == RG_SEC) ? SEC_WORDS : (ring == RG_FIO) ? FIO_WORDS : OSD_WORDS;
+// an LFRAME the player takes: kind 0x30, arg {odd, 0, sel} with sel in the mask, a len of at least one word
+wire        f_rec   = c_rdata[31:24] == 8'h30 && c_rdata[22:18] == 5'd0 && FIO_SELS[c_rdata[17:16]] &&
+                      c_rdata[15:0] != 16'd0;
 
 wire        stand  = rq_q[32];
 wire        walk_o = OSD_EN != 0 && s_live && f_open && bind_en && !stop_o;
 wire        walk_s = SEC_EN != 0 && s_live && f_open && !stop_s;
+wire        walk_f = FIO_EN != 0 && s_live && f_open && !stop_f;
 wire        want_s = walk_s && sec_ask && !evt_stop;
 wire        job_o  = walk_o && (avail_o != 12'd0 || due_o);
 wire        job_s  = walk_s && sb && !drop_s && ((avail_s != 14'd0 && stand && !s_wait) || (avail_s == 14'd0 && due_s));
-wire        streaming = ring && wst != W_IDLE;
+wire        job_f  = walk_f && (avail_f != 14'd0 || due_f);
+wire        streaming = ring == RG_SEC && wst != W_IDLE;
+
+// Round robin by ring id over the rings with work, the one served last going last
+function [2:0] rr_pick(input [3:0] jobs, input [1:0] last);   // {found, id}
+	integer i;
+	reg [1:0] c;
+	begin
+		rr_pick = 3'd0;
+		for (i = 4; i >= 1; i = i - 1) begin
+			c = last + i[1:0];
+			if (jobs[c]) rr_pick = {1'b1, c};
+		end
+	end
+endfunction
+wire  [2:0] pick   = rr_pick({1'b0, job_f, job_s, job_o}, turn);
 
 assign c_req    = req;
 assign c_we     = req_we;
@@ -288,6 +362,9 @@ assign c_fault  = flt_o;
 assign c_mid    = mid_o;
 assign c_sfault = flt_s;
 assign c_smid   = mid_s;
+assign c_ffault = flt_f;
+assign c_fmid   = mid_f;
+assign f_tail   = tail_f;
 assign c_open   = f_open & bind_en;
 assign c_rest   = f_idle;
 assign c_sbind  = sb;
@@ -296,16 +373,19 @@ assign rq_lba   = rq_q[31:0];
 assign rq_post  = SEC_EN != 0 && sb && !drop_s && bind_lwx && stand && !rq_posted && fresh && !rq_v &&
                   avail_s == 14'd0 && !stop_s;
 
-// A payload word and a frame's LBA go to the cell in their read's response cycle (each read is issued only with the
-// cell idle, and nothing else launches before its response); a ROW's head, its row alone, from row_q.
-wire   x_rsp = (wst == W_PAY || wst == W_LBA) && c_new && s_live;
+// A payload word, a frame's LBA and an LFRAME's header go to the cell in their read's response cycle (each read is
+// issued only with the cell idle, and nothing else launches before its response); a ROW's head, its row alone,
+// from row_q.
+wire   f_hgo = wst == W_HDR && ring == RG_FIO && c_new && f_rec && rlen <= ravail;
+wire   x_rsp = ((wst == W_PAY || wst == W_LBA) && c_new || f_hgo) && s_live;
 assign x_go = x_rsp || (wst == W_HGO && !fwd_busy && s_live);
 assign x_d  = (wst == W_PAY) ? {TG_DATA, c_rdata} : (wst == W_LBA) ? {TG_SHEAD, c_rdata} :
-              {TG_OHEAD, 11'd0, row_q, 16'd0};
+              (wst == W_HDR) ? {TG_FHEAD, c_rdata} : {TG_OHEAD, 11'd0, row_q, 16'd0};
 
 always @(posedge clk) begin
 	flt_o <= 1'b0;
 	flt_s <= 1'b0;
+	flt_f <= 1'b0;
 	if (c_grant) req <= 1'b0;
 
 	// the bind level: up while asked; it falls only between records
@@ -329,29 +409,35 @@ always @(posedge clk) begin
 		if (rq_q[32]) due_s <= 1'b1;
 	end
 	else if (rq_start) rq_posted <= 1'b1;
-	if (s_tick) begin due_o <= 1'b1; due_s <= 1'b1; s_wait <= 1'b0; end
+	if (s_tick) begin due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; s_wait <= 1'b0; end
 
 	// a ring word read, addressed by the one adder; never while the forward cell is busy
 	if (rd_pend && !req && !fwd_busy) begin
 		rd_pend <= 1'b0;
 		req     <= 1'b1;
 		req_we  <= 1'b0;
-		if (ring) req_off <= sec_off;
-		else      req_off <= osd_off;
+		case (ring)
+		RG_SEC:  req_off <= sec_off;
+		RG_FIO:  req_off <= fio_off;
+		default: req_off <= osd_off;
+		endcase
 	end
 	if (st_pend && !req) begin
 		st_pend   <= 1'b0;
 		req       <= 1'b1;
 		req_we    <= 1'b1;
-		if (ring) req_off <= C_IDX4;
-		else      req_off <= C_IDX2;
+		case (ring)
+		RG_SEC:  req_off <= C_IDX4;
+		RG_FIO:  req_off <= C_IDX1;
+		default: req_off <= C_IDX2;
+		endcase
 	end
 
 	if (s_hello) begin
 		wst <= W_IDLE; req <= 1'b0; rd_pend <= 1'b0; st_pend <= 1'b0; word_out <= 1'b0;
-		tail_o <= 16'd0; tail_s <= 16'd0; avail_o <= 12'd0; avail_s <= 14'd0;
-		due_o <= 1'b1; due_s <= 1'b1; stop_o <= 1'b0; stop_s <= 1'b0;
-		mid_o <= 1'b0; mid_s <= 1'b0; s_wait <= 1'b0; turn <= 1'b0;
+		tail_o <= 16'd0; tail_s <= 16'd0; tail_f <= 16'd0; avail_o <= 12'd0; avail_s <= 14'd0; avail_f <= 14'd0;
+		due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; stop_o <= 1'b0; stop_s <= 1'b0; stop_f <= 1'b0;
+		mid_o <= 1'b0; mid_s <= 1'b0; mid_f <= 1'b0; s_wait <= 1'b0; turn <= RG_OSD;
 		sb <= 1'b0; drop_s <= 1'b0; fl_pend <= 1'b0; bind_lwx <= 1'b0; fresh <= 1'b0; rq_posted <= 1'b0;
 `ifdef MISTER_OCRAM_DIAG
 		rows_q <= 16'd0; deepest_q <= 16'd0;
@@ -368,30 +454,37 @@ always @(posedge clk) begin
 	W_IDLE: begin
 		mid_o <= 1'b0;
 		mid_s <= 1'b0;
+		mid_f <= 1'b0;
 		if (SEC_EN != 0 && fl_pend) begin
-			ring <= 1'b1; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; wst <= W_FLUSH;
+			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; wst <= W_FLUSH;
 		end
-		else if (job_o && (!job_s || turn)) begin
-			ring <= 1'b0; turn <= 1'b0;
-			if (avail_o == 12'd0) begin
-				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX2; due_o <= 1'b0; wst <= W_HEAD;
-			end
-			else begin k <= 14'd0; rd_pend <= 1'b1; mid_o <= 1'b1; wst <= W_HDR; end
-		end
-		else if (job_s) begin
-			ring <= 1'b1; turn <= 1'b1;
-			if (avail_s == 14'd0) begin
+		else if (pick[2]) begin
+			ring <= pick[1:0]; turn <= pick[1:0];
+			case (pick[1:0])
+			RG_SEC: if (avail_s == 14'd0) begin
 				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; due_s <= 1'b0; wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_s <= 1'b1; wst <= W_HDR; end
+			RG_FIO: if (avail_f == 14'd0) begin
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX1; due_f <= 1'b0; wst <= W_HEAD;
+			end
+			else begin k <= 14'd0; rd_pend <= 1'b1; mid_f <= 1'b1; wst <= W_HDR; end
+			default: if (avail_o == 12'd0) begin
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX2; due_o <= 1'b0; wst <= W_HEAD;
+			end
+			else begin k <= 14'd0; rd_pend <= 1'b1; mid_o <= 1'b1; wst <= W_HDR; end
+			endcase
 		end
 	end
 	W_HEAD, W_FLUSH: if (c_done) begin
 		if (!c_ok) begin req <= 1'b1; req_we <= 1'b0; end            // no value: read it again
-		else if (new_gap > (ring ? SEC_WORDS : OSD_WORDS)) begin
+		else if (new_gap > rwords) begin
 			// a head more than the ring's size ahead: a host defect
-			if (ring) begin stop_s <= 1'b1; flt_s <= 1'b1; fl_pend <= 1'b0; end
-			else      begin stop_o <= 1'b1; flt_o <= 1'b1; end
+			case (ring)
+			RG_SEC:  begin stop_s <= 1'b1; flt_s <= 1'b1; fl_pend <= 1'b0; end
+			RG_FIO:  begin stop_f <= 1'b1; flt_f <= 1'b1; end
+			default: begin stop_o <= 1'b1; flt_o <= 1'b1; end
+			endcase
 			wst <= W_IDLE;
 		end
 		else if (wst == W_FLUSH) begin
@@ -399,10 +492,13 @@ always @(posedge clk) begin
 			k <= new_gap[13:0]; st_pend <= 1'b1; wst <= W_FTAIL;
 		end
 		else begin
-			if (ring) begin avail_s <= new_gap[13:0]; fresh <= 1'b1; end
-			else      avail_o <= new_gap[11:0];
+			case (ring)
+			RG_SEC:  begin avail_s <= new_gap[13:0]; fresh <= 1'b1; end
+			RG_FIO:  avail_f <= new_gap[13:0];
+			default: avail_o <= new_gap[11:0];
+			endcase
 `ifdef MISTER_OCRAM_DIAG
-			if (!ring && new_gap > deepest_q) deepest_q <= new_gap;
+			if (ring == RG_OSD && new_gap > deepest_q) deepest_q <= new_gap;
 `endif
 			wst <= W_IDLE;
 		end
@@ -411,18 +507,25 @@ always @(posedge clk) begin
 		if (!c_ok) rd_pend <= 1'b1;
 		else if (rlen > ravail) begin
 			// a length past the head: a host defect
-			if (ring) begin stop_s <= 1'b1; flt_s <= 1'b1; mid_s <= 1'b0; end
-			else      begin stop_o <= 1'b1; flt_o <= 1'b1; mid_o <= 1'b0; end
+			case (ring)
+			RG_SEC:  begin stop_s <= 1'b1; flt_s <= 1'b1; mid_s <= 1'b0; end
+			RG_FIO:  begin stop_f <= 1'b1; flt_f <= 1'b1; mid_f <= 1'b0; end
+			default: begin stop_o <= 1'b1; flt_o <= 1'b1; mid_o <= 1'b0; end
+			endcase
 			wst <= W_IDLE;
 		end
-		else if (!ring && c_rdata[31:24] == 8'h01 && c_rdata[15:0] == 16'd64 && c_rdata[23:16] <= LAST_ROW) begin
+		else if (ring == RG_OSD && c_rdata[31:24] == 8'h01 && c_rdata[15:0] == 16'd64 &&
+		         c_rdata[23:16] <= LAST_ROW) begin
 			row_q <= c_rdata[20:16]; k <= 14'd0; word_out <= 1'b1; wst <= W_HGO;
 `ifdef MISTER_OCRAM_DIAG
 			was_row <= 1'b1;
 `endif
 		end
-		else if (ring && c_rdata[31:24] == 8'h10 && c_rdata[23:16] == 8'd0 && c_rdata[15:0] == SEC_LEN) begin
+		else if (ring == RG_SEC && c_rdata[31:24] == 8'h10 && c_rdata[23:16] == 8'd0 && c_rdata[15:0] == SEC_LEN) begin
 			k <= 14'd1; rd_pend <= 1'b1; wst <= W_LBA;
+		end
+		else if (ring == RG_FIO && f_rec) begin
+			flen_q <= c_rdata[13:0]; k <= 14'd0; word_out <= 1'b1; wst <= W_XFER;   // x_go launched FIO_HEAD
 		end
 		else begin
 			// an unknown kind, a record of another length or argument: skipped by its length
@@ -451,7 +554,7 @@ always @(posedge clk) begin
 	end
 	W_XFER: if (done_v) begin
 		word_out <= 1'b0;
-		if (k == (ring ? SEC_K : 14'd64)) begin
+		if (k == ((ring == RG_SEC) ? SEC_K : (ring == RG_FIO) ? flen_q : 14'd64)) begin
 			k <= k + 14'd1; st_pend <= 1'b1; wst <= W_TAIL;
 		end
 		else begin k <= k + 14'd1; rd_pend <= 1'b1; wst <= W_PAY; end
@@ -460,18 +563,24 @@ always @(posedge clk) begin
 		if (c_new) begin
 			// the tail store is done: the record is consumed
 			wst <= W_IDLE;
-			if (ring) begin
+			case (ring)
+			RG_SEC: begin
 				tail_s <= widx; avail_s <= (wst == W_FTAIL) ? 14'd0 : avail_s - k; mid_s <= 1'b0; fresh <= 1'b0;
 				if (avail_s == k || wst == W_FTAIL) due_s <= 1'b1;
 				if (wst == W_FTAIL) fl_pend <= 1'b0;
 			end
-			else begin
+			RG_FIO: begin
+				tail_f <= widx; avail_f <= avail_f - k; mid_f <= 1'b0;
+				if (avail_f == k) due_f <= 1'b1;
+			end
+			default: begin
 				tail_o <= widx; avail_o <= avail_o - k[11:0]; mid_o <= 1'b0;
 				if (avail_o == k[11:0]) due_o <= 1'b1;
 `ifdef MISTER_OCRAM_DIAG
 				if (was_row) rows_q <= rows_q + 16'd1;
 `endif
 			end
+			endcase
 		end
 		else if (c_bad) req <= 1'b1;                               // a failed store is tried again, same value
 	end
@@ -481,12 +590,13 @@ end
 
 ///////////////////////////////  clk_sys  ///////////////////////////////////
 
-reg         cur = 1'b0;                // the ring of the last head: 0 OSD, 1 SECTOR
+reg   [1:0] cur = RG_OSD;              // the ring of the last head
 wire  [1:0] tag = word_q[33:32];
 wire [31:0] wd  = word_q[31:0];
-wire        o_word_v = OSD_EN != 0 && word_v && (tag == TG_OHEAD || (tag == TG_DATA && !cur));
-/* verilator lint_off UNUSEDSIGNAL */   // the feeder's, with SEC_EN
-wire        s_word_v = SEC_EN != 0 && word_v && (tag == TG_SHEAD || (tag == TG_DATA && cur));
+wire        o_word_v = OSD_EN != 0 && word_v && (tag == TG_OHEAD || (tag == TG_DATA && cur == RG_OSD));
+/* verilator lint_off UNUSEDSIGNAL */   // the feeder's, with SEC_EN; the player's, with FIO_EN
+wire        s_word_v = SEC_EN != 0 && word_v && (tag == TG_SHEAD || (tag == TG_DATA && cur == RG_SEC));
+wire        f_word_v = FIO_EN != 0 && word_v && (tag == TG_FHEAD || (tag == TG_DATA && cur == RG_FIO));
 /* verilator lint_on UNUSEDSIGNAL */
 
 // the OSD writer: the word waits in the capture register until its four bytes are written
@@ -523,6 +633,25 @@ end
 endgenerate
 assign x_ack = f_ack;
 
+// the download player
+wire        p_go, p_rest;
+generate
+if (FIO_EN != 0) begin : fio
+	hps_ocram_fplay #(.GAP(FIO_GAP[2:0])) player
+	(
+		.clk_sys(clk_sys), .hen_s(hen_s),
+		.w_v(f_word_v), .w_head(tag == TG_FHEAD), .w_d(wd),
+		.a_go(p_go), .rest(p_rest),
+		.l_busy(l_busy), .l_wait(l_wait),
+		.own(l_own), .hold(l_hold), .sel(l_sel), .strobe(l_strobe), .din(l_din)
+	);
+end
+else begin : nofio
+	assign p_go = 1'b0, p_rest = 1'b1;
+	assign l_own = 1'b0, l_hold = 1'b0, l_sel = 4'd0, l_strobe = 1'b0, l_din = 16'd0;
+end
+endgenerate
+
 // the request record: offered = the mux here, the core's request raised, the ack low and two cycles past its fall
 reg         dirty = 1'b0;
 reg   [1:0] rearm = 2'd0;
@@ -531,8 +660,8 @@ assign rc_go = dirty && !rc_busy;
 
 // The half is at rest with the enable and the bind level low, no word held or arriving, nothing owed, every
 // handshake settled. While frozen it is never at rest, which is what a stopped clk_sys looks like to the link.
-assign rest = !frz && !hen_s && !bind_s && f_rest && !o_have && !o_hans && !back_busy && !word_v && !done_go &&
-              !offd && !dirty && !rc_busy;
+assign rest = !frz && !hen_s && !bind_s && f_rest && p_rest && !o_have && !o_hans && !back_busy && !word_v &&
+              !done_go && !offd && !dirty && !rc_busy;
 
 always @(posedge clk_sys) begin
 	done_go  <= 1'b0;
@@ -545,7 +674,7 @@ always @(posedge clk_sys) begin
 	dirty <= (off_d ^ offd) | (dirty & ~rc_go);
 	rearm <= {rearm[0], f_ack | x_hps_ack};
 
-	if (word_v) cur <= (tag == TG_SHEAD) ? 1'b1 : (tag == TG_OHEAD) ? 1'b0 : cur;
+	if (word_v && tag != TG_DATA) cur <= (tag == TG_SHEAD) ? RG_SEC : (tag == TG_FHEAD) ? RG_FIO : RG_OSD;
 	if (o_word_v) begin
 		if (tag == TG_OHEAD) begin o_row <= wd[20:16]; o_word <= 6'd0; o_hans <= 1'b1; end
 		else begin o_have <= 1'b1; o_b <= 2'd0; end
@@ -555,6 +684,10 @@ always @(posedge clk_sys) begin
 	if (f_go) begin
 		done_go   <= 1'b1;
 		done_code <= f_code;
+	end
+	else if (p_go) begin
+		done_go   <= 1'b1;
+		done_code <= A_TOOK;
 	end
 	else if (o_hans && !frz) begin
 		o_hans    <= 1'b0;
@@ -746,6 +879,143 @@ always @(posedge clk_sys) begin
 	if (cut) fs <= F_FILL;
 	// the consumer's reset zero-fills the frame
 	if (c_reset && fs == F_STREAM) fs <= F_FILL;
+end
+
+endmodule
+/* verilator lint_on DECLFILENAME */
+
+//============================================================================
+//  hps_ocram_fplay -- the download player of hps_ocram_rx, on clk_sys (MISTER_OCRAM_FIO)
+//
+//  lw_lane's player with the forward crossing's capture register as its one-entry queue: w_v marks an entry (an
+//  LFRAME header, or a ring word of two link words, low half first) held in w_d until it is answered. A header is
+//  answered at once and opens a frame of 2 * len - odd link words on its select. The frame starts once its first
+//  word is in hand, both link selects have been low for two cycles, the link is not busy and the enable is up: own
+//  and hold rise and the select with them. Each link word is one strobe, then GAP consecutive cycles with l_wait
+//  low; the next word's strobe follows in the next cycle if its word is in hand. A ring word is answered with its
+//  second strobe's last gap cycle, the frame's last word only when the frame has ended: the select drops, own two
+//  cycles later, hold one after that. A frame whose next word does not come while the enable has been low for two
+//  cycles ends there. A word with no frame open is answered unplayed. A module of its own so the trace bench can
+//  drive it beside lw_lane and the fit reports its ALMs apart.
+//============================================================================
+
+/* verilator lint_off DECLFILENAME */   // the player shares hps_ocram_rx's file, as the feeder does
+module hps_ocram_fplay #(parameter [2:0] GAP = 3'd4)   // 4..7
+(
+	input  wire        clk_sys,
+	input  wire        hen_s,        // the session's enable level
+	input  wire        w_v,          // one cycle: an entry is in w_d
+	input  wire        w_head,       // it is an LFRAME header
+	input  wire [31:0] w_d,          // held until the entry is answered
+	output reg         a_go = 1'b0,  // one cycle: the entry's answer
+	output wire        rest,         // idle: no frame, no entry, idle outputs
+
+	input  wire        l_busy,       // any of the link's own selects, or its ID view
+	input  wire        l_wait,       // io_wait | vs_wait: the term that withholds the link's ack
+	output reg         own    = 1'b0,// the player drives the link nets
+	output reg         hold   = 1'b0,// own, plus one cycle: the link's ack path stays frozen
+	output reg   [3:0] sel    = 4'd0,// {osd_vga, osd_hdmi, fpga, uio}
+	output reg         strobe = 1'b0,
+	output wire [15:0] din           // the link word in hand: held from the cycle before its strobe
+);
+
+localparam [2:0] S_IDLE = 3'd0, S_STB = 3'd1, S_ACK = 3'd2, S_NEXT = 3'd3, S_GAP = 3'd4, S_REL = 3'd5;
+
+reg   [2:0] ps    = S_IDLE;
+reg   [2:0] cnt   = 3'd0;
+reg   [1:0] quiet = 2'd0;              // cycles the link's selects have been low, saturating at 2
+reg   [1:0] ml    = 2'd0;              // cycles with the enable low and no word in hand, saturating at 2
+reg         fpend = 1'b0;              // a header is taken and its frame not started
+reg   [1:0] fsel  = 2'd0;
+reg  [14:0] n     = 15'd0;             // the frame's link words still to strobe, the one in hand included
+reg         have  = 1'b0;              // a ring word is in w_d
+reg         half  = 1'b0;              // the link word in hand is the ring word's high half
+
+wire        wpres = have || (w_v && !w_head);
+wire        t_beg = ps == S_IDLE && fpend && wpres && quiet == 2'd2 && !l_busy && hen_s;
+wire        t_ack = ps == S_ACK && !l_wait && cnt == GAP - 3'd1;
+
+assign din  = half ? w_d[31:16] : w_d[15:0];
+assign rest = ps == S_IDLE && !own && !hold && !strobe && sel == 4'd0 && !fpend && !have && !a_go;
+
+always @(posedge clk_sys) begin
+	a_go  <= 1'b0;
+	quiet <= l_busy ? 2'd0 : (quiet == 2'd2) ? 2'd2 : quiet + 2'd1;
+	ml    <= (hen_s || wpres) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
+
+	// an entry: a header opens a frame (with the enable up) and is answered at once; a word waits in w_d
+	if (w_v && w_head) begin
+		a_go  <= 1'b1;
+		fpend <= hen_s;
+		fsel  <= w_d[17:16];
+		n     <= {w_d[13:0], 1'b0} - {14'd0, w_d[23]};
+	end
+	else if (w_v) have <= 1'b1;
+
+	case (ps)
+		S_IDLE: if (t_beg) begin
+			own   <= 1'b1;
+			hold  <= 1'b1;
+			sel   <= 4'b0001 << fsel;
+			half  <= 1'b0;
+			fpend <= 1'b0;
+			ps    <= S_STB;
+		end
+		else begin
+			own    <= 1'b0;
+			hold   <= 1'b0;
+			sel    <= 4'd0;
+			strobe <= 1'b0;
+			if (fpend && !hen_s) fpend <= 1'b0;          // the session ended before the frame began
+			if (have && !fpend) begin                    // a word with no frame: answered unplayed
+				have <= 1'b0;
+				a_go <= 1'b1;
+			end
+		end
+		S_STB: begin
+			strobe <= 1'b1;
+			cnt    <= 3'd0;
+			n      <= n - 15'd1;
+			ps     <= S_ACK;
+		end
+		S_ACK: begin
+			strobe <= 1'b0;
+			if (l_wait) cnt <= 3'd0;
+			else if (t_ack) begin
+				ps <= S_NEXT;
+				if (n != 15'd0) begin
+					// the ring word's second half is acknowledged: answer it; the frame's last waits for its end
+					if (half) begin have <= 1'b0; a_go <= 1'b1; end
+					half <= ~half;
+				end
+			end
+			else cnt <= cnt + 3'd1;
+		end
+		S_NEXT: if (n != 15'd0 && wpres) ps <= S_STB;
+		else if (n == 15'd0 || ml == 2'd2) begin
+			sel <= 4'd0;
+			cnt <= 3'd0;
+			ps  <= S_GAP;
+		end
+		S_GAP: if (cnt == 3'd1) begin
+			own <= 1'b0;
+			ps  <= S_REL;
+		end
+		else cnt <= cnt + 3'd1;
+		S_REL: begin
+			hold <= 1'b0;
+			half <= 1'b0;
+			if (have) begin have <= 1'b0; a_go <= 1'b1; end
+			ps   <= S_IDLE;
+		end
+		default: begin
+			own    <= 1'b0;
+			hold   <= 1'b0;
+			sel    <= 4'd0;
+			strobe <= 1'b0;
+			ps     <= S_IDLE;
+		end
+	endcase
 end
 
 endmodule

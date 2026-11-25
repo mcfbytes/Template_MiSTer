@@ -32,7 +32,9 @@
 #      block reader outside hps_io slots 1-9: emu's compile fails, naming lw_template_block_slot_1_to_9; and the
 #      OCRAM SECTOR and SPI-pad guards: MISTER_OCRAM_SECTOR_SLOT without MISTER_LW, with MISTER_OCRAM_DIAG, beside
 #      the LW SECTOR block, or at an unservable geometry, and MISTER_DISABLE_SPI_PAD without MISTER_LW_PAD, each
-#      fails naming its guard (and its legal neighbour compiles)
+#      fails naming its guard (and its legal neighbour compiles); and the OCRAM download tier's: MISTER_OCRAM_FIO
+#      beside MISTER_LW_LANE (link_on_two_players), a gap outside 4-7 or a ring outside 2-10 and 13
+#      (ocram_fio_unservable_geometry), a ring of 13 beside the SECTOR tier or DIAG (ocram_fio_ring_on_ring4_span)
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -44,7 +46,8 @@
 #      with the crossing cells' delay models (LW_TB_CDC, sys/lw_cdc.sv) under each seed of LW_TB_SEEDS (1 2 3)
 #   V  front-end lint: slang elaborates every LW module at its defaults (the vendor atom left unknown), and
 #      the window with every block, at both LW_DIAG values, with every tier macro; and the floor modules with
-#      MISTER_LW alone. Any error fails (a name used before its declaration is one, which the Icarus arms
+#      MISTER_LW alone; and the OCRAM master, hps_ocram_rx with its download player and lw_link with
+#      MISTER_OCRAM_FIO and no LW macro. Any error fails (a name used before its declaration is one, which the Icarus arms
 #      accept). Without slang on PATH the arm reports SKIPPED and does not fail.
 #   H  the HPS-side probe, tb/hps/lw_probe.c, compiled with warnings as errors by the host's C compiler (cc, or
 #      $CC) and, where one is on PATH, by arm-linux-gnueabihf-gcc; the testbench never runs it. And its own logic
@@ -59,8 +62,11 @@
 #      the torture sink, the freeze knob) and without (the OSD cases in the shipping shape); and verilator
 #      --lint-only -Wall on hps_ocram_master.sv and hps_ocram_rx.sv (and its hps_ocram_sfeed) with lw_cdc.sv,
 #      under each OCRAM macro set, which must be warning-free. A third shape builds the SECTOR tier
-#      (MISTER_OCRAM_SECTOR_SLOT, a 588-word frame) beside the OSD; each shape also runs with clk_sys at
-#      33.8688 and 20 MHz (a CD core's, the Template's)
+#      (MISTER_OCRAM_SECTOR_SLOT, a 588-word frame) beside the OSD, and a fourth the download tier (MISTER_OCRAM_FIO,
+#      with lw_link and a real hps_io: the mark line's rise, fall and never unarmed; a 6,000-word window with the
+#      mark half a ring behind the head, never dry, PLAYED once; a link transaction at every frame edge; RUN, the
+#      ID view and a core reset through GPO mid-frame; a stopped clk_sys) beside the OSD; each shape also runs with
+#      clk_sys at 33.8688 and 20 MHz (a CD core's, the Template's); verilator lints the download shape too
 #   Q  hps_io's 0x14 readout of a synthetic CONF_STR over 3 KB (tb/conf_str_3k.vh) with CONF_STR_BRAM 0 and 1
 #      (tb/confstr_tb.sv): every byte equal between the two and to the string, at strobe gaps of 2 and 5. Icarus
 #      reads a copy of hps_io.sv with byte_cnt declared above confstr_rom's port connection, which names it first
@@ -68,6 +74,12 @@
 #      frames, {ack, wr, adr, dat} compared on every clk_sys edge from each ack's rise: GAP 2 and 5, wide and byte
 #      strobes, plus the consumer-reset and session-end fills, at 33.8688 MHz; a 588-word frame and the
 #      Template's 20 MHz at GAP 2 wide; every seed, plain and with the crossing cells' delay models
+#   D  the download trace compare (tb/fio_tb.sv): the LW lane's player and the OCRAM download player play the same
+#      windows through lw_link into a real hps_io each, and fio_block's outputs (download, index, wr, addr, dout,
+#      file_ext) with the select and strobe are compared edge for edge, frame by frame: GAP 4 and 7, WIDE 1 and 0,
+#      an odd frame, aux words, waits on every write and on every second write; the wait raised GAP - 3 cycles
+#      after ioctl_wr, held 1 cycle to 10^4, with no word lost or doubled, and one cycle later, the overrun shown;
+#      at 33.8688 MHz, and the Template's 20 MHz at GAP 4 wide; every seed, plain and with the crossing models
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -75,7 +87,7 @@
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C P Q}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q}
 O=${LW_TB_OUT:-tb/out}
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
@@ -165,6 +177,12 @@ lint() {
       echo "slang -DLW_DIAG=$d $m $t" >> "$1"
       slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF >> "$1" 2>&1 || st=1
     done
+    # the download tier without the LW floor: lw_lane.sv gives lw_link alone
+    m="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_FIO"
+    t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_fplay --top lw_link -G FIO_EN=1"
+    echo "slang -DLW_DIAG=$d $m $t" >> "$1"
+    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv \
+      sys/hps_ocram_rx.sv >> "$1" 2>&1 || st=1
   done
   return $st
 }
@@ -198,6 +216,35 @@ sfeedc() {
   done
 }
 
+# fioc LOG: arm D, the download trace compare: each shape compiled once, run under every seed, plain and with the
+# models. hps_io is compiled with MISTER_LW for lw_lane and MISTER_OCRAM_OSD for hps_ocram_rx.sv's player.
+fioc() {
+  : > "$1"
+  FID="-DMISTER_LW -DMISTER_LW_LANE -DMISTER_OCRAM -DMISTER_OCRAM_OSD"
+  FIF="tb/fio_tb.sv sys/lw_lane.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/hps_io.sv"
+  for sh in "g4w1:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=1" "g4w0:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=0" \
+            "g7w1:-DFIO_TB_GAP=7 -DFIO_TB_WIDE=1" "g7w0:-DFIO_TB_GAP=7 -DFIO_TB_WIDE=0" \
+            "tpl:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=1 -DFIO_TB_SYS_HP_PS=25000"; do
+    t=${sh%%:*}; X=${sh#*:}
+    for m in plain cdc; do
+      d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      echo "-- the download trace bench compiles ($t, $m)" >> "$1"
+      if iverilog -g2012 $FID $X $d -I sys -s fio_tb -o "$O/fioD_${t}_$m.vvp" $FIF > "$O/fioD_${t}_$m.err" 2>&1; then
+        echo "pass bench: compiles ($t, $m)" >> "$1"
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          vvp -n "$O/fioD_${t}_$m.vvp" +lw_seed=$s > "$O/fioD_${t}_$m.$s.log" 2>&1 &
+        done; wait
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          echo "== seed $s $t $m" >> "$1"; cat "$O/fioD_${t}_$m.$s.log" >> "$1"
+          grep -Eq '^(PASSED|FAILED): [0-9]' "$O/fioD_${t}_$m.$s.log" || echo "FAIL bench $s $t $m: gave no result" >> "$1"
+        done
+      else
+        echo "FAIL bench: does not compile ($t, $m)" >> "$1"; head -20 "$O/fioD_${t}_$m.err" | sed 's/^/   /' >> "$1"
+      fi
+    done
+  done
+}
+
 # ocram LOG: arm O. The bench compiles five times (with DIAG; the OSD shape and the OSD + SECTOR shape, each at two
 # clk_sys rates), each plain and
 # with the crossing cells' delay models, runs under every seed of LW_TB_SEEDS, then verilator lints
@@ -208,14 +255,17 @@ ocram() {
   OCD="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10"
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10"
   OCS="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
+  OCF="$OCE -DMISTER_OCRAM_FIO"
   # shape:macros; diag at the bench's 50 MHz, the others at 33.8688 MHz and the Template's 20 MHz
   for m in plain cdc; do
-    for c in diag osd33 osd20 sec33 sec20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20; do
       case $c in diag) D=$OCD;; osd33) D="$OCE -DOCRAM_TB_SYS_HP_PS=14762";; osd20) D="$OCE -DOCRAM_TB_SYS_HP_PS=25000";;
-        sec33) D="$OCS -DOCRAM_TB_SYS_HP_PS=14762";; sec20) D="$OCS -DOCRAM_TB_SYS_HP_PS=25000";; esac
+        sec33) D="$OCS -DOCRAM_TB_SYS_HP_PS=14762";; sec20) D="$OCS -DOCRAM_TB_SYS_HP_PS=25000";;
+        fio33) D="$OCF -DOCRAM_TB_SYS_HP_PS=14762";; fio20) D="$OCF -DOCRAM_TB_SYS_HP_PS=25000";; esac
       d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      F=$OCB; case $c in fio*) F="$OCB sys/lw_lane.sv sys/hps_io.sv";; esac
       echo "-- the bench compiles ($c, $m)" >> "$1"
-      if iverilog -g2012 $D $d -I sys -o "$O/ocramO_${c}_$m.vvp" $OCB > "$O/ocramO_${c}_$m.err" 2>&1; then
+      if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/ocramO_${c}_$m.vvp" $F > "$O/ocramO_${c}_$m.err" 2>&1; then
         echo "pass bench: compiles ($c, $m)" >> "$1"; n=$((n + 1))
       else
         f=$((f + 1)); echo "FAIL bench: does not compile ($c, $m)" >> "$1"
@@ -224,7 +274,7 @@ ocram() {
     done
   done
   for m in plain cdc; do
-    for c in diag osd33 osd20 sec33 sec20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20; do
       [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
       for s in ${LW_TB_SEEDS:-1 2 3}; do
         vvp -n "$O/ocramO_${c}_$m.vvp" +lw_seed=$s > "$O/ocramO_${c}_$m.$s.log" 2>&1 &
@@ -233,7 +283,7 @@ ocram() {
     done
   done
   for s in ${LW_TB_SEEDS:-1 2 3}; do
-    for c in diag osd33 osd20 sec33 sec20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20; do
       for m in plain cdc; do
         [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
         echo "== seed $s $c $m" >> "$1"
@@ -247,12 +297,15 @@ ocram() {
   if command -v verilator >/dev/null 2>&1; then
     vok=1
     for VS in "diag:-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD" "osd:-DMISTER_OCRAM -DMISTER_OCRAM_OSD" \
-              "sec:-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2" "both:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2"; do
+              "sec:-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2" "both:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2" \
+              "fio:-DMISTER_OCRAM -DMISTER_OCRAM_FIO" "fioall:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_FIO"; do
       vn=${VS%%:*}; VF=${VS#*:}
-      for t in hps_ocram_master hps_ocram_rx hps_ocram_sfeed; do
+      for t in hps_ocram_master hps_ocram_rx hps_ocram_sfeed hps_ocram_fplay; do
         G=""; fl=$t
-        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both) fl=hps_ocram_rx;; *) continue;; esac; }
-        [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";; esac
+        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
+        [ $t = hps_ocram_fplay ] && { case $vn in fio|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
+        [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";;
+          fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
              > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
@@ -355,6 +408,9 @@ lw_sys_window #(.SEC_EN(1), .SEC_EXT(1)) w();
 `ifdef XO_RX
 hps_ocram_rx #(.OSD_EN(0), .SEC_EN(1), .FRAME(`XO_FRAME), .GAP(`XO_GAP)) r();
 `endif
+`ifdef XO_FRX
+hps_ocram_rx #(.OSD_EN(0), .SEC_EN(`XO_SEC), .FIO_EN(1), .FIO_RING(`XO_RING), .FIO_GAP(`XO_FGAP)) f();
+`endif
 endmodule
 EOS
   XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
@@ -382,6 +438,19 @@ bad|ocram_sector_unservable_geometry|an OCRAM SECTOR gap of 1|-DMISTER_LW -DMIST
 bad|ocram_sector_unservable_geometry|an OCRAM SECTOR gap of 16|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=588 -DXO_GAP=16
 ok|-|the OCRAM SECTOR edges: 4096 words, gap 15|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=4096 -DXO_GAP=15
 ok|-|the OCRAM SECTOR edges: 1 word, gap 2|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=1 -DXO_GAP=2
+bad|link_on_two_players|MISTER_OCRAM_FIO beside MISTER_LW_LANE|-DMISTER_LW -DMISTER_LW_LANE -DMISTER_OCRAM -DMISTER_OCRAM_FIO
+ok|-|MISTER_OCRAM_FIO beside MISTER_LW and its other tiers|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_OCRAM -DMISTER_OCRAM_FIO
+ok|-|MISTER_OCRAM_FIO without MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_FIO
+bad|ocram_fio_unservable_geometry|a download gap of 3|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=3
+bad|ocram_fio_unservable_geometry|a download gap of 8|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=8
+bad|ocram_fio_unservable_geometry|a download ring of 2^1 words|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=1 -DXO_FGAP=4
+bad|ocram_fio_unservable_geometry|a download ring of 2^11 words|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=11 -DXO_FGAP=4
+bad|ocram_fio_unservable_geometry|a download ring of 2^14 words|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=14 -DXO_FGAP=4
+bad|ocram_fio_ring_on_ring4_span|a download ring of 2^13 beside the SECTOR tier|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=1 -DXO_RING=13 -DXO_FGAP=4
+bad|ocram_fio_ring_on_ring4_span|a download ring of 2^13 beside DIAG|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DMISTER_OCRAM_DIAG -DXO_FRX -DXO_SEC=0 -DXO_RING=13 -DXO_FGAP=4
+ok|-|the download edges: 2^13 words alone, gap 7|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=13 -DXO_FGAP=7
+ok|-|the download edges: 2^2 words, gap 4|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=2 -DXO_FGAP=4
+ok|-|the download edges: 2^10 words, gap 7|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=7
 EOG
   echo "-- no tier macro" >> "$1"
   iverilog -g2012 -I sys -s lw_x_top -o "$O/lw_x.vvp" "$O/lw_x_top.sv" sys/hps_io.sv > "$O/lw_x.err" 2>&1
@@ -607,10 +676,19 @@ for g in $ARMS; do
 "
     continue
   fi
+  if [ "$g" = D ]; then
+    echo "== arm D: tb/fio_tb.sv, the LW lane's player against the OCRAM download player, edge for edge"
+    fioc "$O/fio_tbD.log"
+    grep -v "^pass " "$O/fio_tbD.log" | grep -v '^== seed'
+    V=$(verdict D "$O/fio_tbD.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
   if [ "$g" = V ]; then
     echo "== arm V: slang"
     if ! command -v slang >/dev/null 2>&1; then V="arm V: SKIPPED (no slang on PATH)"
-    elif lint "$O/lw_lintV.log"; then V="arm V: PASSED: slang, 6 runs, no error"
+    elif lint "$O/lw_lintV.log"; then V="arm V: PASSED: slang, 8 runs, no error"
     else grep -E 'error|warning' "$O/lw_lintV.log"; V="arm V: FAILED (slang errors, $O/lw_lintV.log)"; rc=1
     fi
     R="$R$V

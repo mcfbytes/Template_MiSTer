@@ -15,9 +15,11 @@
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
 #      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without both of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
-#      with MISTER_LW or MISTER_OCRAM.
+#      with MISTER_LW or MISTER_OCRAM. sys/lw_lane.sv serves a tier of each floor (the LW lane, the OCRAM download
+#      tier): empty without both pairs, under each set, with either floor alone or both; the lane with its own pair,
+#      lw_link with either.
 #   3. Every framework-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro), or
-#      `ifdef MISTER_OCRAM, first; `default_nettype none first inside it, `default_nettype wire last. Each macro
+#      `ifdef MISTER_OCRAM, first (sys/lw_lane.sv: each pair defining its local macros, then their guard); `default_nettype none first inside it, `default_nettype wire last. Each macro
 #      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
 #      file ends; it undefines no macro it did not define; it defines no LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
@@ -65,6 +67,17 @@ OTIER = {}
 EITHER = {'hps_ocram_rx.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_OCRAM_RX_BUILT'),
           'lw_blk_mux.sv': ('MISTER_LW', ['MISTER_LW_SECTOR_SLOT', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_BLK_MUX_BUILT')}
 TIER.pop('lw_blk_mux.sv')
+# files built by a tier of either floor: [(floor, tier)], the local macro each pair defines (the first pair's own
+# first), the head and the tail; empty without both pairs, the first pair's module only with it
+XFLOOR = {'lw_lane.sv': ([('MISTER_LW', 'MISTER_LW_LANE'), ('MISTER_OCRAM', 'MISTER_OCRAM_FIO')],
+                         ['`ifdef', 'MISTER_LW', '`ifdef', 'MISTER_LW_LANE', '`define', 'LW_LANE_BUILT',
+                          '`define', 'LW_LINK_BUILT', '`endif', '`endif',
+                          '`ifdef', 'MISTER_OCRAM', '`ifdef', 'MISTER_OCRAM_FIO', '`ifndef', 'LW_LINK_BUILT',
+                          '`define', 'LW_LINK_BUILT', '`endif', '`endif', '`endif',
+                          '`ifdef', 'LW_LINK_BUILT', '`default_nettype', 'none'],
+                         ['`default_nettype', 'wire', '`endif', '`undef', 'LW_LANE_BUILT', '`undef', 'LW_LINK_BUILT'],
+                         'lw_lane', 'lw_link')}
+TIER.pop('lw_lane.sv')
 checks = fails = 0
 
 def check(ok, what):
@@ -217,6 +230,16 @@ for x in lw:
         check(t is not None and len(t) > 0, '%s: empty with MISTER_OCRAM' % f)
         continue
     runs = [(label, defs) for label, defs in sets]
+    if x in XFLOOR:
+        pairs, _, _, own, shared = XFLOOR[x]
+        fls = [fl for fl, _ in pairs]
+        runs += [(' and '.join(fl) + ' without ' + ' or '.join(t for _, t in pairs) + ', ' + label, list(fl) + defs)
+                 for fl in [[f] for f in fls] + [fls] for label, defs in sets]
+        for k, (fl, tm) in enumerate(pairs):
+            t, e = pp(f, [fl, tm])
+            check(t is not None and shared in t and ((own in t) == (k == 0)),
+                  '%s: with %s and %s, %s %s and %s %s' % (f, fl, tm, shared, 'missing' if not t or shared not in t
+                  else 'present', own, 'present' if t and own in t else 'missing'))
     if x in EITHER:
         fl, tm, _ = EITHER[x]
         runs += [(fl + ' without ' + ' or '.join(tm) + ', ' + label, [fl] + defs) for label, defs in sets]
@@ -249,6 +272,9 @@ for x in lw:
         tail = ['`default_nettype', 'wire', '`endif', '`undef', 'MISTER_OCRAM_MARK',
                 '`undef', 'MISTER_OCRAM_POLL']
         scan = True
+    elif x in XFLOOR:
+        _, head, tail, _, _ = XFLOOR[x]
+        scan = False
     elif x in EITHER:
         fl, tm, lm = EITHER[x]
         head = ['`ifdef', fl] + sum([['`ifdef', m, '`define', lm, '`endif'] for m in tm], []) + \

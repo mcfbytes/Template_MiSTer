@@ -55,6 +55,13 @@ localparam [15:0] H_SECTOR = 16'h000C;
 localparam [15:0] H_IDX2  = 16'h0018;
 localparam [15:0] H_IDX3  = 16'h001C;
 localparam [15:0] H_IDX4  = 16'h0020;
+localparam [15:0] H_IDX1  = 16'h0014;
+localparam [15:0] H_MARK1 = 16'h0034;
+localparam [15:0] C_IDX1  = 16'h0094;
+localparam [15:0] C_RING1 = 16'h00B4;
+localparam [15:0] C_K9    = 16'h00F4;
+localparam [15:0] FIO_BASE = 16'h1000;
+localparam integer FIO_WORDS = 1024;
 localparam [15:0] C_HELLO = 16'h0080;
 localparam [15:0] C_VERSION = 16'h0084;
 localparam [15:0] C_CAPS  = 16'h0088;
@@ -104,6 +111,18 @@ localparam SEC_B = 1;
 `else
 localparam SEC_B = 0;
 `endif
+`ifdef MISTER_OCRAM_FIO
+localparam FIO_B = 1;
+`else
+localparam FIO_B = 0;
+`endif
+`ifdef MISTER_OCRAM_FIO_GAP
+localparam integer FGAP = `MISTER_OCRAM_FIO_GAP;
+`else
+localparam integer FGAP = 4;
+`endif
+localparam [31:0] C_RING1_FIO = 32'h2968_0400;   // kind 5 (LANE), line 5, 1024 words at 0x1000
+localparam [31:0] C_K9_EXP    = {16'h0002, FGAP[15:0]};
 `ifdef MISTER_OCRAM_SECTOR_FRAME
 localparam integer SFRAME = `MISTER_OCRAM_SECTOR_FRAME;
 `else
@@ -130,7 +149,8 @@ localparam integer ROWS = 20;
 localparam integer ROWS = 16;
 `endif
 localparam  [15:0] ROWS16 = ROWS;
-localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0);
+localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0) |
+                               (FIO_B ? 32'h2 : 32'h0);
 localparam [31:0] C_K8_EXP   = {ROWS16, 16'd256};
 
 localparam integer M_NORMAL = 0, M_SECURE_REFUSE = 1, M_NEVER = 2;
@@ -194,6 +214,13 @@ wire        c0_rest, c0_fault, c0_mid, c0_open;
 wire [15:0] osd_rows, osd_deepest;
 wire        sec_ask, evt_stop, c0_sfault, c0_smid, c0_sbind, c0_wide, rq_post, rq_start;
 wire [31:0] rq_lba;
+// the download tier: the ring's tail and levels, the mark line, and the player's side of lw_link
+wire [15:0] f_tail;
+wire        c0_ffault, c0_fmid, mark_out;
+wire        p_own, p_hold, p_strobe;
+wire  [3:0] p_sel;
+wire [15:0] p_din;
+wire        l_busy_m, l_wait_m;
 // the SECTOR slot's core side (the window's xsec nets): the bench's consumer model drives the request
 reg         x_reset = 1'b0, x_hps_ack = 1'b0, x_req = 1'b0, x_commit = 1'b0;
 reg  [31:0] x_lba = 32'd0;
@@ -207,7 +234,7 @@ wire  [7:0] ocram_byte;
 reg   [1:0] sel_m = 2'b00;   // both osd selects low: the quiet guard
 reg         view_m = 1'b1;   // the I/O view
 
-hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ)) dut
+hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ), .FIO_GAP(FGAP)) dut
 (
 	.clk(clk),
 	.hps_rst_n(hps_rst_n),
@@ -221,6 +248,7 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 	.osd_rows(osd_rows), .osd_deepest(osd_deepest),
 	.sec_ask(sec_ask), .evt_stop(evt_stop), .c0_sfault(c0_sfault), .c0_smid(c0_smid), .c0_sbind(c0_sbind),
 	.c0_wide(c0_wide), .rq_post(rq_post), .rq_lba(rq_lba), .rq_start(rq_start),
+	.f_tail(f_tail), .c0_ffault(c0_ffault), .c0_fmid(c0_fmid), .mark_line(mark_out),
 	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst),
 	.awlock(awlock), .awcache(awcache), .awprot(awprot), .awuser(awuser), .awvalid(awvalid),
 	.awready(awready),
@@ -232,7 +260,8 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 	.rid(rid), .rdata(rdata), .rresp(rresp), .rlast(rlast), .rvalid(rvalid), .rready(rready)
 );
 
-hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP(SGAP)) u_osd
+hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP(SGAP), .FIO_EN(FIO_B),
+               .FIO_GAP(FGAP)) u_osd
 (
 	.clk(clk),
 	.clk_sys(clk_sys),
@@ -270,7 +299,10 @@ hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP
 	.addr(ocram_addr),
 	.dbyte(ocram_byte),
 	.x_reset(x_reset), .x_hps_ack(x_hps_ack), .x_req(x_req), .x_lba(x_lba), .x_commit(x_commit), .x_wide(x_wide),
-	.x_en(x_en), .x_ack(x_ack), .x_wr(x_wr), .x_dat(x_dat), .x_adr(x_adr)
+	.x_en(x_en), .x_ack(x_ack), .x_wr(x_wr), .x_dat(x_dat), .x_adr(x_adr),
+	.f_tail(f_tail), .c_ffault(c0_ffault), .c_fmid(c0_fmid),
+	.l_busy(l_busy_m), .l_wait(l_wait_m),
+	.l_own(p_own), .l_hold(p_hold), .l_sel(p_sel), .l_strobe(p_strobe), .l_din(p_din)
 );
 
 // The two real osd.v instances: A only over SPI, B only from the OCRAM writer.
@@ -687,6 +719,9 @@ endfunction
 function in_ts(input [15:0] a);
 	in_ts = (a >= TS_BASE) && (a <= TS_BASE + TS_WORDS * 4 - 1);
 endfunction
+function in_fio(input [15:0] a);
+	in_fio = (a >= FIO_BASE) && (a <= FIO_BASE + FIO_WORDS * 4 - 1);
+endfunction
 
 reg [4:0]  rst_grace = 5'd0;
 reg        awv_d = 0, wv_d = 0, arv_d = 0, bv_d = 0, rv_d = 0;
@@ -852,6 +887,7 @@ always @(posedge clk) begin
 		if (!(araddr[15:0] === H_HELLO || araddr[15:0] === H_BIND || araddr[15:0] === H_LINE ||
 		      araddr[15:0] === H_IDX2 || araddr[15:0] === H_IDX3 || araddr[15:0] === H_IDX4 ||
 		      (SEC_B && araddr[15:0] === H_SECTOR) ||
+		      (FIO_B && (araddr[15:0] === H_IDX1 || araddr[15:0] === H_MARK1 || in_fio(araddr[15:0]))) ||
 		      in_osd(araddr[15:0]) || in_ts(araddr[15:0])))
 			merr("ARADDR outside the control page's host half and the ring spans");
 		if (arprot !== {1'b0, exp_ns[0], 1'b0}) merr("ARPROT");
@@ -1710,6 +1746,7 @@ task case15;
 		if (dut.prev_mid_q)     state_exp = state_exp | 32'h0008_0000;
 		if (dut.prev_mid_osd_q) state_exp = state_exp | 32'h0004_0000;
 		if (dut.prev_mid_ts_q)  state_exp = state_exp | 32'h0010_0000;
+		if (dut.prev_mid_fio_q) state_exp = state_exp | 32'h0002_0000;
 		start_session(0, 0, 0, 16'h0A01, ok);
 		k = 0;
 		check_hello_word(k, C_VERSION, C_VERSION_1_0); k = k + 1;
@@ -1745,6 +1782,11 @@ task case15;
 		check_hello_word(k, 16'h00D8, 32'd1); k = k + 1;
 		check_hello_word(k, 16'h00E0, C_K4_EXP); k = k + 1;
 		check_hello_word(k, 16'h00E4, 32'd32); k = k + 1;
+`endif
+`ifdef MISTER_OCRAM_FIO
+		check_hello_word(k, C_IDX1, 32'd0); k = k + 1;
+		check_hello_word(k, C_RING1, C_RING1_FIO); k = k + 1;
+		check_hello_word(k, C_K9, C_K9_EXP); k = k + 1;
 `endif
 		check_hello_word(k, C_HELLO, {16'h4F43, 16'h0A01}); k = k + 1;
 		check("the hello's store count", hseq_n, k);
@@ -2851,6 +2893,409 @@ task rate_run;
 endtask
 `endif
 
+`ifndef MISTER_OCRAM_FIO
+assign l_busy_m = 1'b0;
+assign l_wait_m = 1'b0;
+`else
+////////////////////////  the download tier's cases  ////////////////////////
+
+// The link front as sys_top wires it: lw_link between the HPS's link (the bench's lk_* nets, the HPS's handshake on
+// io_clk/io_ack) and the download player, a real hps_io (WIDE) behind it, and a core that logs every write and
+// raises ioctl_wait the cycle after a write the table picks. l_busy is the link's selects or the ID view (GPO 31
+// through two clk_sys stages, as sys_top's gp_outr).
+reg         lk_fpga = 0, lk_uio = 0, lk_clk = 0;
+reg  [15:0] lk_din = 16'd0;
+reg   [1:0] v31 = 2'b00;
+always @(posedge clk_sys) v31 <= {v31[0], gpo[31]};
+reg         f_wait = 1'b0;
+assign l_busy_m = lk_fpga | lk_uio | ~v31[1];
+assign l_wait_m = f_wait;
+wire  [3:0] m_sel;
+wire        m_strobe, m_ack;
+wire [15:0] m_din;
+lw_link fio_link
+(
+	.clk_sys(clk_sys), .l_sel({2'b00, lk_fpga, lk_uio}), .l_clk(lk_clk), .l_din(lk_din), .l_wait(f_wait),
+	.p_own(p_own), .p_hold(p_hold), .p_sel(p_sel), .p_strobe(p_strobe), .p_din(p_din),
+	.io_sel(m_sel), .io_strobe(m_strobe), .io_din(m_din), .io_ack(m_ack)
+);
+wire [45:0] fbus;
+assign fbus[45:38] = 8'd0;
+assign fbus[35:33] = {m_sel[1], m_sel[0], m_strobe};
+assign fbus[31:16] = m_din;
+reg  [31:0] fz_lba [0:0];
+reg   [5:0] fz_cnt [0:0];
+reg  [15:0] fz_din [0:0];
+initial begin fz_lba[0] = 0; fz_cnt[0] = 0; fz_din[0] = 0; end
+wire        io_dl, io_wr;
+wire [15:0] io_ix, io_do;
+wire [26:0] io_ad;
+hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) fio_io
+(
+	.clk_sys(clk_sys), .HPS_BUS(fbus), .ioctl_wait(f_wait), .ioctl_din(16'd0),
+	.sd_lba(fz_lba), .sd_blk_cnt(fz_cnt), .sd_rd(1'b0), .sd_wr(1'b0), .sd_buff_din(fz_din),
+	.ioctl_download(io_dl), .ioctl_index(io_ix), .ioctl_wr(io_wr), .ioctl_addr(io_ad), .ioctl_dout(io_do)
+);
+
+// the core: every write logged; the wait for write n is f_hold[n & 4095] cycles (0: none) from the next cycle;
+// f_rst holds the wait up as a core in reset does
+integer f_hold [0:4095];
+integer fw_n = 0, fw_h = 0, fw_bad = 0;
+reg  [15:0] fw_d [0:32767];
+reg  [26:0] fw_a [0:32767];
+reg         f_rst = 1'b0;
+always @(posedge clk_sys) begin
+	if (fw_h > 0) fw_h = fw_h - 1;
+	if (io_wr) begin
+		if (fw_h > 0) fw_bad = fw_bad + 1;     // a write the core could not take
+		if (fw_n < 32768) begin fw_d[fw_n] = io_do; fw_a[fw_n] = io_ad; end
+		fw_h = f_hold[fw_n & 4095];
+		fw_n = fw_n + 1;
+	end
+	f_wait <= f_rst || fw_h > 0;
+end
+task fio_holds(input integer kind);
+	// 0: none; 2: every second write (a 32-bit word complete), 8-40 cycles
+	integer j;
+	begin
+		for (j = 0; j < 4096; j = j + 1)
+			f_hold[j] = (kind == 0 || !j[0]) ? 0 : 8 + (($random(seed) & 32'h7FFF_FFFF) % 33);
+	end
+endtask
+
+// the UIO words the link front passed to the decoders, and any link strobe while the player owned the nets
+integer uio_n = 0, own_strobes = 0, mk_rises = 0, dry = 0, hello_reads = 0;
+reg  [31:0] uio_h = 0;
+reg         mk_d = 0, fio_streaming = 0;
+always @(posedge clk_sys) begin
+	if (m_strobe && m_sel[0]) begin uio_n = uio_n + 1; uio_h = {uio_h[26:0], uio_h[31:27]} ^ {16'd0, m_din}; end
+	if (m_strobe && m_sel[0] && (p_own || p_hold)) own_strobes = own_strobes + 1;
+end
+always @(posedge clk) begin
+	mk_d <= mark_out;
+	if (mark_out && !mk_d) mk_rises = mk_rises + 1;
+	// a head read of the download ring that finds it empty while the host still has words to send
+	if (fio_streaming && u_osd.wst == 4'd1 && u_osd.ring == 2'd2 && ocram_c0_done && u_osd.c_ok &&
+	    u_osd.new_gap == 16'd0)
+		dry = dry + 1;
+	if (arvalid && arready && araddr[15:0] == H_HELLO) hello_reads = hello_reads + 1;
+end
+
+// The HPS's link word: data, io_clk up, spin on ack, io_clk down, spin on ack low.
+task lk_word(input [15:0] w);
+	integer t;
+	begin
+		@(negedge clk_sys); lk_din = w; lk_clk = 1;
+		t = 0; while (m_ack !== 1'b1 && t < 200000) begin @(negedge clk_sys); t = t + 1; end
+		lk_clk = 0;
+		t = 0; while (m_ack !== 1'b0 && t < 200000) begin @(negedge clk_sys); t = t + 1; end
+	end
+endtask
+// one UIO transaction: an opcode no decoder acts on, then three words
+reg  [31:0] uio_exp = 0;
+integer     uio_sent = 0;
+task lk_uio_txn(input [15:0] base);
+	integer m;
+	reg [15:0] w;
+	begin
+		@(negedge clk_sys); lk_uio = 1;
+		repeat (2) @(negedge clk_sys);
+		for (m = 0; m < 4; m = m + 1) begin
+			w = (m == 0) ? 16'h00FE : base + m;
+			lk_word(w);
+			uio_exp = {uio_exp[26:0], uio_exp[31:27]} ^ {16'd0, w}; uio_sent = uio_sent + 1;
+		end
+		@(negedge clk_sys); lk_uio = 0;
+		repeat (3) @(negedge clk_sys);
+	end
+endtask
+
+// a window's link words, frame by frame (as tb/fio_tb.sv builds them), and its data words
+reg  [15:0] flw [0:16383];
+integer     ffs [0:511];
+integer     fnf = 0, fnw = 0, fnd = 0;
+reg  [15:0] fdat [0:16383];
+task ff_open; begin ffs[fnf] = fnw; fnf = fnf + 1; end endtask
+task ff_word(input [15:0] w); begin flw[fnw] = w; fnw = fnw + 1; end endtask
+task fio_window(input [15:0] idx, input integer nb, input integer lmin, input integer lmax);
+	integer b, j, l;
+	reg [15:0] d;
+	begin
+		fnf = 0; fnw = 0; fnd = 0;
+		ff_open; ff_word(16'h0055); ff_word(idx);
+		ff_open; ff_word(16'h0053); ff_word(16'h00FF);
+		for (b = 0; b < nb; b = b + 1) begin
+			l = lmin + (($random(seed) & 32'h7FFF_FFFF) % (lmax - lmin + 1));
+			ff_open; ff_word(16'h0054);
+			for (j = 0; j < l; j = j + 1) begin d = $random(seed); ff_word(d); fdat[fnd] = d; fnd = fnd + 1; end
+		end
+		ff_open; ff_word(16'h0053); ff_word(16'h0000);
+		ffs[fnf] = fnw;
+	end
+endtask
+
+// the host's download ring: records at the free-running index fio_head, one H_IDX[1] store publishes them
+integer fio_head = 0;
+task fio_put(input [31:0] v);
+	begin poke(FIO_BASE + ((fio_head[15:0] & (FIO_WORDS - 1)) << 2), v); fio_head = fio_head + 1; end
+endtask
+task fio_publish; begin poke(H_IDX1, {16'd0, fio_head[15:0]}); end endtask
+function integer fio_room(input dummy);
+	fio_room = FIO_WORDS - ((fio_head - mem[C_IDX1 >> 2]) & 16'hFFFF);
+endfunction
+// frame k as an LFRAME: two link words a ring word, low half first; odd drops the last high half
+task fio_frame(input integer k);
+	integer j, n, len;
+	begin
+		n = ffs[k + 1] - ffs[k]; len = (n + 1) / 2;
+		fio_put({8'h30, n[0], 5'd0, 2'd1, len[15:0]});
+		for (j = 0; j < len; j = j + 1)
+			fio_put({(2 * j + 1 < n) ? flw[ffs[k] + 2 * j + 1] : 16'd0, flw[ffs[k] + 2 * j]});
+	end
+endtask
+function integer fio_need(input integer k);
+	fio_need = 1 + (ffs[k + 1] - ffs[k] + 1) / 2;
+endfunction
+task fio_mark(input arm, input [15:0] idx); begin poke(H_MARK1, {arm, 15'd0, idx}); end endtask
+task fio_wait_played(input integer us, output integer ok);
+	begin wait_word(C_IDX1, {16'd0, fio_head[15:0]}, us, ok); end
+endtask
+// every data word of the window once, in order, from write w0
+task fio_check_writes(input string what, input integer w0);
+	integer j, n;
+	begin
+		check({what, ": the core's writes"}, fw_n - w0, fnd);
+		n = 0;
+		for (j = 0; j < fnd; j = j + 1)
+			if (fw_d[w0 + j] !== fdat[j] || fw_a[w0 + j] !== j * 2) begin
+				if (n < 4) $display("   %s write %0d: addr %h data %h, exp %h %h", what, j, fw_a[w0 + j], fw_d[w0 + j],
+				                    j * 2, fdat[j]);
+				n = n + 1;
+			end
+		check({what, ": every word once, in order, at its address"}, n, 0);
+		check({what, ": the core could take every write"}, fw_bad, 0);
+	end
+endtask
+task fio_session(input [15:0] nonce);
+	begin
+		reset_floor;
+		fio_head = 0;
+		f_rst = 0; lk_uio = 0; lk_fpga = 0; lk_clk = 0;
+		start_session(0, 0, 0, nonce, ok);
+	end
+endtask
+// the whole window, published frame by frame while it fits
+task fio_send_all;
+	integer k;
+	begin
+		for (k = 0; k < fnf; k = k + 1) begin
+			while (fio_room(0) < fio_need(k)) @(posedge clk);
+			fio_frame(k); fio_publish;
+		end
+	end
+endtask
+
+// F1/K1. the hello's words; a window over the ring into hps_io; the mark line rises at its index and never unarmed
+task fio_case1;
+	integer w0, r0, t, tl0;
+	begin
+		$display("-- download: C_CAPS bit 1, C_RING[1], C_K[9]; a window over ring 1 into hps_io");
+		fio_session(16'h0F01);
+		fio_holds(2);
+		check("C_CAPS bit 1 (ring 1)", mem[C_CAPS >> 2][1], 1);
+		check("C_RING[1]: LANE, line 5, 1,024 words at 0x1000", mem[C_RING1 >> 2], C_RING1_FIO);
+		check("C_K[9]: {sel mask 0x0002, gap}", mem[C_K9 >> 2], C_K9_EXP);
+		w0 = fw_n;
+		fio_window(16'h0003, 6, 1, 40);
+		r0 = mk_rises;
+		fio_mark(1'b0, 16'd0);                    // unarmed at the tail: never high
+		fio_send_all;
+		fio_wait_played(20000, ok);
+		check("PLAYED: C_IDX[1] reaches the head", ok, 1);
+		repeat (300) @(posedge clk_sys);
+		fio_check_writes("the window", w0);
+		check("ioctl_index", io_ix, 16'h0003);
+		check("the download ended", io_dl, 0);
+		$display("-- K1: unarmed, and armed with the bit clear: the mark line never rises");
+		fio_mark(1'b0, fio_head[15:0]);
+		repeat (4 << POLLC) @(posedge clk);
+		check("mark line rises while unarmed", mk_rises - r0, 0);
+
+		$display("-- K1: armed at an index the tail has reached: the line rises; an unarmed store drops it in a few transactions");
+		fio_mark(1'b1, fio_head[15:0]);
+		ok = 0; t = 0;
+		while (!ok && t < (4 << POLLC)) begin @(posedge clk); t = t + 1; if (mark_out) ok = 1; end
+		check("the line rises within a poll period", ok, 1);
+		fio_mark(1'b0, fio_head[15:0]);
+		t = 0; while (mark_out && t < 100000) begin @(posedge clk); t = t + 1; end
+		check("it falls after the unarmed store", mark_out, 0);
+		check("within a few transactions (under 200 clk_100m cycles)", t < 200, 1);
+		fio_mark(1'b1, fio_head[15:0] - 16'd7);           // past: the tail is beyond it
+		ok = 0; t = 0;
+		while (!ok && t < (4 << POLLC)) begin @(posedge clk); t = t + 1; if (mark_out) ok = 1; end
+		check("armed at an index the tail is past: the line rises", ok, 1);
+		fio_mark(1'b1, fio_head[15:0] + 16'd40);          // a new index ahead of the tail
+		t = 0; while (mark_out && t < 100000) begin @(posedge clk); t = t + 1; end
+		check("a new index ahead drops it within a few transactions", t < 200, 1);
+
+		$display("-- K1: armed ahead: low until the tail reaches the index, then high with C_IDX[1] at it");
+		fio_window(16'h0004, 4, 20, 40);
+		w0 = fw_n;
+		tl0 = fio_head;
+		fio_mark(1'b0, 16'd0);
+		repeat (4 << POLLC) @(posedge clk);
+		begin : armed_ahead
+			integer k, endi;
+			endi = tl0;
+			for (k = 0; k < fnf; k = k + 1) endi = endi + fio_need(k);
+			fio_mark(1'b1, endi[15:0]);
+			repeat (4 << POLLC) @(posedge clk);           // the master has read it
+			r0 = mk_rises;
+			check("no line before the frames are published", mark_out, 0);
+			fio_send_all;
+			ok = 0; t = 0;
+			while (!ok && t < 3000000) begin
+				@(posedge clk); t = t + 1;
+				if (mark_out) ok = 1;
+			end
+			check("the line rises once the tail reaches the index", ok, 1);
+			check("C_IDX[1] is at the index when it does", mem[C_IDX1 >> 2], {16'd0, endi[15:0]});
+			check("one rise", mk_rises - r0, 1);
+		end
+		fio_mark(1'b0, 16'd0);
+		repeat (300) @(posedge clk_sys);
+		fio_check_writes("the second window", w0);
+	end
+endtask
+
+// K2. a download with the mark half a ring behind the head: the ring never runs dry, PLAYED rises once
+task fio_case2;
+	integer w0, k, t, wakes, r0;
+	begin
+		$display("-- K2: a 6,000-word window, the host parked on the mark half a ring behind: never dry, PLAYED once");
+		fio_session(16'h0F02);
+		fio_holds(2);
+		fio_window(16'h0001, 24, 200, 300);
+		w0 = fw_n; wakes = 0; dry = 0;
+		for (k = 0; k < fnf; k = k + 1) begin
+			while (fio_room(0) < fio_need(k)) begin
+				fio_mark(1'b1, fio_head[15:0] - FIO_WORDS / 2);
+				t = 0; while (!mark_out && t < 10000000) begin @(posedge clk); t = t + 1; end
+				fio_mark(1'b0, 16'd0);
+				t = 0; while (mark_out && t < 100000) begin @(posedge clk); t = t + 1; end
+				wakes = wakes + 1;
+			end
+			fio_frame(k); fio_publish;
+			if (k == 0) begin repeat (200) @(posedge clk); fio_streaming = 1; end
+		end
+		fio_streaming = 0;
+		check("the host parked on the line", wakes >= 3, 1);
+		check("head reads that found the ring empty while words were owed", dry, 0);
+		r0 = mk_rises;
+		fio_mark(1'b1, fio_head[15:0]);
+		t = 0; while (!mark_out && t < 10000000) begin @(posedge clk); t = t + 1; end
+		check("PLAYED: the mark at the head rises", mark_out, 1);
+		check("C_IDX[1] is the head", mem[C_IDX1 >> 2], {16'd0, fio_head[15:0]});
+		repeat (2000) @(posedge clk);
+		check("PLAYED rose once", mk_rises - r0, 1);
+		fio_mark(1'b0, 16'd0);
+		repeat (300) @(posedge clk_sys);
+		fio_check_writes("K2", w0);
+		check("the download ended", io_dl, 0);
+	end
+endtask
+
+// F3. a link transaction at every frame edge: delayed, never lost, never strobed while the player owns the nets
+task fio_case3;
+	integer w0, d, n0, ok2;
+	begin
+		$display("-- F3: a UIO link transaction started 0-400 clk_sys cycles after each window's publish");
+		fio_session(16'h0F03);
+		fio_holds(0);
+		uio_n = 0; uio_h = 0; uio_exp = 0; uio_sent = 0; own_strobes = 0;
+		for (d = 0; d < 400; d = d + 7) begin
+			w0 = fw_n;
+			fio_window(16'h0010 + d, 2, 1, 6);
+			fork
+				fio_send_all;
+				begin repeat (d) @(posedge clk_sys); lk_uio_txn(d[15:0]); end
+			join
+			fio_wait_played(5000, ok);
+			repeat (40) @(posedge clk_sys);
+			fio_check_writes($sformatf("window at %0d", d), w0);
+		end
+		check("PLAYED each time", ok, 1);
+		check("UIO words passed", uio_n, uio_sent);
+		check("UIO stream, in order", uio_h, uio_exp);
+		check("link strobes while the player owned the nets", own_strobes, 0);
+	end
+endtask
+
+// F3. RUN falling, the ID view, a core reset through GPO, mid-frame: the frame ends short, the session ends, the
+// next session's window plays whole
+task fio_cut(input string what, input [31:0] gv, input integer rst);
+	integer w0, t;
+	begin
+		$display("-- F3: %s mid-frame", what);
+		fio_session(16'h0F04);
+		fio_holds(0);
+		fio_window(16'h0020, 1, 600, 600);
+		w0 = fw_n;
+		fio_send_all;                                 // one 302-word record: it fits at once
+		t = 0; while (fw_n - w0 < 50 && t < 2000000) begin @(posedge clk); t = t + 1; end
+		if (rst) f_rst = 1;
+		gpo_store(gv);
+		if (rst) begin
+			repeat (3000) @(posedge clk_sys);
+			check({what, ": the wait holds the strobe in hand"}, p_own, 1);
+			f_rst = 0;
+		end
+		t = 0; while ((p_own || p_hold) && t < 200000) begin @(posedge clk); t = t + 1; end
+		check({what, ": the player let the nets go"}, {p_own, p_hold}, 2'b00);
+		check({what, ": the frame ended short"}, fw_n - w0 < 600, 1);
+		t = fw_n; repeat (500) @(posedge clk_sys);
+		check({what, ": no write after"}, fw_n, t);
+		wait_stopped(1000, ok);
+		check({what, ": the master stopped"}, ok, 1);
+		gpo_store(GPO_IO);
+		repeat (50) @(posedge clk);
+		fio_head = 0;
+		start_session(0, 0, 0, 16'h0F05, ok);
+		check({what, ": the next hello reports ring 1 cut mid-record"}, mem[C_STATE >> 2][17], 1);
+		w0 = fw_n;
+		fio_window(16'h0021, 3, 10, 30);
+		fio_send_all;
+		fio_wait_played(20000, ok);
+		repeat (300) @(posedge clk_sys);
+		fio_check_writes({what, ": the next window"}, w0);
+	end
+endtask
+
+// F3. a frozen clk_sys mid-frame: the master keeps polling; on the clock's return the frame completes, every word once
+task fio_case5;
+	integer w0, t, h0;
+	begin
+		$display("-- F3: clk_sys stopped for 60 us mid-frame");
+		fio_session(16'h0F06);
+		fio_holds(2);
+		fio_window(16'h0030, 3, 100, 120);
+		w0 = fw_n;
+		fio_send_all;                                 // about 180 words: they fit at once
+		t = 0; while (fw_n - w0 < 40 && t < 2000000) begin @(posedge clk); t = t + 1; end
+		sys_run = 1'b0;
+		h0 = hello_reads;
+		repeat (6000) @(posedge clk);
+		check("the master polls on while clk_sys is stopped", hello_reads - h0 >= 3, 1);
+		check("the session holds", mem[C_HELLO >> 2], {16'h4F43, 16'h0F06});
+		sys_run = 1'b1;
+		fio_wait_played(20000, ok);
+		check("PLAYED after the clock's return", ok, 1);
+		repeat (300) @(posedge clk_sys);
+		fio_check_writes("the frozen frame's window", w0);
+	end
+endtask
+`endif
+
 initial begin
 	if (!$value$plusargs("lw_seed=%d", seed)) seed = 1;
 	$display("ocram_tb: seed %0d, POLL %0d, MARK %0d, DIAG %0d, OSD %0d, ROWS %0d",
@@ -2916,6 +3361,15 @@ initial begin
 	sec_case11;
 	sec_case13;
 	sec_case15;
+`endif
+`ifdef MISTER_OCRAM_FIO
+	fio_case1;
+	fio_case2;
+	fio_case3;
+	fio_cut("RUN falling", GPO_IO, 0);
+	fio_cut("the ID view", 32'h0000_0000, 0);
+	fio_cut("a core reset through GPO, the core's wait up", 32'h4000_0000, 1);
+	fio_case5;
 `endif
 
 	$display("-- the protocol monitor over the whole suite");

@@ -292,6 +292,14 @@ ocram_sector_needs_MISTER_LW ocram_sector_guard();
 spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();
 `endif
 `endif
+// The LW frame lane and the OCRAM download tier each put a player on the link nets through lw_link: one a build.
+`ifdef MISTER_LW_LANE
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_FIO
+link_on_two_players link_guard();
+`endif
+`endif
+`endif
 
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;

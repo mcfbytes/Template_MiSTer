@@ -17,6 +17,18 @@
 
 `ifdef MISTER_LW
 `ifdef MISTER_LW_LANE
+`define LW_LANE_BUILT
+`define LW_LINK_BUILT
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_FIO
+`ifndef LW_LINK_BUILT
+`define LW_LINK_BUILT
+`endif
+`endif
+`endif
+`ifdef LW_LINK_BUILT
 `default_nettype none
 
 // LANE block (LW directory kind 5, minor 2, "LAN1"): the ordered frame lane, built with MISTER_LW_LANE.
@@ -44,7 +56,10 @@
 // includes the link's ID view (sys_top), so no frame starts while it is selected.
 // Crossings, each through lw_sync (lw_cdc.sv): the four Gray pointers of the two FIFOs, each recomputed from its
 // binary pointer in every cycle, the played and reply-drop toggles, and the enable link's two levels.
+// lw_link, below, is built with this block or with the OCRAM download tier (MISTER_OCRAM_FIO), whose player in
+// hps_ocram_rx.sv takes the same p_* side; a build has one player.
 
+`ifdef LW_LANE_BUILT
 module lw_lane #(parameter AW = 10, parameter [2:0] GAP = 3'd4, parameter RAW = 8)   // GAP: 2..7
 (
 	input wire         clk,          // clk_100m
@@ -339,6 +354,7 @@ always @(posedge clk_sys) begin
 end
 
 endmodule
+`endif
 
 // The link's ack path (sys_top's rack/io_ack, unchanged) and the mux that hands the link nets to the lane
 // player: while it holds them the link's strobe and ack stay frozen, so a link word is delayed, never lost.
@@ -380,4 +396,5 @@ endmodule
 
 `default_nettype wire
 `endif
-`endif
+`undef LW_LANE_BUILT
+`undef LW_LINK_BUILT

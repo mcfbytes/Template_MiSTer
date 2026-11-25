@@ -444,9 +444,14 @@ initial begin
 	release dut.lw_sys_window.lines;
 `else
 `ifdef MISTER_OCRAM
-	$display("-- f2h_irq: the OCRAM EVT line only");
+	$display("-- f2h_irq: the OCRAM EVT line, and with the download tier its mark line");
 	check("f2h_irq[11] is the master's line", dut.interrupts.irq[11], dut.ocram_master.line);
-	check("f2h_irq[63:12] and f2h_irq[10:2]", {dut.interrupts.irq[63:12], dut.interrupts.irq[10:2]}, 62'd0);
+`ifdef MISTER_OCRAM_FIO
+	check("f2h_irq[12] is the master's mark line", dut.interrupts.irq[12], dut.ocram_master.mark_line);
+`else
+	check("f2h_irq[12] without the download tier", dut.interrupts.irq[12], 1'b0);
+`endif
+	check("f2h_irq[63:13] and f2h_irq[10:2]", {dut.interrupts.irq[63:13], dut.interrupts.irq[10:2]}, 60'd0);
 `else
 	$display("-- f2h_irq: no LW line");
 	check("f2h_irq[63:2]", {dut.interrupts.irq & IRQ_LW}, 64'd0);
