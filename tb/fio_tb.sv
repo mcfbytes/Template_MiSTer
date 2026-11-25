@@ -23,7 +23,8 @@
 // table's cycles. Each frame's trace, {sel, strobe, ioctl_download, ioctl_index, ioctl_wr, ioctl_addr, ioctl_dout,
 // ioctl_file_ext} on every clk_sys edge from own's rise to hold's fall, is compared frame by frame: the walker's
 // crossing puts a gap between two mailbox frames that the lane does not have, so frames are aligned at their
-// start. Every write the core sees is logged and checked against the window's words: none lost or doubled.
+// start, and each player's l_busy is its core's wait (up or owed), so a wait held past a frame's end delays the
+// next frame's start on both alike instead of landing at a different edge of it. Every write the core sees is logged and checked against the window's words: none lost or doubled.
 // The core counts an overrun when an ioctl_wr arrives while a wait it owes is still pending or up.
 // Macros: FIO_TB_GAP (4), FIO_TB_WIDE (1), FIO_TB_SYS_HP_PS (14762: 33.8688 MHz).
 
@@ -83,6 +84,9 @@ reg         hen = 0, take = 0;
 wire        f_open, f_owned, f_idle, irq_a;
 wire [31:0] rdata_a;
 wire        wait_a, wait_b;
+// A player starts a frame only once l_busy has been low two cycles; here l_busy is the core's wait or a wait it
+// still owes, so each frame of both stacks starts with the core in the same state, whatever the gap before it.
+wire        busy_a, busy_b;
 wire        own_a, hold_a, stb_a;
 wire  [3:0] sel_a;
 wire [15:0] din_a;
@@ -91,7 +95,7 @@ lw_lane #(.AW(10), .GAP(GAP), .RAW(8)) u_lane
 (
 	.clk(clk), .raddr(12'd0), .rdata(rdata_a), .waddr(waddr), .wsel(wsel), .write(write), .wdata(wdata),
 	.be(4'hF), .hen(hen), .take(take), .f_open(f_open), .f_owned(f_owned), .f_idle(f_idle), .irq(irq_a),
-	.clk_sys(clk_sys), .l_busy(1'b0), .l_wait(wait_a), .l_dout(16'd0),
+	.clk_sys(clk_sys), .l_busy(busy_a), .l_wait(wait_a), .l_dout(16'd0),
 	.own(own_a), .hold(hold_a), .sel(sel_a), .strobe(stb_a), .din(din_a)
 );
 
@@ -120,7 +124,7 @@ hps_ocram_fplay #(.GAP(GAP)) u_play
 (
 	.clk_sys(clk_sys), .hen_s(u_lane.hen_s),
 	.w_v(w_v), .w_head(w_hd), .w_d(w_d), .a_go(a_go), .rest(rest_b),
-	.l_busy(1'b0), .l_wait(wait_b),
+	.l_busy(busy_b), .l_wait(wait_b),
 	.own(own_b), .hold(hold_b), .sel(sel_b), .strobe(stb_b), .din(din_b)
 );
 
@@ -179,8 +183,8 @@ hps_io #(.CONF_STR("FIO;;"), .WIDE(WIDE)) io_b
 );
 
 wire [15:0] dx_a = do_a, dx_b = do_b;
-fio_core core_a(.clk(clk_sys), .wr(wr_a), .addr(ad_a), .dout(dx_a), .wait_o(wait_a));
-fio_core core_b(.clk(clk_sys), .wr(wr_b), .addr(ad_b), .dout(dx_b), .wait_o(wait_b));
+fio_core core_a(.clk(clk_sys), .wr(wr_a), .addr(ad_a), .dout(dx_a), .wait_o(wait_a), .busy(busy_a));
+fio_core core_b(.clk(clk_sys), .wr(wr_b), .addr(ad_b), .dout(dx_b), .wait_o(wait_b), .busy(busy_b));
 
 //////////////////////////  the per-frame traces  ///////////////////////////
 
@@ -412,7 +416,8 @@ initial begin #400_000_000; $display("FAILED: timeout"); $finish; end
 endmodule
 
 // The core: logs every write, and asks for the wait the table gives it, c_dly cycles after its ioctl_wr.
-module fio_core(input wire clk, input wire wr, input wire [26:0] addr, input wire [15:0] dout, output reg wait_o = 1'b0);
+module fio_core(input wire clk, input wire wr, input wire [26:0] addr, input wire [15:0] dout, output reg wait_o = 1'b0,
+                output reg busy = 1'b0);
 integer n = 0, dcnt = 0, hcnt = 0, hh = 0, overruns = 0;
 reg [26:0] lg_a [0:8191];
 reg [15:0] lg_d [0:8191];
@@ -429,6 +434,7 @@ always @(posedge clk) begin
 		end
 		n = n + 1;
 	end
+	busy <= dcnt != 0 || hcnt != 0;             // the wait is up next cycle, or still owed
 end
 endmodule
 
