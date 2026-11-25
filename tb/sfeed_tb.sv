@@ -169,7 +169,9 @@ task open_link;
 	end
 endtask
 
-// a frame: the request, then BEGIN_S and the words kept ahead of the strobes (at most 400 unplayed in the FIFO);
+// a frame: the request, then BEGIN_S and the words kept ahead of the strobes, at most 400 entries in lw_sector's FIFO
+// (its own count: a reset frame's unplayed words still in it are discarded after the fill, so a frame's played
+// strobes do not bound it, and a dropped store is never resent here);
 // cut_at >= 0: the consumer's reset after that many strobes; part >= 0: only that many words, then the enable falls
 task frame(input [31:0] lba, input integer cut_at, input integer part);
 	integer j, t, sa0, sb0, nw, per;
@@ -184,7 +186,7 @@ task frame(input [31:0] lba, input integer cut_at, input integer part);
 		wstore(15'h108, lba);                   // BEGIN_S[0]
 		j = 0; t = 0;
 		while (j < nw && t < 4000000) begin
-			if ((j - (strobes_a - sa0) / per) < 400) begin wstore(15'h4000 + j * 4, fword[j]); j = j + 1; end
+			if (u_sec.used < 400) begin wstore(15'h4000 + j * 4, fword[j]); j = j + 1; end
 			else begin @(posedge clk); t = t + 1; end
 		end
 		t = 0;
@@ -203,6 +205,7 @@ task frame(input [31:0] lba, input integer cut_at, input integer part);
 		end
 		t = 0;
 		while ((ack_a || ack_b || cmp_on) && t < 1000000) begin @(posedge clk_sys); t = t + 1; end
+		check($sformatf("the frame for LBA %0d: lw_sector took every store", lba), u_sec.fdrops, 0);
 		check($sformatf("the frame for LBA %0d: both strobed every strobe", lba), strobes_b - sb0,
 		      (cut_at >= 0 || part >= 0) ? strobes_a - sa0 : FR * per);
 		check($sformatf("the frame for LBA %0d: lw_sector's count", lba), strobes_a - sa0, FR * per);
