@@ -1487,6 +1487,7 @@ task kbm_k1;
 		sys_run = 0; repeat (20) @(negedge clk);
 		np = n_padwe; n0 = n_key;
 		axi_write(pad_addr(8'h02, 8'h00), 32'h00000077, 4'hF);   // the word in flight
+		repeat (40) @(negedge clk);                               // launched before the first trigger store lands
 		for (i = 0; i < 50; i = i + 1) axi_write(pad_addr(8'h46, 8'h02), 32'h00000100 + i, 4'hF);
 		sys_run = 1; repeat (slow(300)) @(negedge clk);
 		check("K1: the trigger pair crossed once, behind the word in flight", n_padwe - np, 2);

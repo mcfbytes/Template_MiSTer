@@ -651,7 +651,9 @@ ok|-|MISTER_DISABLE_SPI_BLK, VDNUM 4: SECTOR slot 1, mount slots 2 and 3, slot 0
 ok|-|the same slots without MISTER_DISABLE_SPI_BLK|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=4
 ok|-|MISTER_DISABLE_SPI_BLK, VDNUM 2: SECTOR slot 1, slot 0 named unused, the mount slots above VDNUM|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=2 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
 EOG
-  # the key tier's guards: MISTER_LW_KBM needs the PAD tier and refuses a PS2DIV core; MISTER_DISABLE_SPI_KBM needs it
+  # the key tier's guards: MISTER_LW_KBM needs the PAD tier and refuses a PS2DIV core; MISTER_DISABLE_SPI_KBM needs it.
+  # No PS2DIV neighbour that compiles: stock hps_io with PS2DIV set does not compile under Icarus, so a PS2DIV case
+  # can only be a refusal.
   cat > "$O/lw_xk_top.sv" <<'EOS'
 module lw_xk_top;
 `ifdef XK_PS2DIV
@@ -669,14 +671,14 @@ EOS
       if [ $r -ne 0 ] && [ "$g" -gt 0 ]; then echo "pass $what: stops, naming $guard" >> "$1"
       else f=$((f + 1)); echo "FAIL $what: status $r, $guard $g times in the errors" >> "$1"; fi
     elif [ $r -eq 0 ]; then echo "pass $what: compiles" >> "$1"
-    else f=$((f + 1)); echo "FAIL $what: does not compile" >> "$1"; head -5 "$O/lw_xk.err" | sed 's/^/   /' >> "$1"; fi
+    else f=$((f + 1)); echo "FAIL $what: does not compile" >> "$1"
+      grep -v ': warning: ' "$O/lw_xk.err" | head -5 | sed 's/^/   /' >> "$1"; fi
   done <<'EOG'
 bad|lw_kbm_needs_MISTER_LW_PAD|MISTER_LW_KBM alone|-DMISTER_LW_KBM
 bad|lw_kbm_needs_MISTER_LW_PAD|MISTER_LW_KBM with MISTER_LW and no MISTER_LW_PAD|-DMISTER_LW -DMISTER_LW_KBM
 bad|lw_tier_needs_MISTER_LW|MISTER_LW_KBM with MISTER_LW_PAD and no MISTER_LW|-DMISTER_LW_PAD -DMISTER_LW_KBM
 ok|-|MISTER_LW_KBM with MISTER_LW_PAD|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM
 bad|lw_kbm_on_a_PS2DIV_core|MISTER_LW_KBM on a core with PS2DIV|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DXK_PS2DIV=2000
-ok|-|a core with PS2DIV and the PAD tier, no MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DXK_PS2DIV=2000
 bad|spi_kbm_off_needs_MISTER_LW_KBM|MISTER_DISABLE_SPI_KBM alone|-DMISTER_DISABLE_SPI_KBM
 bad|spi_kbm_off_needs_MISTER_LW_KBM|MISTER_DISABLE_SPI_KBM with MISTER_LW_PAD, no MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_DISABLE_SPI_KBM
 ok|-|MISTER_DISABLE_SPI_KBM with MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_KBM
