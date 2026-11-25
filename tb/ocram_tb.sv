@@ -3240,11 +3240,11 @@ task tw_status;
 	end
 endtask
 
-task evt_session(input [15:0] nonce, input bind);
+task evt_session(input [15:0] nonce, input do_bind);
 	begin
 		sec_session(nonce, 0);
 		e_drain;
-		if (bind) begin
+		if (do_bind) begin
 			poke(H_BIND, 32'h0000_0100);
 			wait_word(C_BIND, 32'h0000_0101, 2000, ok);
 			check("C_BIND bit 8 is stored once H_BIND bit 8 is read", ok, 1);
