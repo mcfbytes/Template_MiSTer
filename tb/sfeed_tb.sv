@@ -25,6 +25,8 @@
 // GAP 2; this bench shows the feeder's timing, not the mailbox path's (ocram_tb covers the path).
 // The mount slot k = 1 is compared the same way against lw_sector's save slot X0: a read of one block (blk_cnt 0,
 // BLKSZ 2: 128 words, XFRAME0 128) through BEGIN_S[1]; all three acks and both slots' muxes are compared.
+// In the plain runs a gold twin, lw_sector as frozen in tb/golden/, takes lw_sector's inputs, and every output of
+// the two is compared on every edge: the feeders' compare stays against the frozen LW feeder when lw_sector changes.
 // Macros: SFEED_TB_GAP (2), SFEED_TB_WIDE (1), SFEED_TB_FRAME (128), SFEED_TB_SYS_HP_PS (14762: 33.8688 MHz).
 
 `timescale 1ns/1ps
@@ -159,6 +161,44 @@ always @(posedge clk_sys) begin
 	if (wr_b) strobes_b = strobes_b + 1;
 end
 
+`ifndef LW_TB_CDC
+// The gold twin: lw_sector as frozen in tb/golden/gold_lw_sector.sv on the same inputs, every output compared x-aware
+// 100 ps after every edge of clk and clk_sys, so the compare above still holds the mailbox feeder to the frozen LW
+// one when lw_sector itself changes. Plain only: under LW_TB_CDC each crossing cell draws its own delays.
+wire [31:0] g_rdata;
+wire        g_f_open, g_f_owned, g_f_idle, g_doorbell, g_en, g_ack, g_wr;
+wire [15:0] g_dat;
+wire [13:0] g_adr;
+wire  [1:0] g_xen, g_xack;
+gold_lw_sector #(.SLOT(1), .FRAME(FR[12:0]), .BLKSZ(3'd2), .DIAG(0), .GAP(GAP), .XFRAME0(MFR[12:0]),
+                 .XLB0(6'd32)) g_sec
+(
+	.clk(clk), .raddr(15'd0), .rsel(1'b0), .rdata(g_rdata),
+	.waddr(waddr), .wsel(wsel), .write(write), .wdata(wdata), .be(4'hF),
+	.hen(hen), .take(take), .f_open(g_f_open), .f_owned(g_f_owned), .f_idle(g_f_idle), .wired(3'b011),
+	.doorbell(g_doorbell),
+	.clk_sys(clk_sys), .c_reset(c_reset), .c_req(c_req), .c_lba(c_lba), .hps_ack(1'b0), .c_commit(1'b0),
+	.c_wide(WIDE[0]), .en_sys(g_en), .o_ack(g_ack), .o_wr(g_wr), .o_dat(g_dat), .o_adr(g_adr),
+	.x_rd({1'b0, x_rd0}), .x_wr(2'd0), .x_lba({32'd0, x_lba0}), .x_hps_ack(2'd0), .x_en_sys(g_xen), .x_ack(g_xack)
+);
+wire [72:0] tw_live = {rdata, f_open, f_owned, f_idle, doorbell, en_a, ack_a, wr_a, dat_a, adr_a, xen_a, xack_a};
+wire [72:0] tw_gold = {g_rdata, g_f_open, g_f_owned, g_f_idle, g_doorbell, g_en, g_ack, g_wr, g_dat, g_adr, g_xen, g_xack};
+integer tw_edges = 0, tw_bad = 0;
+task tw_cmp;
+	begin
+		tw_edges = tw_edges + 1;
+		if (tw_live !== tw_gold) begin
+			tw_bad = tw_bad + 1;
+			if (tw_bad <= 8)
+				$display("   at %0.3f ns: {rdata, open, owned, idle, bell, en, ack, wr, dat, adr, x_en, x_ack} lw_sector %h, gold %h",
+				         $realtime, tw_live, tw_gold);
+		end
+	end
+endtask
+always @(clk) begin #0.1; tw_cmp; end
+always @(clk_sys) begin #0.1; tw_cmp; end
+`endif
+
 task wstore(input [14:0] a, input [31:0] d);
 	begin
 		@(negedge clk); waddr = a; wdata = d; wsel = 1; write = 1;
@@ -290,6 +330,11 @@ initial begin
 	check("no cycle differs", cmp_bad - c0, 0);
 
 	check("edges compared", cmp_n > 10 * FR, 1);
+`ifndef LW_TB_CDC
+	$display("-- the gold twin: lw_sector against tb/golden/gold_lw_sector.sv, every output on every edge");
+	check("the twin: edges compared", tw_edges > 10 * FR, 1);
+	check("the twin: edges where an output differs", tw_bad, 0);
+`endif
 	if (fails == 0) $display("PASSED: %0d checks, 0 failures", checks);
 	else $display("FAILED: %0d checks, %0d failures", checks, fails);
 	$finish;

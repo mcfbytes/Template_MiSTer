@@ -95,13 +95,16 @@
 #   C  the trace compare (tb/sfeed_tb.sv): lw_sector's primary feeder and the OCRAM SECTOR feeder serve the same
 #      frames, {ack, wr, adr, dat} compared on every clk_sys edge from each ack's rise: GAP 2 and 5, wide and byte
 #      strobes, plus the consumer-reset and session-end fills, at 33.8688 MHz; a 588-word frame and the
-#      Template's 20 MHz at GAP 2 wide; every seed, plain and with the crossing cells' delay models
+#      Template's 20 MHz at GAP 2 wide; every seed, plain and with the crossing cells' delay models. In the plain
+#      runs lw_sector also runs beside its frozen twin (tb/golden/gold_lw_sector.sv), every output equal on every edge
 #   D  the download trace compare (tb/fio_tb.sv): the LW lane's player and the OCRAM download player play the same
 #      windows through lw_link into a real hps_io each, and fio_block's outputs (download, index, wr, addr, dout,
 #      file_ext) with the select and strobe are compared edge for edge, frame by frame: GAP 4 and 7, WIDE 1 and 0,
 #      an odd frame, aux words, waits on every write and on every second write; the wait raised GAP - 3 cycles
 #      after ioctl_wr, held 1 cycle to 10^4, with no word lost or doubled, and one cycle later, the overrun shown;
 #      at 33.8688 MHz, and the Template's 20 MHz at GAP 4 wide; every seed, plain and with the crossing models
+#      In the plain runs lw_lane also runs beside its frozen twin (tb/golden/gold_lw_lane.sv), every output equal
+#      on every edge
 #   Y  the removals MISTER_DISABLE_SPI_OSD and MISTER_DISABLE_SPI_BLK (the lean profile's bench arm R1; arm X has
 #      their guards): lw_tb.sv's short tier run with the LW OSD tier and MISTER_DISABLE_SPI_OSD (OSDBUF K2 bit 0
 #      reads 1, rows over LW land and draw, an SPI row write (0x20, 0x28) changes no byte and no box height, the 0x4x
@@ -145,6 +148,12 @@
 #      torn by a second transfer abandoned and the second published whole; each hello's levels from 0; a REQUEST
 #      owed with a STATUS first; and every SECTOR case of arm O's shape in the same run. Then verilator lints the
 #      master and hps_ocram_evt with the macro, and with MISTER_DISABLE_SPI_EVT
+#   J  the twin (tb/golden/, frozen by tb/golden/freeze.sh from one commit): every tb/ocram_tb.sv shape that arms O,
+#      U, A, I and Y build (diag, osd, sec, fio, mnt at 33.8688 and 20 MHz, uio at both and without HDMI, lane, evt,
+#      and Y's three removal shapes), compiled with OCRAM_TB_TWIN: the gold master, rx (and hps_ocram_evt) on the
+#      live pair's bench inputs, every output of the pair compared x-aware after every edge of clk and clk_sys, the
+#      nets between master and rx not compared; plain only, under every seed. Passes when every run passes and prints
+#      "TWIN: N edges compared, 0 mismatches" with N above 0. The live files are sys/hps_ocram_*.sv and sys/ocram_*.sv
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -152,7 +161,7 @@
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y K U A I}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y K U A I J}
 O=${LW_TB_OUT:-tb/out}
 # the OCRAM master's own layers, beside sys/hps_ocram_master.sv wherever it is built or linted
 OCMF="sys/ocram_axi.sv sys/ocram_arb.sv sys/ocram_evt_wr.sv"
@@ -265,7 +274,7 @@ lint() {
 sfeedc() {
   : > "$1"
   SFD="-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1"
-  SFF="tb/sfeed_tb.sv sys/lw_sector.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv"
+  SFF="tb/sfeed_tb.sv tb/golden/gold_lw_sector.sv sys/lw_sector.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv"
   for sh in "g2w1:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1" "g2w0:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=0" \
             "g5w1:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=1" "g5w0:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=0" \
             "f588:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1 -DSFEED_TB_FRAME=588" \
@@ -295,7 +304,7 @@ sfeedc() {
 fioc() {
   : > "$1"
   FID="-DMISTER_LW -DMISTER_LW_LANE -DMISTER_OCRAM -DMISTER_OCRAM_OSD"
-  FIF="tb/fio_tb.sv sys/lw_lane.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/hps_io.sv"
+  FIF="tb/fio_tb.sv tb/golden/gold_lw_lane.sv sys/lw_lane.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/hps_io.sv"
   for sh in "g4w1:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=1" "g4w0:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=0" \
             "g7w1:-DFIO_TB_GAP=7 -DFIO_TB_WIDE=1" "g7w0:-DFIO_TB_GAP=7 -DFIO_TB_WIDE=0" \
             "tpl:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=1 -DFIO_TB_SYS_HP_PS=25000"; do
@@ -680,6 +689,59 @@ iarm() {
   else
     echo "SKIPPED verilator: not on PATH" >> "$1"
   fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
+}
+
+# twinj LOG: arm J. Each shape compiled once with OCRAM_TB_TWIN, plain, run under every seed; the gold files come
+# first: the live master undefines MISTER_OCRAM_POLL and _MARK at its end, and the gold copies keep them.
+twinj() {
+  : > "$1"; n=0; f=0
+  JG="tb/golden/gold_hps_ocram_master.sv tb/golden/gold_hps_ocram_rx.sv"
+  JL=$(ls sys/hps_ocram_*.sv sys/ocram_*.sv 2>/dev/null | tr '\n' ' ')
+  JE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10"
+  JS="$JE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
+  JM="$JS -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
+  JU="$JE -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO"
+  H33=-DOCRAM_TB_SYS_HP_PS=14762; H20=-DOCRAM_TB_SYS_HP_PS=25000
+  JC="diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20 uio33 uio20 uion33 lane33 lane20 evt33 evt20 yosd ymnt yevt"
+  for c in $JC; do
+    case $c in
+      diag) D="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10";;
+      osd33) D="$JE $H33";; osd20) D="$JE $H20";; sec33) D="$JS $H33";; sec20) D="$JS $H20";;
+      fio33) D="$JE -DMISTER_OCRAM_FIO $H33";; fio20) D="$JE -DMISTER_OCRAM_FIO $H20";;
+      mnt33) D="$JM $H33";; mnt20) D="$JM $H20";;
+      uio33) D="$JU $H33";; uio20) D="$JU $H20";; uion33) D="$JU -DMISTER_DEBUG_NOHDMI $H33";;
+      lane33) D="$AD $H33";; lane20) D="$AD $H20";; evt33) D="$ID $H33";; evt20) D="$ID $H20";;
+      yosd) D="$JE $H33 -DMISTER_DISABLE_SPI_OSD";; ymnt) D="$JM $H33 -DMISTER_DISABLE_SPI_OSD -DMISTER_DISABLE_SPI_BLK";;
+      yevt) D="$ID -DMISTER_DISABLE_SPI_EVT $H33";;
+    esac
+    X=""; case $c in fio*|uio*|lane*) X="sys/lw_lane.sv sys/hps_io.sv";; evt*|yevt) X="sys/hps_io.sv";; esac
+    echo "-- the twin bench compiles ($c)" >> "$1"; rm -f "$O/twinJ_$c.vvp"
+    if iverilog -g2012 $D -DOCRAM_TB_TWIN -I sys -s ocram_tb -o "$O/twinJ_$c.vvp" tb/ocram_tb.sv $JG $JL sys/lw_cdc.sv \
+         sys/osd.v $X > "$O/twinJ_$c.err" 2>&1; then
+      echo "pass bench: compiles ($c)" >> "$1"; n=$((n + 1))
+    else
+      f=$((f + 1)); echo "FAIL bench: does not compile ($c)" >> "$1"; head -20 "$O/twinJ_$c.err" | sed 's/^/   /' >> "$1"
+    fi
+  done
+  for c in $JC; do
+    [ -f "$O/twinJ_$c.vvp" ] || continue
+    for s in ${LW_TB_SEEDS:-1 2 3}; do vvp -n "$O/twinJ_$c.vvp" +lw_seed=$s > "$O/twinJ_$c.$s.log" 2>&1 & done
+    wait
+  done
+  for c in $JC; do
+    [ -f "$O/twinJ_$c.vvp" ] || continue
+    for s in ${LW_TB_SEEDS:-1 2 3}; do
+      echo "== seed $s $c" >> "$1"; cat "$O/twinJ_$c.$s.log" >> "$1"
+      grep -Eq '^(PASSED|FAILED): [0-9]' "$O/twinJ_$c.$s.log" || echo "FAIL bench $s $c: gave no result" >> "$1"
+      echo "-- the twin ($c, seed $s): every output equal on every edge" >> "$1"
+      t=$(sed -n 's/^TWIN: \([0-9]*\) edges compared, \([0-9]*\) mismatches$/\1 \2/p' "$O/twinJ_$c.$s.log")
+      if [ -z "$t" ]; then echo "FAIL twin $s $c: no TWIN line" >> "$1"
+      elif [ "${t#* }" != 0 ] || [ "${t% *}" = 0 ]; then echo "FAIL twin $s $c: ${t% *} edges, ${t#* } mismatches" >> "$1"
+      else echo "pass twin $s $c: ${t% *} edges, 0 mismatches" >> "$1"; fi
+    done
+  done
   if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
   else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
@@ -1198,6 +1260,15 @@ for g in $ARMS; do
     iarm "$O/evtI.log"
     grep -v "^pass " "$O/evtI.log" | grep -v '^== seed'
     V=$(verdict I "$O/evtI.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = J ]; then
+    echo "== arm J: tb/ocram_tb.sv with the gold twin, the live pair against tb/golden/ on every edge"
+    twinj "$O/twinJ.log"
+    grep -v "^pass " "$O/twinJ.log" | grep -v '^== seed'
+    V=$(verdict J "$O/twinJ.log") || rc=1
     R="$R$V
 "
     continue

@@ -52,6 +52,8 @@
 // With MISTER_OCRAM_LANE (arm A, beside the SECTOR, download and UIO tiers) capture LFRAMEs on the UIO select: each
 // REPLY against the twin hps_io's in-band replies to the same words, odd and even frames, the tag echoed; a capture
 // frame held while the EVT ring lacks len + 1 words, the OSD and SECTOR rings served meanwhile.
+// With OCRAM_TB_TWIN (arm J, plain only) the frozen pair of tb/golden/ runs beside the live one on the same bench
+// inputs, and every output of the pair (OCRAM_TB_TWIN_OUTS, near the end) is compared with the gold one on every edge.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -4929,6 +4931,171 @@ initial begin
 	end
 end
 
+`ifdef OCRAM_TB_TWIN
+//////////////////////////////  the gold twin (arm J)  //////////////////////////////
+
+// The frozen pair (tb/golden/, sh tb/golden/freeze.sh) on exactly the live pair's bench inputs: the host model, the
+// GPO and reset, the slave's responses, the core models' requests, the link stack's replies and hps_io's offer all
+// react to the live pair, so the bench's own cases still judge the live pair, and while every output matches the
+// two pairs see the same inputs. The nets between the gold master and the gold rx (and hps_ocram_evt) are the twin's
+// own: the live pair may change its internal ports freely. OCRAM_TB_TWIN_OUTS below is the pair's boundary: every
+// output toward the bench, {live, gold}, compared x-aware 100 ps after every edge of clk and clk_sys. The first
+// TW_MAX mismatches print as FAIL lines; the count prints last, as "TWIN: <edges> edges compared, <n> mismatches".
+// Plain runs only: under LW_TB_CDC each crossing cell draws its own delays, so two pairs cannot agree cycle for cycle.
+wire        tw_present, tw_line, tw_mark;
+wire  [7:0] tw_awid, tw_wid, tw_arid;
+wire [31:0] tw_awaddr, tw_wdata, tw_araddr;
+wire  [3:0] tw_awlen, tw_awcache, tw_wstrb, tw_arlen, tw_arcache;
+wire  [2:0] tw_awsize, tw_awprot, tw_arsize, tw_arprot;
+wire  [1:0] tw_awburst, tw_awlock, tw_arburst, tw_arlock;
+wire  [4:0] tw_awuser, tw_aruser;
+wire        tw_awvalid, tw_wlast, tw_wvalid, tw_bready, tw_arvalid, tw_rready;
+wire        tw_we;
+wire [12:0] tw_addr;
+wire  [7:0] tw_dbyte;
+wire        tw_x_en, tw_x_ack, tw_x_wr;
+wire [15:0] tw_x_dat;
+wire [13:0] tw_x_adr;
+wire  [1:0] tw_xm_en, tw_xm_ack;
+wire        tw_l_own, tw_l_hold, tw_l_strobe;
+wire  [3:0] tw_l_sel;
+wire [15:0] tw_l_din;
+wire        tw_take;
+// the gold side's own master <-> rx (and evt) nets
+wire        tw_c0_req, tw_c0_we, tw_c0_grant, tw_c0_done, tw_c0_ok;
+wire [15:0] tw_c0_off;
+wire [31:0] tw_c0_wdata, tw_c0_rdata;
+wire        tw_s_hello, tw_s_live, tw_s_tick, tw_osd_bind, tw_c0_rest, tw_c0_fault, tw_c0_mid, tw_c0_open;
+wire [15:0] tw_osd_rows, tw_osd_deepest;
+wire  [2:0] tw_sec_ask, tw_c0_sbind;
+wire        tw_evt_stop, tw_c0_sfault, tw_c0_smid, tw_c0_wide, tw_rq_post, tw_rq_start;
+wire [31:0] tw_rq_lba;
+wire        tw_c0_mfault, tw_c0_mmid, tw_m_post, tw_m_write, tw_m_wv, tw_m_start, tw_m_wtake, tw_m_pub;
+wire  [7:0] tw_m_arg;
+wire [10:0] tw_m_n;
+wire [31:0] tw_m_lba, tw_m_wd;
+wire [15:0] tw_f_tail;
+wire        tw_c0_ffault, tw_c0_fmid;
+wire        tw_e_ask, tw_e_v;
+wire [41:0] tw_e_d;
+wire [15:0] tw_e_free;
+wire        tw_p_post, tw_p_wv, tw_p_start, tw_p_wtake;
+wire  [7:0] tw_p_arg;
+wire [10:0] tw_p_n;
+wire [31:0] tw_p_wd;
+
+gold_hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ), .FIO_GAP(FGAP),
+                        .FIO_SELS(FSELS), .MNT0_SLOT(MSLOT0), .MNT1_SLOT(MSLOT1), .MNT_FRAME(MFRAME)) tw_dut
+(
+	.clk(clk), .hps_rst_n(hps_rst_n), .gp_out(gpo), .present(tw_present), .line(tw_line),
+	.c0_req(tw_c0_req), .c0_we(tw_c0_we), .c0_off(tw_c0_off), .c0_wdata(tw_c0_wdata),
+	.c0_grant(tw_c0_grant), .c0_done(tw_c0_done), .c0_ok(tw_c0_ok), .c0_rdata(tw_c0_rdata),
+	.s_hello(tw_s_hello), .s_live(tw_s_live), .s_tick(tw_s_tick), .osd_bind(tw_osd_bind),
+	.c0_rest(tw_c0_rest), .c0_fault(tw_c0_fault), .c0_mid(tw_c0_mid), .c0_open(tw_c0_open),
+	.osd_rows(tw_osd_rows), .osd_deepest(tw_osd_deepest),
+	.sec_ask(tw_sec_ask), .evt_stop(tw_evt_stop), .c0_sfault(tw_c0_sfault), .c0_smid(tw_c0_smid),
+	.c0_sbind(tw_c0_sbind), .c0_wide(tw_c0_wide), .rq_post(tw_rq_post), .rq_lba(tw_rq_lba), .rq_start(tw_rq_start),
+	.f_tail(tw_f_tail), .c0_ffault(tw_c0_ffault), .c0_fmid(tw_c0_fmid), .mark_line(tw_mark),
+	.e_ask(tw_e_ask), .e_v(tw_e_v), .e_d(tw_e_d),
+	.e_free(tw_e_free), .p_post(tw_p_post), .p_arg(tw_p_arg), .p_n(tw_p_n), .p_wv(tw_p_wv), .p_wd(tw_p_wd),
+	.p_start(tw_p_start), .p_wtake(tw_p_wtake),
+	.c0_mfault(tw_c0_mfault), .c0_mmid(tw_c0_mmid), .m_post(tw_m_post), .m_write(tw_m_write), .m_arg(tw_m_arg),
+	.m_n(tw_m_n), .m_lba(tw_m_lba), .m_wv(tw_m_wv), .m_wd(tw_m_wd), .m_start(tw_m_start), .m_wtake(tw_m_wtake),
+	.m_pub(tw_m_pub),
+	.awid(tw_awid), .awaddr(tw_awaddr), .awlen(tw_awlen), .awsize(tw_awsize), .awburst(tw_awburst),
+	.awlock(tw_awlock), .awcache(tw_awcache), .awprot(tw_awprot), .awuser(tw_awuser), .awvalid(tw_awvalid),
+	.awready(awready),
+	.wid(tw_wid), .wdata(tw_wdata), .wstrb(tw_wstrb), .wlast(tw_wlast), .wvalid(tw_wvalid), .wready(wready),
+	.bid(bid), .bresp(bresp), .bvalid(bvalid), .bready(tw_bready),
+	.arid(tw_arid), .araddr(tw_araddr), .arlen(tw_arlen), .arsize(tw_arsize), .arburst(tw_arburst),
+	.arlock(tw_arlock), .arcache(tw_arcache), .arprot(tw_arprot), .aruser(tw_aruser), .arvalid(tw_arvalid),
+	.arready(arready),
+	.rid(rid), .rdata(rdata), .rresp(rresp), .rlast(rlast), .rvalid(rvalid), .rready(tw_rready)
+);
+
+gold_hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP(SGAP), .FIO_EN(FIO_B),
+                    .FIO_GAP(FGAP), .MNT_EN(MNT_MASK), .MFRAME(MFRAME), .BLKSZ(MBLKSZ), .FIO_SELS(FSELS)) tw_osd
+(
+	.clk(clk), .clk_sys(clk_sys), .gp_out25(gpo[25]),
+	.s_hello(tw_s_hello), .s_live(tw_s_live), .s_tick(tw_s_tick), .bind_en(tw_osd_bind),
+	.sec_ask(tw_sec_ask), .evt_stop(tw_evt_stop), .c_sfault(tw_c0_sfault), .c_smid(tw_c0_smid),
+	.c_sbind(tw_c0_sbind), .c_wide(tw_c0_wide), .rq_post(tw_rq_post), .rq_lba(tw_rq_lba), .rq_start(tw_rq_start),
+	.c_rest(tw_c0_rest), .c_fault(tw_c0_fault), .c_mid(tw_c0_mid), .c_open(tw_c0_open),
+	.osd_rows(tw_osd_rows), .osd_deepest(tw_osd_deepest),
+	.c_req(tw_c0_req), .c_we(tw_c0_we), .c_off(tw_c0_off), .c_wdata(tw_c0_wdata),
+	.c_grant(tw_c0_grant), .c_done(tw_c0_done), .c_ok(tw_c0_ok), .c_rdata(tw_c0_rdata),
+	.sel(sel_m), .view(view_m), .we(tw_we), .addr(tw_addr), .dbyte(tw_dbyte),
+	.x_reset(x_reset), .x_hps_ack(x_hps_ack), .x_req(x_req), .x_lba(x_lba), .x_commit(x_commit), .x_wide(x_wide),
+	.x_en(tw_x_en), .x_ack(tw_x_ack), .x_wr(tw_x_wr), .x_dat(tw_x_dat), .x_adr(tw_x_adr),
+	.f_tail(tw_f_tail), .c_ffault(tw_c0_ffault), .c_fmid(tw_c0_fmid),
+	.c_mfault(tw_c0_mfault), .c_mmid(tw_c0_mmid), .m_post(tw_m_post), .m_write(tw_m_write), .m_arg(tw_m_arg),
+	.m_n(tw_m_n), .m_lba(tw_m_lba), .m_wv(tw_m_wv), .m_wd(tw_m_wd), .m_start(tw_m_start), .m_wtake(tw_m_wtake),
+	.m_pub(tw_m_pub),
+	.p_post(tw_p_post), .p_arg(tw_p_arg), .p_n(tw_p_n), .p_wv(tw_p_wv), .p_wd(tw_p_wd), .e_free(tw_e_free),
+	.p_start(tw_p_start), .p_wtake(tw_p_wtake), .l_dout(l_dout_m),
+	.xm_hps_ack(2'd0), .xm_rd(mc_rd), .xm_wr(mc_wr), .xm_lba(xm_lba), .xm_cnt({mc_cnt2, mc_cnt1}),
+	.xm_en(tw_xm_en), .xm_ack(tw_xm_ack),
+	.l_busy(l_busy_m), .l_wait(l_wait_m),
+	.l_own(tw_l_own), .l_hold(tw_l_hold), .l_sel(tw_l_sel), .l_strobe(tw_l_strobe), .l_din(tw_l_din)
+);
+
+`ifdef MISTER_OCRAM_EVT
+gold_hps_ocram_evt tw_evt
+(
+	.clk(clk), .ask(tw_e_ask), .e_v(tw_e_v), .e_d(tw_e_d), .clk_sys(clk_sys), .o_d(ebus[374:333]), .take(tw_take)
+);
+`define OCRAM_TB_TW_EVT `OCRAM_TB_TW("the events port's take", e_take, tw_take)
+`else
+assign tw_e_v = 1'b0;
+assign tw_e_d = 42'd0;
+assign tw_take = 1'b0;
+`define OCRAM_TB_TW_EVT
+`endif
+
+localparam integer TW_MAX = 10;
+integer tw_edges = 0, tw_bad = 0;
+task tw_report(input string n, input [63:0] l, input [63:0] g);
+	begin
+		tw_bad = tw_bad + 1;
+		if (tw_bad <= TW_MAX) $display("FAIL twin: at %0.3f ns, %s: live %h, gold %h", $realtime, n, l, g);
+		if (tw_bad == TW_MAX) $display("   twin: further mismatches are counted, not printed");
+	end
+endtask
+`define OCRAM_TB_TW(N, L, G) if ((L) !== (G)) tw_report(N, L, G);
+// The pair's boundary, {name, live, gold}: the AXI master's outputs, present, the EVT line and the mark line; the OSD
+// writer; the SECTOR feeder's and the mount slots' nets; the download player's link nets; the events port's take.
+`define OCRAM_TB_TWIN_OUTS \
+	`OCRAM_TB_TW("present", present_wire, tw_present) `OCRAM_TB_TW("line", line_out, tw_line) \
+	`OCRAM_TB_TW("mark_line", mark_out, tw_mark) \
+	`OCRAM_TB_TW("awid", awid, tw_awid) `OCRAM_TB_TW("awaddr", awaddr, tw_awaddr) \
+	`OCRAM_TB_TW("awlen", awlen, tw_awlen) `OCRAM_TB_TW("awsize", awsize, tw_awsize) \
+	`OCRAM_TB_TW("awburst", awburst, tw_awburst) `OCRAM_TB_TW("awlock", awlock, tw_awlock) \
+	`OCRAM_TB_TW("awcache", awcache, tw_awcache) `OCRAM_TB_TW("awprot", awprot, tw_awprot) \
+	`OCRAM_TB_TW("awuser", awuser, tw_awuser) `OCRAM_TB_TW("awvalid", awvalid, tw_awvalid) \
+	`OCRAM_TB_TW("wid", wid, tw_wid) `OCRAM_TB_TW("wdata", wdata, tw_wdata) `OCRAM_TB_TW("wstrb", wstrb, tw_wstrb) \
+	`OCRAM_TB_TW("wlast", wlast, tw_wlast) `OCRAM_TB_TW("wvalid", wvalid, tw_wvalid) \
+	`OCRAM_TB_TW("bready", bready, tw_bready) \
+	`OCRAM_TB_TW("arid", arid, tw_arid) `OCRAM_TB_TW("araddr", araddr, tw_araddr) \
+	`OCRAM_TB_TW("arlen", arlen, tw_arlen) `OCRAM_TB_TW("arsize", arsize, tw_arsize) \
+	`OCRAM_TB_TW("arburst", arburst, tw_arburst) `OCRAM_TB_TW("arlock", arlock, tw_arlock) \
+	`OCRAM_TB_TW("arcache", arcache, tw_arcache) `OCRAM_TB_TW("arprot", arprot, tw_arprot) \
+	`OCRAM_TB_TW("aruser", aruser, tw_aruser) `OCRAM_TB_TW("arvalid", arvalid, tw_arvalid) \
+	`OCRAM_TB_TW("rready", rready, tw_rready) \
+	`OCRAM_TB_TW("the OSD writer's we", ocram_we, tw_we) `OCRAM_TB_TW("the OSD writer's addr", ocram_addr, tw_addr) \
+	`OCRAM_TB_TW("the OSD writer's dbyte", ocram_byte, tw_dbyte) \
+	`OCRAM_TB_TW("x_en", x_en, tw_x_en) `OCRAM_TB_TW("x_ack", x_ack, tw_x_ack) `OCRAM_TB_TW("x_wr", x_wr, tw_x_wr) \
+	`OCRAM_TB_TW("x_dat", x_dat, tw_x_dat) `OCRAM_TB_TW("x_adr", x_adr, tw_x_adr) \
+	`OCRAM_TB_TW("xm_en", xm_en, tw_xm_en) `OCRAM_TB_TW("xm_ack", xm_ack, tw_xm_ack) \
+	`OCRAM_TB_TW("l_own", p_own, tw_l_own) `OCRAM_TB_TW("l_hold", p_hold, tw_l_hold) \
+	`OCRAM_TB_TW("l_sel", p_sel, tw_l_sel) `OCRAM_TB_TW("l_strobe", p_strobe, tw_l_strobe) \
+	`OCRAM_TB_TW("l_din", p_din, tw_l_din) \
+	`OCRAM_TB_TW_EVT
+
+always @(clk) begin #0.1; tw_edges = tw_edges + 1; `OCRAM_TB_TWIN_OUTS end
+always @(clk_sys) begin #0.1; tw_edges = tw_edges + 1; `OCRAM_TB_TWIN_OUTS end
+final $display("TWIN: %0d edges compared, %0d mismatches", tw_edges, tw_bad);
+`endif
+
 `ifdef OCRAM_TB_MNT
 initial begin #250000000 $display("FAILED: timeout"); $finish; end
 `elsif MISTER_OCRAM_LANE
@@ -4942,4 +5109,9 @@ endmodule
 `default_nettype wire
 `ifdef OCRAM_TB_MNT
 `undef OCRAM_TB_MNT
+`endif
+`ifdef OCRAM_TB_TWIN
+`undef OCRAM_TB_TW
+`undef OCRAM_TB_TW_EVT
+`undef OCRAM_TB_TWIN_OUTS
 `endif
