@@ -76,6 +76,7 @@ preprocesses to nothing and leaves no macro defined.
 | `MISTER_LW` | off | the floor: the bridge, the window, its directory, the host enable and GPI bits 25, 24 and 22 |
 | `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
 | `MISTER_LW_KBM` | absent | PROVISIONAL. With `MISTER_LW_PAD`: keys, mouse and analog triggers as PAD stores (`0x05`, `0x04`, `0x46`), the FIFO's level in STAT. Refused on a core with `PS2DIV` |
+| `MISTER_DISABLE_SPI_KBM` | absent | PROVISIONAL; area-critical and test-only, never a default. With `MISTER_LW_KBM`: `hps_io` builds no link arm for `0x04`, `0x05` or `0x46`, and no `ps2_key_raw` |
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the EVT block (`lw_evt.sv`): `hps_io`'s status, block-request, info and upload flags as causes, `hps_io`'s exports and its line |
 | `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
 | `LW_DIAG` | 0 | 1 = debug build: SCRATCH and the SECTOR counters/timestamps read back |
@@ -311,7 +312,7 @@ bitstream builds, so an entry's index (and its PENDING, OWNED and OPEN bits) dep
 
 | kind | block | version | offset / size | CAUSE | LINE | CAUSE_BITS | kind words |
 |---|---|---|---|---|---|---|---|
-| 1 | PAD | `0x00010001` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap (K0 `0x040F000C`, K1 `0x20000000`; with `MISTER_LW_KBM`, PROVISIONAL, K0 `0x040F003C` and K2 `0x00000040`); K8 `{event FIFO, keyed slots}` = `0x00100018` in every build; K9 bit 0: the link's pad arms are not built (`MISTER_DISABLE_SPI_PAD`) |
+| 1 | PAD | `0x00010001` | `0x40000` / `0x40000` | 0 | 0 | 0 | K0-K7: the honoured-opcode bitmap (K0 `0x040F000C`, K1 `0x20000000`; with `MISTER_LW_KBM`, PROVISIONAL, K0 `0x040F003C` and K2 `0x00000040`); K8 `{event FIFO, keyed slots}` = `0x00100018` in every build; K9 bit 0: the link's pad arms are not built (`MISTER_DISABLE_SPI_PAD`), bit 1: its key, mouse and trigger arms are not built (`MISTER_DISABLE_SPI_KBM`, PROVISIONAL) |
 | 2 | SECTOR | `0x00020000` | `0x08000` / `0x08000` | `0x08000` | 1 | bit *k* per wired slot (`0x1`-`0x7`) | see SECTOR |
 | 3 | OSDBUF | `0x00020000` | `0x04000` / `0x02000` | 0 | 0 | 0 | K0 `{rows, row bytes}` = `0x00100100` (`0x00140100` with `MENU_CORE`); K1 `{FIFO entries, 0}` = `0x01000000`; K2 bit 0: the link's row writes are not built (`MISTER_DISABLE_SPI_OSD`, PROVISIONAL), else 0 |
 | 4 | EVT | `0x00020000` | `0x03000` / `0x01000` | `0x03000` | 2 | `0xF` | K0 = 4: the status words |
@@ -518,7 +519,8 @@ One store **is** one SPI set-command: a full 32-bit word (all four byte enables)
   `hps_io` then writes the same registers its SPI arms write. Without `MISTER_LW_KBM`, keys, mouse and analog
   triggers (`0x04`, `0x05`, `0x46`) stay on SPI; every other opcode does in every build.
 - **Guards:** `MISTER_LW_KBM` without `MISTER_LW_PAD` stops the build at `lw_kbm_needs_MISTER_LW_PAD`, and on a core
-  whose `hps_io` has `PS2DIV` set at `lw_kbm_on_a_PS2DIV_core` (its keys are byte streams into its PS/2 devices).
+  whose `hps_io` has `PS2DIV` set at `lw_kbm_on_a_PS2DIV_core` (its keys are byte streams into its PS/2 devices);
+  `MISTER_DISABLE_SPI_KBM` without `MISTER_LW_KBM` at `spi_kbm_off_needs_MISTER_LW_KBM`.
 - **No enable link:** everything PAD holds is bridge-clock state, so a store taken under the enable is delivered
   whenever `clk_sys` runs, and the levels stay as stored when the enable falls.
 

@@ -1319,7 +1319,7 @@ task pad_hold_cases;
 endtask
 
 `ifdef MISTER_LW_KBM
-// MISTER_LW_KBM (arm K): hps_io's key, mouse and trigger outputs, read through
+// MISTER_LW_KBM (arm K, and arm Y with MISTER_DISABLE_SPI_KBM): hps_io's key, mouse and trigger outputs, read through
 // the hierarchy; each toggle of ps2_key[10] and ps2_mouse[24] logged on clk_sys, with the value it came with.
 wire [10:0] tb_key  = hps_io.ps2_key;
 wire [24:0] tb_mse  = hps_io.ps2_mouse;
@@ -1385,10 +1385,14 @@ task spi_mouse(input [15:0] w1, input [15:0] w2, input [15:0] w3);
 	end
 endtask
 
-localparam TB_SPIKBM = 1;               // the link's 0x04, 0x05 and 0x46 arms are built
+`ifdef MISTER_DISABLE_SPI_KBM
+localparam TB_SPIKBM = 0;              // the link's 0x04, 0x05 and 0x46 arms are not built
+`else
+localparam TB_SPIKBM = 1;
+`endif
 
 // K1: every key frame on the link and as a store, ps2_key identical; two mouse packets with their extension; the six
-// trigger pairs.
+// trigger pairs. With MISTER_DISABLE_SPI_KBM the link's frames change nothing and the stores land as the link's would.
 task kbm_k1;
 	reg  [9:0] kl;
 	reg [39:0] ml;
@@ -3221,6 +3225,9 @@ task dm_build;
 			dm[16 + 32 * e + 16] = 32'h00100018;                                       // K8 {spinner FIFO, slots}
 `ifdef MISTER_DISABLE_SPI_PAD
 			dm[16 + 32 * e + 17] = 32'd1;                                              // K9: no link pad arm
+`endif
+`ifdef MISTER_DISABLE_SPI_KBM
+			dm[16 + 32 * e + 17] = dm[16 + 32 * e + 17] | 32'd2;                      // K9: no link key arms
 `endif
 			e = e + 1;
 		end
@@ -6215,6 +6222,21 @@ task rm_osd_case;
 endtask
 
 `endif
+`ifdef MISTER_DISABLE_SPI_KBM
+// Arm Y: with MISTER_DISABLE_SPI_KBM, PAD K9 bit 1 reads 1; the link's 0x04, 0x05 and 0x46 change nothing, and the
+// stores land as the link's frames would (K1); the FIFO behaves as in arm K (K2).
+task rm_kbm_case;
+	begin
+		$display("-- MISTER_DISABLE_SPI_KBM: PAD K9 bit 1 reads 1");
+		rd("PAD K9: the link's key, mouse and trigger arms are not built", 21'h40084, 32'd2);
+		ena_up;
+		kbm_k1;
+		kbm_k2;
+		host_end;
+	end
+endtask
+
+`endif
 initial begin
 	repeat (4) @(negedge clk);
 	dir_cases;
@@ -6224,6 +6246,9 @@ initial begin
 	tier_cases;
 `ifdef MISTER_DISABLE_SPI_OSD
 	rm_osd_case;
+`endif
+`ifdef MISTER_DISABLE_SPI_KBM
+	rm_kbm_case;
 `endif
 	ena_summary(0);
 	$display("%s: %0d checks (%0d functional + %0d fixed-latency, one per transaction), %0d failures",

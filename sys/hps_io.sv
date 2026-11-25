@@ -320,6 +320,13 @@ generate
 	end
 endgenerate
 `endif
+// MISTER_DISABLE_SPI_KBM (PROVISIONAL) compiles out the link's 0x04, 0x05 and 0x46 arms and ps2_key_raw; without the
+// LW key tier a core would have no key, mouse or trigger path.
+`ifdef MISTER_DISABLE_SPI_KBM
+`ifndef MISTER_LW_KBM
+spi_kbm_off_needs_MISTER_LW_KBM spi_kbm_guard();
+`endif
+`endif
 // MISTER_DISABLE_SPI_BLK compiles out the link's block arms (0x16-0x18). Every slot below VDNUM is on a mailbox block
 // tier (BLK_TIER: the OCRAM SECTOR and mount slots; the LW SECTOR family is not counted) or named in
 // MISTER_DISABLE_SPI_BLK_UNUSED (a slot mask, default 0), and no slot is both, or the build stops naming its guard.
@@ -431,9 +438,11 @@ reg        gamma_wr;
 reg  [9:0] gamma_wr_addr;
 reg  [7:0] gamma_value;
 
+`ifndef MISTER_DISABLE_SPI_KBM
 reg [31:0] ps2_key_raw = 0;
 wire       pressed  = (ps2_key_raw[15:8] != 8'hf0);
 wire       extended = (~pressed ? (ps2_key_raw[23:16] == 8'he0) : (ps2_key_raw[15:8] == 8'he0));
+`endif
 
 reg [MAX_W:0] byte_cnt;
 reg   [3:0] sdn_ack;
@@ -533,9 +542,13 @@ always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;
 	reg  [2:0] b_wr;
 	reg  [3:0] stick_idx;
+`ifndef MISTER_DISABLE_SPI_KBM
 	reg  [7:0] atrig_idx;
+`endif
 	reg  [3:0] pdsp_idx;
+`ifndef MISTER_DISABLE_SPI_KBM
 	reg        ps2skip = 0;
+`endif
 `ifndef LW_EVT_X
 	reg  [3:0] stflg = 0;
 	reg[127:0] status_req;
@@ -575,6 +588,7 @@ always@(posedge clk_sys) begin : uio_block
 	gamma_wr <= 0;
 
 	if(~io_enable) begin
+`ifndef MISTER_DISABLE_SPI_KBM
 		if(cmd == 4 && !ps2skip) ps2_mouse[24] <= ~ps2_mouse[24];
 		if(cmd == 5 && !ps2skip) begin
 			ps2_key <= {~ps2_key[10], pressed, extended, ps2_key_raw[7:0]};
@@ -582,13 +596,16 @@ always@(posedge clk_sys) begin : uio_block
 			if(ps2_key_raw == 'h7CE0F012) ps2_key[9:0] <= 'h17C; // prnscr released
 			if(ps2_key_raw == 'hF014F077) ps2_key[9:0] <= 'h377; // pause  pressed
 		end
+`endif
 		if(cmd == 'h22) RTC[64] <= ~RTC[64];
 		if(cmd == 'h24) TIMESTAMP[32] <= ~TIMESTAMP[32];
 		cmd <= 0;
 		byte_cnt <= 0;
 		sd_ack <= 0;
 		io_dout <= 0;
+`ifndef MISTER_DISABLE_SPI_KBM
 		ps2skip <= 0;
+`endif
 		img_mounted <= 0;
 	end
 	else if(io_strobe) begin
@@ -625,7 +642,9 @@ always@(posedge clk_sys) begin : uio_block
 			endcase
 
 			sd_buff_addr <= 0;
+`ifndef MISTER_DISABLE_SPI_KBM
 			if(io_din == 5) ps2_key_raw <= 0;
+`endif
 		end else begin
 
 			casex(cmd)
@@ -647,6 +666,7 @@ always@(posedge clk_sys) begin : uio_block
 							3: io_dout <= ffb_data[15:0];
 						endcase
 
+`ifndef MISTER_DISABLE_SPI_KBM
 				// store incoming ps2 mouse bytes
 				'h04: begin
 							if(PS2DIV) begin
@@ -677,6 +697,7 @@ always@(posedge clk_sys) begin : uio_block
 								kbd_we <= 1;
 							end
 						end
+`endif
 
 				// reading config string, returning a byte from string
 				'h14: if(byte_cnt <= STRLEN) io_dout[7:0] <= conf_byte;
@@ -751,6 +772,7 @@ always@(posedge clk_sys) begin : uio_block
 						end
 `endif
 
+`ifndef MISTER_DISABLE_SPI_KBM
 				// 0x46: player, {RT, LT}
 				'h46: case(byte_cnt)
 							1: atrig_idx <= io_din[7:0];
@@ -763,6 +785,7 @@ always@(posedge clk_sys) begin : uio_block
 									5: {joystick_rt_analog_5, joystick_lt_analog_5} <= io_din;
 								endcase
 						endcase
+`endif
 
 				// notify image selection
 				'h1c: begin

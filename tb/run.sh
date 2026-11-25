@@ -50,7 +50,7 @@
 #      MISTER_DISABLE_SPI_BLK_UNUSED, or with a tier slot named in it (spi_blk_off_needs_a_block_tier,
 #      spi_blk_off_slot_without_a_tier, spi_blk_off_unused_slot_on_a_tier), each with its legal neighbours; and the
 #      key tier's: MISTER_LW_KBM without MISTER_LW_PAD (lw_kbm_needs_MISTER_LW_PAD) or on a core with PS2DIV
-#      (lw_kbm_on_a_PS2DIV_core)
+#      (lw_kbm_on_a_PS2DIV_core), MISTER_DISABLE_SPI_KBM without MISTER_LW_KBM (spi_kbm_off_needs_MISTER_LW_KBM)
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -105,7 +105,9 @@
 #      OSD rows from the mailbox and the blocks from rings 0 and 4 pass as in arm O); tb/blkoff_tb.sv with
 #      MISTER_DISABLE_SPI_BLK (0x16 reads 0 with requests raised, 0x17 and 0x18 raise no ack and no strobe, the
 #      commit mark reads 0 on every cycle, present) and without it (the same words show the arms alive); and four
-#      runs that each break one of the core's obligations, each named by hps_io's simulation check
+#      runs that each break one of the core's obligations, each named by hps_io's simulation check. And the removal
+#      MISTER_DISABLE_SPI_KBM: lw_tb.sv's short tier run with MISTER_LW_KBM and it, PAD K9 bit 1 reads 1, arm K's K1
+#      with the link's 0x04, 0x05 and 0x46 changing nothing and the stores landing as the link's frames would, and K2
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -401,6 +403,18 @@ rmy() {
   else
     f=$((f + 1)); echo "FAIL lw_tb: does not compile" >> "$1"; head -20 "$O/rmY_lw.err" | sed 's/^/   /' >> "$1"
   fi
+  # lw_tb.sv's short tier run, the key tier with MISTER_DISABLE_SPI_KBM
+  YK="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_KBM"
+  YK="$YK -DMISTER_DISABLE_SPI_KBM"
+  echo "-- lw_tb compiles (the tier run with MISTER_DISABLE_SPI_KBM)" >> "$1"
+  if iverilog -g2012 $YK -I sys -o "$O/rmY_kbm.vvp" $TBF > "$O/rmY_kbm.err" 2>&1; then
+    echo "pass lw_tb: compiles (kbm)" >> "$1"; n=$((n + 1))
+    vvp -n "$O/rmY_kbm.vvp" > "$O/rmY_kbm.log" 2>&1
+    echo "== seed 1 kbm" >> "$1"; cat "$O/rmY_kbm.log" >> "$1"
+    grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_kbm.log" || echo "FAIL lw_tb kbm: gave no result" >> "$1"
+  else
+    f=$((f + 1)); echo "FAIL lw_tb: does not compile (kbm)" >> "$1"; head -20 "$O/rmY_kbm.err" | sed 's/^/   /' >> "$1"
+  fi
   # ocram_tb.sv: the OSD shape with MISTER_DISABLE_SPI_OSD, the mount shape with both removals
   OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DOCRAM_TB_SYS_HP_PS=14762"
@@ -637,7 +651,7 @@ ok|-|MISTER_DISABLE_SPI_BLK, VDNUM 4: SECTOR slot 1, mount slots 2 and 3, slot 0
 ok|-|the same slots without MISTER_DISABLE_SPI_BLK|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=4
 ok|-|MISTER_DISABLE_SPI_BLK, VDNUM 2: SECTOR slot 1, slot 0 named unused, the mount slots above VDNUM|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=2 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
 EOG
-  # the key tier's guards: MISTER_LW_KBM needs the PAD tier and refuses a PS2DIV core
+  # the key tier's guards: MISTER_LW_KBM needs the PAD tier and refuses a PS2DIV core; MISTER_DISABLE_SPI_KBM needs it
   cat > "$O/lw_xk_top.sv" <<'EOS'
 module lw_xk_top;
 `ifdef XK_PS2DIV
@@ -663,6 +677,11 @@ bad|lw_tier_needs_MISTER_LW|MISTER_LW_KBM with MISTER_LW_PAD and no MISTER_LW|-D
 ok|-|MISTER_LW_KBM with MISTER_LW_PAD|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM
 bad|lw_kbm_on_a_PS2DIV_core|MISTER_LW_KBM on a core with PS2DIV|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DXK_PS2DIV=2000
 ok|-|a core with PS2DIV and the PAD tier, no MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DXK_PS2DIV=2000
+bad|spi_kbm_off_needs_MISTER_LW_KBM|MISTER_DISABLE_SPI_KBM alone|-DMISTER_DISABLE_SPI_KBM
+bad|spi_kbm_off_needs_MISTER_LW_KBM|MISTER_DISABLE_SPI_KBM with MISTER_LW_PAD, no MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_DISABLE_SPI_KBM
+ok|-|MISTER_DISABLE_SPI_KBM with MISTER_LW_KBM|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_KBM
+ok|-|both pad removals with both pad tiers|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_PAD -DMISTER_DISABLE_SPI_KBM
+bad|lw_kbm_on_a_PS2DIV_core|MISTER_DISABLE_SPI_KBM on a core with PS2DIV|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_KBM -DMISTER_DISABLE_SPI_KBM -DXK_PS2DIV=2000
 EOG
   echo "-- no tier macro" >> "$1"
   iverilog -g2012 -I sys -s lw_x_top -o "$O/lw_x.vvp" "$O/lw_x_top.sv" sys/hps_io.sv > "$O/lw_x.err" 2>&1
