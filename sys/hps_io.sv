@@ -286,6 +286,17 @@ lw_tier_needs_MISTER_LW osd_guard();
 ocram_sector_needs_MISTER_LW ocram_sector_guard();
 `endif
 `endif
+// The OCRAM mount slots share the SECTOR tier's feeder and EVT writer, and take the LW save-slot bits.
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount0_guard();
+`endif
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
+`endif
+`endif
 // MISTER_DISABLE_SPI_PAD compiles out the link's pad arms; without the LW pad tier a core would have no pad path.
 `ifdef MISTER_DISABLE_SPI_PAD
 `ifndef MISTER_LW_PAD

@@ -33,10 +33,12 @@
 // (r = 2, base 0x2000, 2,048 words) into every osd's osd_buffer through the LW OSDBUF writer's port; SEC_EN
 // (MISTER_OCRAM_SECTOR_SLOT, which needs MISTER_LW) serves the SECTOR ring (r = 4, base 0x7000, 8,192 words) into
 // one hps_io slot through the window's xsec feeder nets and lw_blk_mux; FIO_EN (MISTER_OCRAM_FIO) serves the
-// download ring (r = 1, base 0x1000, 2^FIO_RING words; 8,192 at 0x7000) onto the link nets through lw_link.
+// download ring (r = 1, base 0x1000, 2^FIO_RING words; 8,192 at 0x7000) onto the link nets through lw_link; MNT_EN
+// (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT, beside SEC_EN) serves the mount ring (r = 0, base 0x6000, 1,024 words)
+// into the mount slots k = 1, 2 through the window's save-slot nets and lw_save_mux, and takes their writes.
 //
 //  * clk_100m: the walker. It takes the master's consumer port 0, one transaction at a time, and serves the rings at
-//    record granularity, round robin over those with work (ring ids 0 OSD, 1 SECTOR, 2 download; id 3 is free).
+//    record granularity, round robin over those with work (ring ids 0 OSD, 1 SECTOR, 2 download, 3 mount).
 //    Per ring it keeps its tail and avail = head - tail, read
 //    at a head read; a head more than the ring's size ahead, or a length past avail, stops that ring for the session
 //    with a one-cycle fault. One adder addresses every ring word: tail + k (the header is k = 0, the tail store is
@@ -46,7 +48,9 @@
 //    up and a poll tick, a finished record or (SECTOR) a new request asks for it.
 //  * The forward lw_xfer carries {tag, d}: 0 OSD_HEAD (the ROW header, row in d[20:16]), 1 SEC_HEAD (the LBA), 2
 //    DATA (of the last head's ring), 3 FIO_HEAD (the LFRAME header as read). The done lw_xfer answers each: 0 took,
-//    1 accept, 2 mismatch, 3 no request. One word is outstanding at a time.
+//    1 accept, 2 mismatch, 3 no request. One word is outstanding at a time. With MNT_EN the forward word is
+//    {tag, wr, k, d} (a SEC_HEAD names its slot and, for a WRITE, its direction) and the answer {d, code} (a WRITE
+//    word's answer carries the word).
 //  * OSD: a ROW record crosses as its header and 64 DATA words. The writer on clk_sys writes each word's four bytes
 //    from the capture register, little-endian, one a cycle, under the OSDBUF guard (both osd selects low and the
 //    I/O view, in that cycle and the two before), and answers after the fourth; a word met with the enable low is
@@ -78,6 +82,17 @@
 //    is awaited, zero-fills from the next word; words arriving then are answered unplayed. The request record
 //    {offered, lba} crosses whole at every change of offered (the slot's mux here, the core's request raised, the
 //    ack low and two cycles past its fall).
+//  * Mounts (MNT_EN): slot k = 1, 2's request crosses as its own record {k, wr, blk_cnt, offered, lba}, one slot's
+//    at a time (the other waits until the record in hand reads not offered), offered only for a block of at most
+//    MFRAME words, and never launched while a mount slot's ack is up. A read is posted at once: m_post asks the
+//    master for REQUEST {0x21, {blk_cnt, k}, 1} once C_BIND bit k is stored 1. Ring 0 carries FRAME {0x10,
+//    {blk_cnt, k}, 1 + n}: one that answers the request in hand (k, blk_cnt and len) crosses its LBA as SEC_HEAD
+//    {k}; accept streams its words, and mismatch, no request and any other record are skipped by length. A WRITE
+//    crosses SEC_HEAD {wr, k, lba}; on accept the feeder raises the ack, m_post asks for WRITE {0x26, {blk_cnt, k},
+//    1 + n}, and each of the n words is fetched from the feeder by one DATA token, held in m_wd until the master
+//    takes it; after the head store (m_pub) an end token (d[0] = 1) drops the ack. A fault of ring 3 sends the end
+//    token at the next word. The binds (H_SECTOR bits 1, 2; C_BIND bits 1, 2) follow the disc slot's rules with
+//    no flush: no frame waits in ring 0.
 //  * The enable link (lw_fence) carries the session: hen = s_live, take while idle, drain while no word waits for
 //    its done, fin = 1. c_open (C_BIND bit 11) is the link's open and the OSD bind; c_rest is its idle, so the
 //    hello waits for the clk_sys half to rest. A record the session's end cuts is abandoned; c_mid / c_smid are
@@ -85,14 +100,15 @@
 //  * MISTER_OCRAM_DIAG (OSD only): GPO 25 is the freeze knob through lw_sync (no byte, no done, no rest while 1),
 //    and the rows finished and the deepest OSD fill for the VERDICT record.
 //
-// Address bound: H_IDX[1], H_IDX[2], H_IDX[4], C_IDX[1], C_IDX[2], C_IDX[4], or a ring word
+// Address bound: H_IDX[0], H_IDX[1], H_IDX[2], H_IDX[4], C_IDX[0], C_IDX[1], C_IDX[2], C_IDX[4], or a ring word
 // BASE + ((index & (WORDS - 1)) << 2). The controls are below 0x100 and every span ends below 0xF000; generate-time
 // guards stop elaboration otherwise.
 // tb/static.sh holds it.
 
 module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_EN = 0,
                       parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2,
-                      parameter FIO_EN = 0, parameter [31:0] FIO_RING = 32'd10, parameter [31:0] FIO_GAP = 32'd4)
+                      parameter FIO_EN = 0, parameter [31:0] FIO_RING = 32'd10, parameter [31:0] FIO_GAP = 32'd4,
+                      parameter [1:0] MNT_EN = 2'd0, parameter [31:0] MFRAME = 32'd128, parameter [2:0] BLKSZ = 3'd2)
 (
 	input  wire        clk,          // clk_100m: the walker
 	input  wire        clk_sys,      // the core clock: the sinks
@@ -106,7 +122,7 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	input  wire        s_live,       // P_SESSION
 	input  wire        s_tick,       // the poll period's pulse
 	input  wire        bind_en,      // the OSD bind (H_BIND bit 11 read)
-	input  wire        sec_ask,      // H_SECTOR bit 0, as last read
+	input  wire  [2:0] sec_ask,      // H_SECTOR bits 2:0, as last read
 	input  wire        evt_stop,     // the EVT ring stopped on a fault
 	output wire        c_rest,       // the enable link's idle: the clk_sys half is at rest
 	output wire        c_fault,      // one cycle: the OSD ring stopped on a fault
@@ -114,7 +130,7 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	output wire        c_open,       // C_BIND bit 11
 	output wire        c_sfault,     // one cycle: the SECTOR ring stopped on a fault
 	output wire        c_smid,       // level: a SECTOR record is part-consumed
-	output wire        c_sbind,      // C_BIND bit 0
+	output wire  [2:0] c_sbind,      // C_BIND bits 2:0
 	output wire        c_wide,       // hps_io's io_wide, for C_K[1]
 	output wire        rq_post,      // a REQUEST is owed for rq_lba
 	output wire [31:0] rq_lba,
@@ -124,6 +140,21 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	output wire [15:0] f_tail,       // the download ring's tail, as last stored in C_IDX[1]
 	output wire        c_ffault,     // one cycle: the download ring stopped on a fault
 	output wire        c_fmid,       // level: a download record is part-consumed
+	output wire        c_mfault,     // one cycle: the mount ring stopped on a fault
+	output wire        c_mmid,       // level: a mount record is part-consumed
+	// the mount slots' records, for the master's EVT writer (MNT_EN)
+	output wire        m_post,       // a REQUEST or a WRITE is owed for the mount request in hand
+	output wire        m_write,      // it is a WRITE
+	output wire  [7:0] m_arg,        // {blk_cnt, k}
+	output wire [10:0] m_n,          // the block's words
+	output wire [31:0] m_lba,
+	output wire        m_wv,         // a WRITE's next word is in m_wd
+	output wire [31:0] m_wd,
+	/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN the master's answers are not read
+	input  wire        m_start,      // one cycle: the master begins that record
+	input  wire        m_wtake,      // one cycle: the master takes m_wd
+	input  wire        m_pub,        // one cycle: the WRITE's head store is done
+	/* verilator lint_on UNUSEDSIGNAL */
 
 	// The master's consumer port: one transaction at a time
 	output wire        c_req,
@@ -156,6 +187,16 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	output wire        x_wr,
 	output wire [15:0] x_dat,
 	output wire [13:0] x_adr,
+	// the mount slots k = 1, 2 (the window's save-slot nets), {k = 2, k = 1}
+	/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN the mount slots' inputs are not read
+	input  wire  [1:0] xm_hps_ack,   // each slot's SPI ack
+	input  wire  [1:0] xm_rd,        // the core's requests, wired
+	input  wire  [1:0] xm_wr,
+	input  wire [63:0] xm_lba,       // the LBA, or while the slot's ack is up its buffer word
+	input  wire [11:0] xm_cnt,       // the requests' blk_cnt
+	/* verilator lint_on UNUSEDSIGNAL */
+	output wire  [1:0] xm_en,        // en_sys: the slot's mux is on this feeder
+	output wire  [1:0] xm_ack,
 
 	// The download player's side of lw_link, on clk_sys
 	/* verilator lint_off UNUSEDSIGNAL */   // without FIO_EN the player's inputs are not read
@@ -169,9 +210,11 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	output wire [15:0] l_din
 );
 
+localparam [15:0] H_IDX0    = 16'h0010;     // host: the mount ring's head
 localparam [15:0] H_IDX1    = 16'h0014;     // host: the download ring's head
 localparam [15:0] H_IDX2    = 16'h0018;     // host: the OSD ring's head
 localparam [15:0] H_IDX4    = 16'h0020;     // host: the SECTOR ring's head
+localparam [15:0] C_IDX0    = 16'h0090;     // fabric: the mount ring's tail
 localparam [15:0] C_IDX1    = 16'h0094;     // fabric: the download ring's tail
 localparam [15:0] C_IDX2    = 16'h0098;     // fabric: the OSD ring's tail
 localparam [15:0] C_IDX4    = 16'h00A0;     // fabric: the SECTOR ring's tail
@@ -182,6 +225,8 @@ localparam [15:0] SEC_WORDS = 16'd8192;
 localparam [15:0] FIO_BASE  = (FIO_RING == 32'd13) ? 16'h7000 : 16'h1000;
 localparam [15:0] FIO_WORDS = 16'd1 << FIO_RING[3:0];
 localparam  [3:0] FIO_SELS  = 4'b0010;      // the selects an LFRAME may name: the FPGA select (1) alone
+localparam [15:0] MNT_BASE  = 16'h6000;
+localparam [15:0] MNT_WORDS = 16'd1024;
 `ifdef MISTER_OCRAM_DIAG
 localparam        TS_SPAN   = 1;            // the DIAG torture sink walks ring 4's span
 `else
@@ -193,11 +238,11 @@ localparam [13:0] SEC_K     = FRAME[13:0] + 14'd1;      // its last payload word
 
 generate
 	if (OSD_BASE + OSD_WORDS * 4 > 16'hF000 || SEC_BASE + SEC_WORDS * 4 > 16'hF000 ||
-	    FIO_BASE + FIO_WORDS * 4 > 16'hF000) begin : g_rx_span
+	    FIO_BASE + FIO_WORDS * 4 > 16'hF000 || MNT_BASE + MNT_WORDS * 4 > 16'hF000) begin : g_rx_span
 		ocram_rx_span_above_0xF000 guard();
 	end
-	if (H_IDX1 >= 16'h0100 || H_IDX2 >= 16'h0100 || H_IDX4 >= 16'h0100 || C_IDX1 >= 16'h0100 ||
-	    C_IDX2 >= 16'h0100 || C_IDX4 >= 16'h0100) begin : g_rx_ctrl
+	if (H_IDX0 >= 16'h0100 || H_IDX1 >= 16'h0100 || H_IDX2 >= 16'h0100 || H_IDX4 >= 16'h0100 ||
+	    C_IDX0 >= 16'h0100 || C_IDX1 >= 16'h0100 || C_IDX2 >= 16'h0100 || C_IDX4 >= 16'h0100) begin : g_rx_ctrl
 		ocram_rx_control_constant_above_0xFF guard();
 	end
 	if (SEC_EN != 0 && (FRAME == 0 || FRAME > 4096 || GAP < 2 || GAP > 15)) begin : g_geometry
@@ -211,6 +256,10 @@ generate
 	// at 0x7000 the download ring takes ring 4's span, which the SECTOR tier and the DIAG sink also walk
 	if (FIO_EN != 0 && FIO_RING == 13 && (SEC_EN != 0 || TS_SPAN != 0)) begin : g_fio_span
 		ocram_fio_ring_on_ring4_span guard();
+	end
+	// the mount slots share the disc slot's feeder, its REQUEST writer and its bind rules
+	if (MNT_EN != 0 && SEC_EN == 0) begin : g_mnt_sec
+		ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT guard();
 	end
 endgenerate
 
@@ -226,41 +275,92 @@ wire frz = 1'b0;
 `endif
 
 localparam [1:0] TG_OHEAD = 2'd0, TG_SHEAD = 2'd1, TG_DATA = 2'd2, TG_FHEAD = 2'd3;
-localparam [1:0] RG_OSD = 2'd0, RG_SEC = 2'd1, RG_FIO = 2'd2;          // the walker's ring ids
+localparam [1:0] RG_OSD = 2'd0, RG_SEC = 2'd1, RG_FIO = 2'd2, RG_MNT = 2'd3;   // the walker's ring ids
 localparam [1:0] A_TOOK = 2'd0, A_ACCEPT = 2'd1, A_MISMATCH = 2'd2;   // 3: no request
 
-wire [33:0] word_q;                    // clk_sys: the capture register {tag, d}
+// The crossings' words, padded: {tag, wr, k, d} forward, {d, code} back; without MNT_EN only {tag, d} and the code
+// cross (the forward cell's wr and k, and the answer's d, read 0).
+wire [36:0] word_q;                    // clk_sys: the capture register {tag, wr, k, d}
 wire        word_v;
 wire        fwd_busy;
-wire  [1:0] done_q;
+wire [33:0] done_q;                    // clk: {d, code}
 wire        done_v;
 wire        back_busy;
 reg         done_go = 1'b0;            // clk_sys
 reg   [1:0] done_code = 2'd0;
 wire        x_go;                      // clk: the forward launch
-wire [33:0] x_d;
+/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN the forward word's wr and k, and the answer's d, do not cross
+reg  [31:0] done_dat = 32'd0;
+wire [36:0] x_d;
+/* verilator lint_on UNUSEDSIGNAL */
 
-lw_xfer #(.W(34)) rx_fwd(.s_clk(clk), .s_go(x_go), .s_d(x_d), .s_busy(fwd_busy),
-                         .d_clk(clk_sys), .d_q(word_q), .d_v(word_v));
-lw_xfer #(.W(2)) rx_done(.s_clk(clk_sys), .s_go(done_go), .s_d(done_code), .s_busy(back_busy),
-                         .d_clk(clk), .d_q(done_q), .d_v(done_v));
+generate
+if (MNT_EN != 0) begin : xw
+	lw_xfer #(.W(37)) rx_fwd(.s_clk(clk), .s_go(x_go), .s_d(x_d), .s_busy(fwd_busy),
+	                         .d_clk(clk_sys), .d_q(word_q), .d_v(word_v));
+	lw_xfer #(.W(34)) rx_done(.s_clk(clk_sys), .s_go(done_go), .s_d({done_dat, done_code}), .s_busy(back_busy),
+	                          .d_clk(clk), .d_q(done_q), .d_v(done_v));
+end
+else begin : xn
+	wire [33:0] fq;
+	wire  [1:0] dq;
+	lw_xfer #(.W(34)) rx_fwd(.s_clk(clk), .s_go(x_go), .s_d({x_d[36:35], x_d[31:0]}), .s_busy(fwd_busy),
+	                         .d_clk(clk_sys), .d_q(fq), .d_v(word_v));
+	lw_xfer #(.W(2)) rx_done(.s_clk(clk_sys), .s_go(done_go), .s_d(done_code), .s_busy(back_busy),
+	                         .d_clk(clk), .d_q(dq), .d_v(done_v));
+	assign word_q = {fq[33:32], 3'd0, fq[31:0]};
+	assign done_q = {32'd0, dq};
+end
+endgenerate
+wire  [1:0] done_c = done_q[1:0];
 
-// the request record {offered, lba} and the bind level each way
+// the request record {offered, lba} and the bind levels each way, by slot index k
 wire [32:0] rq_q;
 wire        rq_v;
 wire        rc_busy;
 wire        rc_go;
-(* preserve *) reg bind_lwx = 1'b0;    // clk: the SECTOR bind level
-(* preserve *) reg en_lwx = 1'b0;      // clk_sys: en_sys
-(* preserve *) reg wide_lwx = 1'b0;    // clk_sys: io_wide
-wire        bind_s, en_b, wide_b;
+/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN bits 2:1 do not cross
+(* preserve *) reg [2:0] bind_lwx = 3'd0;   // clk: the bind levels
+(* preserve *) reg [2:0] en_lwx = 3'd0;     // clk_sys: en_sys
+/* verilator lint_on UNUSEDSIGNAL */
+(* preserve *) reg wide_lwx = 1'b0;         // clk_sys: io_wide
+wire  [2:0] bind_s, en_b;
+wire        wide_b;
 reg         offd = 1'b0;               // clk_sys: offered, registered
 wire [32:0] rec = {offd, x_lba};
 lw_xfer #(.W(33)) rx_req(.s_clk(clk_sys), .s_go(rc_go), .s_d(rec), .s_busy(rc_busy),
                          .d_clk(clk), .d_q(rq_q), .d_v(rq_v));
-lw_sync #(.W(1)) bind_sync(.clk(clk_sys), .d(bind_lwx), .q(bind_s));
-lw_sync #(.W(2)) back_sync(.clk(clk), .d({wide_lwx, en_lwx}), .q({wide_b, en_b}));
+generate
+if (MNT_EN != 0) begin : sw
+	lw_sync #(.W(3)) bind_sync(.clk(clk_sys), .d(bind_lwx), .q(bind_s));
+	lw_sync #(.W(4)) back_sync(.clk(clk), .d({wide_lwx, en_lwx}), .q({wide_b, en_b}));
+end
+else begin : sn
+	// the disc slot's levels alone: the mount bits stay 0 and do not cross
+	lw_sync #(.W(1)) bind_sync(.clk(clk_sys), .d(bind_lwx[0]), .q(bind_s[0]));
+	lw_sync #(.W(2)) back_sync(.clk(clk), .d({wide_lwx, en_lwx[0]}), .q({wide_b, en_b[0]}));
+	assign bind_s[2:1] = 2'd0, en_b[2:1] = 2'd0;
+end
+endgenerate
 assign c_wide = wide_b;
+
+// the mount channel's record {k, wr, blk_cnt, offered, lba}
+wire [41:0] mq;
+wire        mq_v;
+wire        mrc_busy;
+/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN the channel's record is not sent
+wire        mrc_go;
+wire [41:0] mrec;
+/* verilator lint_on UNUSEDSIGNAL */
+generate
+if (MNT_EN != 0) begin : mx
+	lw_xfer #(.W(42)) rx_mreq(.s_clk(clk_sys), .s_go(mrc_go), .s_d(mrec), .s_busy(mrc_busy),
+	                          .d_clk(clk), .d_q(mq), .d_v(mq_v));
+end
+else begin : nomx
+	assign mq = 42'd0, mq_v = 1'b0, mrc_busy = 1'b0;
+end
+endgenerate
 
 wire        f_open, f_idle, hen_s, rest;
 reg         word_out = 1'b0;           // a word launched, its done not back
@@ -277,7 +377,8 @@ lw_fence fence
 ///////////////////////////////  the walker  ////////////////////////////////
 
 localparam [3:0] W_IDLE = 4'd0, W_HEAD = 4'd1, W_HDR = 4'd2, W_LBA = 4'd3, W_HGO = 4'd4, W_ANS = 4'd5,
-                 W_PAY = 4'd6, W_XFER = 4'd7, W_TAIL = 4'd8, W_FLUSH = 4'd9, W_FTAIL = 4'd10;
+                 W_PAY = 4'd6, W_XFER = 4'd7, W_TAIL = 4'd8, W_FLUSH = 4'd9, W_FTAIL = 4'd10,
+                 W_MTK = 4'd11, W_MWD = 4'd12, W_MWH = 4'd13, W_MWP = 4'd14;
 
 reg   [3:0] wst = W_IDLE;
 reg         req = 1'b0;
@@ -287,16 +388,17 @@ reg         rd_pend = 1'b0;            // a ring word read is owed at tail + k
 reg         st_pend = 1'b0;            // the ring's tail store is owed: tail + k
 reg   [1:0] ring = RG_OSD;             // the record's ring
 reg   [1:0] turn = RG_OSD;             // the ring served last
-reg  [15:0] tail_o = 16'd0, tail_s = 16'd0, tail_f = 16'd0;
+reg  [15:0] tail_o = 16'd0, tail_s = 16'd0, tail_f = 16'd0, tail_m = 16'd0;
 reg  [11:0] avail_o = 12'd0;
 reg  [13:0] avail_s = 14'd0, avail_f = 14'd0;
-reg         due_o = 1'b1, due_s = 1'b1, due_f = 1'b1;   // read the head when caught up
-reg         stop_o = 1'b0, stop_s = 1'b0, stop_f = 1'b0;
+reg  [10:0] avail_m = 11'd0;
+reg         due_o = 1'b1, due_s = 1'b1, due_f = 1'b1, due_m = 1'b1;   // read the head when caught up
+reg         stop_o = 1'b0, stop_s = 1'b0, stop_f = 1'b0, stop_m = 1'b0;
 reg  [13:0] k = 14'd0;
-reg         mid_o = 1'b0, mid_s = 1'b0, mid_f = 1'b0;
-reg         flt_o = 1'b0, flt_s = 1'b0, flt_f = 1'b0;
+reg         mid_o = 1'b0, mid_s = 1'b0, mid_f = 1'b0, mid_m = 1'b0;
+reg         flt_o = 1'b0, flt_s = 1'b0, flt_f = 1'b0, flt_m = 1'b0;
 reg   [4:0] row_q = 5'd0;              // the ROW being sent: its OSD_HEAD carries the row alone
-reg  [13:0] flen_q = 14'd0;            // the LFRAME being sent: its len, the k of its last word
+reg  [13:0] flen_q = 14'd0;            // the LFRAME or mount FRAME being sent: its len, the k of its last word
 `ifdef MISTER_OCRAM_DIAG
 reg         was_row = 1'b0;            // the OSD record being finished is a ROW
 `endif
@@ -305,6 +407,14 @@ reg         sb = 1'b0;                 // C_BIND bit 0
 reg         fl_pend = 1'b0;            // the unbind's flush is owed
 reg         rq_posted = 1'b0, fresh = 1'b0;
 reg         drop_s = 1'b0;             // the bind is being dropped
+reg   [1:0] sbm = 2'd0;                // C_BIND bits 2:1
+reg   [1:0] drop_m = 2'd0;             // a mount bind is being dropped
+reg         m_posted = 1'b0;           // the mount request in hand has its REQUEST or WRITE begun
+reg         mw_job = 1'b0;             // the walker serves the mount request in hand's WRITE
+reg         w_acc = 1'b0;              // the feeder accepted it: the ack is up
+reg         w_done = 1'b0;             // that WRITE is over (served, refused or cut): none again for this record
+reg         m_end = 1'b0;              // the next token is the end token
+reg         m_have = 1'b0;             // m_wd holds a WRITE word for the master
 `ifdef MISTER_OCRAM_DIAG
 reg  [15:0] rows_q = 16'd0, deepest_q = 16'd0;
 assign osd_rows = rows_q;
@@ -314,31 +424,57 @@ assign osd_rows = 16'd0;
 assign osd_deepest = 16'd0;
 `endif
 
-wire [15:0] tl     = (ring == RG_SEC) ? tail_s : (ring == RG_FIO) ? tail_f : tail_o;
+// the mount request in hand: its slot, direction, blk_cnt and LBA, and the block's words
+wire        mstand = mq[32];
+wire [31:0] mlba   = mq[31:0];
+wire  [1:0] mk     = mq[41:40];
+wire        mwr    = mq[39];
+wire  [5:0] mcnt   = mq[38:33];
+/* verilator lint_off UNUSEDSIGNAL */   // a block of at most MFRAME (1,020) words
+wire [18:0] mn19   = ({13'd0, mcnt} + 19'd1) << ({1'b0, BLKSZ} + 4'd5);
+/* verilator lint_on UNUSEDSIGNAL */
+wire [10:0] mn     = mn19[10:0];        // at most MFRAME: a longer request is never offered
+wire        mk2    = mk == 2'd2;
+wire        sbk    = mk2 ? sbm[1] : sbm[0];
+wire        dropk  = mk2 ? drop_m[1] : drop_m[0];
+wire        bindk  = mk2 ? bind_lwx[2] : bind_lwx[1];
+
+wire [15:0] tl     = (ring == RG_SEC) ? tail_s : (ring == RG_FIO) ? tail_f : (ring == RG_MNT) ? tail_m : tail_o;
 wire [15:0] widx   = tl + {2'd0, k};
 wire [15:0] osd_off = OSD_BASE + ((widx & (OSD_WORDS - 1)) << 2);
 wire [15:0] sec_off = SEC_BASE + ((widx & (SEC_WORDS - 1)) << 2);
 wire [15:0] fio_off = FIO_BASE + ((widx & (FIO_WORDS - 1)) << 2);
+wire [15:0] mnt_off = MNT_BASE + ((widx & (MNT_WORDS - 1)) << 2);
 // a response is decoded in its own cycle, as the bridge's rdata reaches each register in one stage
 wire [15:0] new_gap = c_rdata[15:0] - tl;
 wire [16:0] rlen    = {1'b0, c_rdata[15:0]} + 17'd1;
 wire        c_new   = c_done && c_ok;
 wire        c_bad   = c_done && !c_ok;
-wire [16:0] ravail  = (ring == RG_SEC) ? {3'd0, avail_s} : (ring == RG_FIO) ? {3'd0, avail_f} : {5'd0, avail_o};
-wire [15:0] rwords  = (ring == RG_SEC) ? SEC_WORDS : (ring == RG_FIO) ? FIO_WORDS : OSD_WORDS;
+wire [16:0] ravail  = (ring == RG_SEC) ? {3'd0, avail_s} : (ring == RG_FIO) ? {3'd0, avail_f} :
+                      (ring == RG_MNT) ? {6'd0, avail_m} : {5'd0, avail_o};
+wire [15:0] rwords  = (ring == RG_SEC) ? SEC_WORDS : (ring == RG_FIO) ? FIO_WORDS : (ring == RG_MNT) ? MNT_WORDS :
+                      OSD_WORDS;
 // an LFRAME the player takes: kind 0x30, arg {odd, 0, sel} with sel in the mask, a len of at least one word
 wire        f_rec   = c_rdata[31:24] == 8'h30 && c_rdata[22:18] == 5'd0 && FIO_SELS[c_rdata[17:16]] &&
                       c_rdata[15:0] != 16'd0;
+// a mount FRAME that answers the read in hand: its slot, blk_cnt and len
+wire        m_rec   = c_rdata[31:24] == 8'h10 && mstand && !mwr && c_rdata[23:16] == {mcnt, mk} &&
+                      c_rdata[15:0] == {5'd0, mn} + 16'd1;
 
 wire        stand  = rq_q[32];
 wire        walk_o = OSD_EN != 0 && s_live && f_open && bind_en && !stop_o;
 wire        walk_s = SEC_EN != 0 && s_live && f_open && !stop_s;
 wire        walk_f = FIO_EN != 0 && s_live && f_open && !stop_f;
-wire        want_s = walk_s && sec_ask && !evt_stop;
+wire        walk_m = MNT_EN != 0 && s_live && f_open && !stop_m;
+wire        want_s = walk_s && sec_ask[0] && !evt_stop;
+wire  [1:0] want_m = MNT_EN & sec_ask[2:1] & {2{walk_m && !evt_stop}};
+wire        m_wjob = mstand && mwr && sbk && !dropk && !w_done && !mq_v && !evt_stop;
 wire        job_o  = walk_o && (avail_o != 12'd0 || due_o);
 wire        job_s  = walk_s && sb && !drop_s && ((avail_s != 14'd0 && stand && !s_wait) || (avail_s == 14'd0 && due_s));
 wire        job_f  = walk_f && (avail_f != 14'd0 || due_f);
+wire        job_m  = walk_m && (m_wjob || avail_m != 11'd0 || due_m);
 wire        streaming = ring == RG_SEC && wst != W_IDLE;
+wire        mstream   = ring == RG_MNT && wst != W_IDLE;
 
 // Round robin by ring id over the rings with work, the one served last going last
 function [2:0] rr_pick(input [3:0] jobs, input [1:0] last);   // {found, id}
@@ -352,7 +488,7 @@ function [2:0] rr_pick(input [3:0] jobs, input [1:0] last);   // {found, id}
 		end
 	end
 endfunction
-wire  [2:0] pick   = rr_pick({1'b0, job_f, job_s, job_o}, turn);
+wire  [2:0] pick   = rr_pick({job_m, job_f, job_s, job_o}, turn);
 
 assign c_req    = req;
 assign c_we     = req_we;
@@ -364,42 +500,69 @@ assign c_sfault = flt_s;
 assign c_smid   = mid_s;
 assign c_ffault = flt_f;
 assign c_fmid   = mid_f;
+assign c_mfault = flt_m;
+assign c_mmid   = mid_m;
 assign f_tail   = tail_f;
 assign c_open   = f_open & bind_en;
 assign c_rest   = f_idle;
-assign c_sbind  = sb;
+assign c_sbind  = {sbm, sb};
 assign rq_lba   = rq_q[31:0];
 // not in a record's landing cycle: its fresh read is the next one
-assign rq_post  = SEC_EN != 0 && sb && !drop_s && bind_lwx && stand && !rq_posted && fresh && !rq_v &&
+assign rq_post  = SEC_EN != 0 && sb && !drop_s && bind_lwx[0] && stand && !rq_posted && fresh && !rq_v &&
                   avail_s == 14'd0 && !stop_s;
+// a mount read is posted at once; a WRITE once the feeder has raised its ack
+assign m_post   = MNT_EN != 0 && !m_posted && !mq_v &&
+                  ((mstand && !mwr && sbk && !dropk && bindk && !stop_m) || (mw_job && w_acc));
+assign m_write  = mwr;
+assign m_arg    = {mcnt, mk};
+assign m_n      = mn;
+assign m_lba    = mlba;
+assign m_wv     = m_have;
+assign m_wd     = done_q[33:2];         // the answer to the last token: held until the next one is launched
 
 // A payload word, a frame's LBA and an LFRAME's header go to the cell in their read's response cycle (each read is
 // issued only with the cell idle, and nothing else launches before its response); a ROW's head, its row alone,
-// from row_q.
+// from row_q; a WRITE's head, its slot and LBA, and each token, from the walker's state.
 wire   f_hgo = wst == W_HDR && ring == RG_FIO && c_new && f_rec && rlen <= ravail;
 wire   x_rsp = ((wst == W_PAY || wst == W_LBA) && c_new || f_hgo) && s_live;
-assign x_go = x_rsp || (wst == W_HGO && !fwd_busy && s_live);
-assign x_d  = (wst == W_PAY) ? {TG_DATA, c_rdata} : (wst == W_LBA) ? {TG_SHEAD, c_rdata} :
-              (wst == W_HDR) ? {TG_FHEAD, c_rdata} : {TG_OHEAD, 11'd0, row_q, 16'd0};
+wire   x_tok = wst == W_MTK && !fwd_busy && s_live;
+assign x_go = x_rsp || (wst == W_HGO && !fwd_busy && s_live) || x_tok;
+assign x_d  = (wst == W_PAY) ? {TG_DATA, 3'd0, c_rdata} :
+              (wst == W_LBA) ? {TG_SHEAD, 1'b0, (ring == RG_MNT) ? mk : 2'd0, c_rdata} :
+              (wst == W_HDR) ? {TG_FHEAD, 3'd0, c_rdata} :
+              (wst == W_MTK) ? {TG_DATA, 3'd0, 31'd0, m_end} :
+              (ring == RG_MNT) ? {TG_SHEAD, 1'b1, mk, mlba} : {TG_OHEAD, 3'd0, 11'd0, row_q, 16'd0};
 
 always @(posedge clk) begin
 	flt_o <= 1'b0;
 	flt_s <= 1'b0;
 	flt_f <= 1'b0;
+	flt_m <= 1'b0;
 	if (c_grant) req <= 1'b0;
 
 	// the bind level: up while asked; it falls only between records
-	if (want_s && !drop_s) bind_lwx <= 1'b1;
-	else if (!(streaming && s_live)) bind_lwx <= 1'b0;
-	if (bind_lwx && en_b && !drop_s) sb <= 1'b1;
+	if (want_s && !drop_s) bind_lwx[0] <= 1'b1;
+	else if (!(streaming && s_live)) bind_lwx[0] <= 1'b0;
+	if (bind_lwx[0] && en_b[0] && !drop_s) sb <= 1'b1;
 	if (sb && !want_s && !drop_s && !(streaming && s_live)) begin
 		drop_s  <= 1'b1;
 		fl_pend <= !stop_s;
 	end
-	if (drop_s && !fl_pend && !en_b) begin
+	if (drop_s && !fl_pend && !en_b[0]) begin
 		drop_s <= 1'b0;
 		sb     <= 1'b0;
 	end
+	// the mount binds: as the disc slot's, with no flush
+	if (want_m[0] && !drop_m[0]) bind_lwx[1] <= 1'b1;
+	else if (!(mstream && s_live)) bind_lwx[1] <= 1'b0;
+	if (want_m[1] && !drop_m[1]) bind_lwx[2] <= 1'b1;
+	else if (!(mstream && s_live)) bind_lwx[2] <= 1'b0;
+	if (bind_lwx[1] && en_b[1] && !drop_m[0]) sbm[0] <= 1'b1;
+	if (bind_lwx[2] && en_b[2] && !drop_m[1]) sbm[1] <= 1'b1;
+	if (sbm[0] && !want_m[0] && !drop_m[0] && !(mstream && s_live)) drop_m[0] <= 1'b1;
+	if (sbm[1] && !want_m[1] && !drop_m[1] && !(mstream && s_live)) drop_m[1] <= 1'b1;
+	if (drop_m[0] && !en_b[1]) begin drop_m[0] <= 1'b0; sbm[0] <= 1'b0; end
+	if (drop_m[1] && !en_b[2]) begin drop_m[1] <= 1'b0; sbm[1] <= 1'b0; end
 
 	// the request record: a new one asks for one fresh head read, and voids the post
 	if (rq_v) begin
@@ -409,7 +572,13 @@ always @(posedge clk) begin
 		if (rq_q[32]) due_s <= 1'b1;
 	end
 	else if (rq_start) rq_posted <= 1'b1;
-	if (s_tick) begin due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; s_wait <= 1'b0; end
+	// the mount record: a new one voids the post and the WRITE's end
+	if (mq_v) begin
+		m_posted <= 1'b0;
+		w_done   <= 1'b0;
+	end
+	else if (m_start) m_posted <= 1'b1;
+	if (s_tick) begin due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; due_m <= 1'b1; s_wait <= 1'b0; end
 
 	// a ring word read, addressed by the one adder; never while the forward cell is busy
 	if (rd_pend && !req && !fwd_busy) begin
@@ -419,6 +588,7 @@ always @(posedge clk) begin
 		case (ring)
 		RG_SEC:  req_off <= sec_off;
 		RG_FIO:  req_off <= fio_off;
+		RG_MNT:  req_off <= mnt_off;
 		default: req_off <= osd_off;
 		endcase
 	end
@@ -429,16 +599,21 @@ always @(posedge clk) begin
 		case (ring)
 		RG_SEC:  req_off <= C_IDX4;
 		RG_FIO:  req_off <= C_IDX1;
+		RG_MNT:  req_off <= C_IDX0;
 		default: req_off <= C_IDX2;
 		endcase
 	end
 
 	if (s_hello) begin
 		wst <= W_IDLE; req <= 1'b0; rd_pend <= 1'b0; st_pend <= 1'b0; word_out <= 1'b0;
-		tail_o <= 16'd0; tail_s <= 16'd0; tail_f <= 16'd0; avail_o <= 12'd0; avail_s <= 14'd0; avail_f <= 14'd0;
-		due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; stop_o <= 1'b0; stop_s <= 1'b0; stop_f <= 1'b0;
-		mid_o <= 1'b0; mid_s <= 1'b0; mid_f <= 1'b0; s_wait <= 1'b0; turn <= RG_OSD;
-		sb <= 1'b0; drop_s <= 1'b0; fl_pend <= 1'b0; bind_lwx <= 1'b0; fresh <= 1'b0; rq_posted <= 1'b0;
+		tail_o <= 16'd0; tail_s <= 16'd0; tail_f <= 16'd0; tail_m <= 16'd0;
+		avail_o <= 12'd0; avail_s <= 14'd0; avail_f <= 14'd0; avail_m <= 11'd0;
+		due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; due_m <= 1'b1;
+		stop_o <= 1'b0; stop_s <= 1'b0; stop_f <= 1'b0; stop_m <= 1'b0;
+		mid_o <= 1'b0; mid_s <= 1'b0; mid_f <= 1'b0; mid_m <= 1'b0; s_wait <= 1'b0; turn <= RG_OSD;
+		sb <= 1'b0; drop_s <= 1'b0; fl_pend <= 1'b0; bind_lwx <= 3'd0; fresh <= 1'b0; rq_posted <= 1'b0;
+		sbm <= 2'd0; drop_m <= 2'd0; m_posted <= 1'b0; mw_job <= 1'b0; w_acc <= 1'b0; w_done <= 1'b0;
+		m_end <= 1'b0; m_have <= 1'b0;
 `ifdef MISTER_OCRAM_DIAG
 		rows_q <= 16'd0; deepest_q <= 16'd0;
 `endif
@@ -446,15 +621,17 @@ always @(posedge clk) begin
 	else if (!s_live && wst != W_IDLE) begin
 		// the session ended: the record is abandoned, its mid bit left for the master
 		wst <= W_IDLE; req <= 1'b0; rd_pend <= 1'b0; st_pend <= 1'b0; word_out <= 1'b0;
+		mw_job <= 1'b0; w_acc <= 1'b0; m_have <= 1'b0;
 	end
 	else if (!s_live) begin
-		sb <= 1'b0; drop_s <= 1'b0; fl_pend <= 1'b0;
+		sb <= 1'b0; drop_s <= 1'b0; fl_pend <= 1'b0; sbm <= 2'd0; drop_m <= 2'd0;
 	end
 	else case (wst)
 	W_IDLE: begin
 		mid_o <= 1'b0;
 		mid_s <= 1'b0;
 		mid_f <= 1'b0;
+		mid_m <= 1'b0;
 		if (SEC_EN != 0 && fl_pend) begin
 			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; wst <= W_FLUSH;
 		end
@@ -469,6 +646,14 @@ always @(posedge clk) begin
 				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX1; due_f <= 1'b0; wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_f <= 1'b1; wst <= W_HDR; end
+			RG_MNT: if (m_wjob) begin
+				// a WRITE: its head crosses with the slot and the LBA; the feeder answers
+				mw_job <= 1'b1; m_end <= 1'b0; word_out <= 1'b1; wst <= W_HGO;
+			end
+			else if (avail_m == 11'd0) begin
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX0; due_m <= 1'b0; wst <= W_HEAD;
+			end
+			else begin k <= 14'd0; rd_pend <= 1'b1; mid_m <= 1'b1; wst <= W_HDR; end
 			default: if (avail_o == 12'd0) begin
 				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX2; due_o <= 1'b0; wst <= W_HEAD;
 			end
@@ -483,6 +668,7 @@ always @(posedge clk) begin
 			case (ring)
 			RG_SEC:  begin stop_s <= 1'b1; flt_s <= 1'b1; fl_pend <= 1'b0; end
 			RG_FIO:  begin stop_f <= 1'b1; flt_f <= 1'b1; end
+			RG_MNT:  begin stop_m <= 1'b1; flt_m <= 1'b1; end
 			default: begin stop_o <= 1'b1; flt_o <= 1'b1; end
 			endcase
 			wst <= W_IDLE;
@@ -495,6 +681,7 @@ always @(posedge clk) begin
 			case (ring)
 			RG_SEC:  begin avail_s <= new_gap[13:0]; fresh <= 1'b1; end
 			RG_FIO:  avail_f <= new_gap[13:0];
+			RG_MNT:  avail_m <= new_gap[10:0];
 			default: avail_o <= new_gap[11:0];
 			endcase
 `ifdef MISTER_OCRAM_DIAG
@@ -510,6 +697,7 @@ always @(posedge clk) begin
 			case (ring)
 			RG_SEC:  begin stop_s <= 1'b1; flt_s <= 1'b1; mid_s <= 1'b0; end
 			RG_FIO:  begin stop_f <= 1'b1; flt_f <= 1'b1; mid_f <= 1'b0; end
+			RG_MNT:  begin stop_m <= 1'b1; flt_m <= 1'b1; mid_m <= 1'b0; end
 			default: begin stop_o <= 1'b1; flt_o <= 1'b1; mid_o <= 1'b0; end
 			endcase
 			wst <= W_IDLE;
@@ -527,6 +715,9 @@ always @(posedge clk) begin
 		else if (ring == RG_FIO && f_rec) begin
 			flen_q <= c_rdata[13:0]; k <= 14'd0; word_out <= 1'b1; wst <= W_XFER;   // x_go launched FIO_HEAD
 		end
+		else if (ring == RG_MNT && m_rec) begin
+			flen_q <= c_rdata[13:0]; k <= 14'd1; rd_pend <= 1'b1; wst <= W_LBA;
+		end
 		else begin
 			// an unknown kind, a record of another length or argument: skipped by its length
 			k <= rlen[13:0]; st_pend <= 1'b1; wst <= W_TAIL;
@@ -539,12 +730,17 @@ always @(posedge clk) begin
 		if (!c_ok) rd_pend <= 1'b1;
 		else begin word_out <= 1'b1; wst <= W_ANS; end               // x_go launched SEC_HEAD with the LBA
 	end
-	W_HGO: if (!fwd_busy) wst <= W_XFER;                              // x_go launches the ROW's head this cycle
+	W_HGO: if (!fwd_busy) wst <= (ring == RG_MNT) ? W_ANS : W_XFER;   // x_go launches the ROW's or WRITE's head
 	W_ANS: if (done_v) begin
 		word_out <= 1'b0;
-		if (done_q == A_ACCEPT) begin k <= 14'd2; rd_pend <= 1'b1; wst <= W_PAY; end
-		else if (done_q == A_MISMATCH) begin
-			k <= SEC_K + 14'd1; st_pend <= 1'b1; wst <= W_TAIL;
+		if (mw_job) begin
+			// the WRITE's head: accepted, its ack is up and its words follow; else it is over for this record
+			if (done_c == A_ACCEPT) begin w_acc <= 1'b1; k <= 14'd0; wst <= W_MTK; end
+			else begin mw_job <= 1'b0; w_done <= 1'b1; wst <= W_IDLE; end
+		end
+		else if (done_c == A_ACCEPT) begin k <= 14'd2; rd_pend <= 1'b1; wst <= W_PAY; end
+		else if (done_c == A_MISMATCH || ring == RG_MNT) begin
+			k <= ((ring == RG_MNT) ? flen_q : SEC_K) + 14'd1; st_pend <= 1'b1; wst <= W_TAIL;
 		end
 		else begin s_wait <= 1'b1; wst <= W_IDLE; end                 // no request: the frame stays
 	end
@@ -554,11 +750,25 @@ always @(posedge clk) begin
 	end
 	W_XFER: if (done_v) begin
 		word_out <= 1'b0;
-		if (k == ((ring == RG_SEC) ? SEC_K : (ring == RG_FIO) ? flen_q : 14'd64)) begin
+		if (k == ((ring == RG_SEC) ? SEC_K : (ring == RG_OSD) ? 14'd64 : flen_q)) begin
 			k <= k + 14'd1; st_pend <= 1'b1; wst <= W_TAIL;
 		end
 		else begin k <= k + 14'd1; rd_pend <= 1'b1; wst <= W_PAY; end
 	end
+	W_MTK: if (!fwd_busy) begin word_out <= 1'b1; wst <= W_MWD; end   // x_go launches the token
+	W_MWD: if (done_v) begin
+		word_out <= 1'b0;
+		if (m_end) begin mw_job <= 1'b0; w_acc <= 1'b0; w_done <= 1'b1; wst <= W_IDLE; end   // the ack is down
+		else if (evt_stop) begin m_end <= 1'b1; wst <= W_MTK; end
+		else begin m_have <= 1'b1; wst <= W_MWH; end
+	end
+	W_MWH: if (m_wtake) begin
+		m_have <= 1'b0;
+		k      <= k + 14'd1;
+		wst    <= (k + 14'd1 == {3'd0, mn}) ? W_MWP : W_MTK;
+	end
+	else if (evt_stop) begin m_have <= 1'b0; m_end <= 1'b1; wst <= W_MTK; end
+	W_MWP: if (m_pub || evt_stop) begin m_end <= 1'b1; wst <= W_MTK; end   // published, or never: the ack falls
 	W_TAIL, W_FTAIL: begin
 		if (c_new) begin
 			// the tail store is done: the record is consumed
@@ -572,6 +782,10 @@ always @(posedge clk) begin
 			RG_FIO: begin
 				tail_f <= widx; avail_f <= avail_f - k; mid_f <= 1'b0;
 				if (avail_f == k) due_f <= 1'b1;
+			end
+			RG_MNT: begin
+				tail_m <= widx; avail_m <= avail_m - k[10:0]; mid_m <= 1'b0;
+				if ({3'd0, avail_m} == k) due_m <= 1'b1;
 			end
 			default: begin
 				tail_o <= widx; avail_o <= avail_o - k[11:0]; mid_o <= 1'b0;
@@ -591,7 +805,11 @@ end
 ///////////////////////////////  clk_sys  ///////////////////////////////////
 
 reg   [1:0] cur = RG_OSD;              // the ring of the last head
-wire  [1:0] tag = word_q[33:32];
+wire  [1:0] tag = word_q[36:35];
+/* verilator lint_off UNUSEDSIGNAL */   // the feeder's, with SEC_EN
+wire        fwr = word_q[34];              // a SEC_HEAD's direction and slot index (MNT_EN)
+wire  [1:0] fk  = word_q[33:32];
+/* verilator lint_on UNUSEDSIGNAL */
 wire [31:0] wd  = word_q[31:0];
 wire        o_word_v = OSD_EN != 0 && word_v && (tag == TG_OHEAD || (tag == TG_DATA && cur == RG_OSD));
 /* verilator lint_off UNUSEDSIGNAL */   // the feeder's, with SEC_EN; the player's, with FIO_EN
@@ -612,23 +830,25 @@ assign we    = wnow;
 assign addr  = {o_row, o_word, o_b};
 assign dbyte = wd[{o_b, 3'd0} +: 8];
 
-// the SECTOR feeder
+// the SECTOR feeder, for the disc slot and the mount slots
 wire        f_go, f_rest, f_ack;
 wire  [1:0] f_code;
+wire [31:0] f_dat;
 generate
 if (SEC_EN != 0) begin : sec
-	hps_ocram_sfeed #(.FRAME(FRAME), .GAP(GAP)) feeder
+	hps_ocram_sfeed #(.FRAME(FRAME), .GAP(GAP), .MNT_EN(MNT_EN), .BLKSZ(BLKSZ)) feeder
 	(
 		.clk_sys(clk_sys), .hen_s(hen_s), .bind_s(bind_s),
-		.w_v(s_word_v), .w_head(tag == TG_SHEAD), .w_d(wd),
-		.a_go(f_go), .a_code(f_code), .rest(f_rest),
+		.w_v(s_word_v), .w_head(tag == TG_SHEAD), .w_wr(fwr), .w_k(fk), .w_d(wd),
+		.a_go(f_go), .a_code(f_code), .a_d(f_dat), .rest(f_rest),
 		.c_reset(x_reset), .hps_ack(x_hps_ack), .c_req(x_req), .c_lba(x_lba), .c_commit(x_commit), .c_wide(x_wide),
-		.en_sys(x_en), .o_ack(f_ack), .o_wr(x_wr), .o_dat(x_dat), .o_adr(x_adr)
+		.m_hps_ack(xm_hps_ack), .m_rd(xm_rd), .m_wr(xm_wr), .m_lba(xm_lba), .m_cnt(xm_cnt),
+		.en_sys(x_en), .m_en(xm_en), .o_ack(f_ack), .m_ack(xm_ack), .o_wr(x_wr), .o_dat(x_dat), .o_adr(x_adr)
 	);
 end
 else begin : nosec
-	assign f_go = 1'b0, f_code = 2'd0, f_rest = 1'b1, f_ack = 1'b0;
-	assign x_en = 1'b0, x_wr = 1'b0, x_dat = 16'd0, x_adr = 14'd0;
+	assign f_go = 1'b0, f_code = 2'd0, f_dat = 32'd0, f_rest = 1'b1, f_ack = 1'b0;
+	assign x_en = 1'b0, x_wr = 1'b0, x_dat = 16'd0, x_adr = 14'd0, xm_en = 2'd0, xm_ack = 2'd0;
 end
 endgenerate
 assign x_ack = f_ack;
@@ -658,14 +878,31 @@ reg   [1:0] rearm = 2'd0;
 wire        off_d = SEC_EN != 0 && x_en && x_req && !f_ack && rearm == 2'd0;
 assign rc_go = dirty && !rc_busy;
 
-// The half is at rest with the enable and the bind level low, no word held or arriving, nothing owed, every
+// the mount channel's record: one slot's at a time (m_cur); offered = the slot's mux here, its request raised, a
+// block of at most MFRAME words, its ack low and two cycles past its fall. The other slot takes the channel only
+// once the record in hand, sent, reads not offered; no record launches while a mount slot's ack is up.
+reg         m_cur = 1'b0;              // the channel's slot: 0 is k = 1, 1 is k = 2
+reg         moffd = 1'b0;
+reg         mdirty = 1'b0;
+reg   [3:0] mrearm = 4'd0;
+function automatic [18:0] mwords(input [5:0] cnt);
+	mwords = ({13'd0, cnt} + 19'd1) << ({1'b0, BLKSZ} + 4'd5);
+endfunction
+wire  [1:0] mfit  = {mwords(xm_cnt[11:6]) <= MFRAME[18:0], mwords(xm_cnt[5:0]) <= MFRAME[18:0]};
+wire  [1:0] moff  = MNT_EN & xm_en & (xm_rd | xm_wr) & ~xm_ack & {mrearm[3:2] == 2'd0, mrearm[1:0] == 2'd0} & mfit;
+wire        moff_d = m_cur ? moff[1] : moff[0];
+assign mrec   = m_cur ? {2'd2, xm_wr[1], xm_cnt[11:6], moffd, xm_lba[63:32]} :
+                        {2'd1, xm_wr[0], xm_cnt[5:0], moffd, xm_lba[31:0]};
+assign mrc_go = mdirty && !mrc_busy && xm_ack == 2'd0;
+
+// The half is at rest with the enable and the bind levels low, no word held or arriving, nothing owed, every
 // handshake settled. While frozen it is never at rest, which is what a stopped clk_sys looks like to the link.
-assign rest = !frz && !hen_s && !bind_s && f_rest && p_rest && !o_have && !o_hans && !back_busy && !word_v &&
-              !done_go && !offd && !dirty && !rc_busy;
+assign rest = !frz && !hen_s && bind_s == 3'd0 && f_rest && p_rest && !o_have && !o_hans && !back_busy && !word_v &&
+              !done_go && !offd && !dirty && !rc_busy && !moffd && !mdirty && !mrc_busy;
 
 always @(posedge clk_sys) begin
 	done_go  <= 1'b0;
-	en_lwx   <= x_en;
+	en_lwx   <= {xm_en, x_en};
 	wide_lwx <= x_wide;
 	qn <= !quiet ? 2'd0 : (qn == 2'd2) ? 2'd2 : qn + 2'd1;
 
@@ -673,6 +910,10 @@ always @(posedge clk_sys) begin
 	offd  <= off_d;
 	dirty <= (off_d ^ offd) | (dirty & ~rc_go);
 	rearm <= {rearm[0], f_ack | x_hps_ack};
+	moffd  <= moff_d;
+	mdirty <= (moff_d ^ moffd) | (mdirty & ~mrc_go);
+	mrearm <= {mrearm[2], xm_ack[1] | xm_hps_ack[1], mrearm[0], xm_ack[0] | xm_hps_ack[0]};
+	if (!moff_d && !moffd && !mdirty && (m_cur ? moff[0] : moff[1])) m_cur <= ~m_cur;
 
 	if (word_v && tag != TG_DATA) cur <= (tag == TG_SHEAD) ? RG_SEC : (tag == TG_FHEAD) ? RG_FIO : RG_OSD;
 	if (o_word_v) begin
@@ -684,6 +925,7 @@ always @(posedge clk_sys) begin
 	if (f_go) begin
 		done_go   <= 1'b1;
 		done_code <= f_code;
+		done_dat  <= f_dat;
 	end
 	else if (p_go) begin
 		done_go   <= 1'b1;
@@ -716,27 +958,37 @@ endmodule
 //============================================================================
 //  hps_ocram_sfeed -- the SECTOR feeder of hps_ocram_rx, on clk_sys (MISTER_OCRAM_SECTOR_SLOT)
 //
-//  lw_sector's primary-slot feeder with the forward crossing's capture register as its one-entry queue: w_v marks
-//  an entry (a SEC_HEAD with the LBA, or a DATA word) held in w_d until it is answered. Strobes as hps_io's: with
+//  lw_sector's feeder with the forward crossing's capture register as its one-entry queue: w_v marks an entry (a
+//  SEC_HEAD with its slot index and LBA, or a DATA word) held in w_d until it is answered. Strobes as hps_io's: with
 //  c_wide two 16-bit strobes a word at the halfword index, low half first, else four bytes at the byte index;
 //  GAP cycles apart, the first GAP after the ack. A word is popped only once its first strobe can issue in the cycle
 //  after (GAP - 1 after the previous strobe at the earliest), so a word in hand is strobed as lw_sector strobes a
-//  FIFO entry. A word's answer goes with its last strobe; a SEC_HEAD's with its decision. A module of its own so
-//  the trace bench can drive it beside lw_sector and the fit reports its ALMs apart.
+//  FIFO entry. A word's answer goes with its last strobe; a SEC_HEAD's with its decision. The disc slot (k = 0)
+//  plays FRAME words; a mount slot (k = 1, 2, MNT_EN) plays its request's (blk_cnt + 1) << (BLKSZ + 5). A mount
+//  slot's WRITE head (w_wr) raises its ack and reads the core's buffer word by word at the same addresses, each
+//  lane GAP cycles after its address; each DATA token is answered with the next word (a_d), and the end token
+//  (d[0] = 1) drops the ack. A module of its own so the trace bench can drive it beside lw_sector and the fit
+//  reports its ALMs apart.
 //============================================================================
 
 /* verilator lint_off DECLFILENAME */   // the feeder shares hps_ocram_rx's file, as the sink shares the master's
-module hps_ocram_sfeed #(parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2)
+module hps_ocram_sfeed #(parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2,
+                         parameter [1:0] MNT_EN = 2'd0, parameter [2:0] BLKSZ = 3'd2)
 (
 	input  wire        clk_sys,
 	input  wire        hen_s,        // the session's enable level
-	input  wire        bind_s,       // the bind level
+	input  wire  [2:0] bind_s,       // the bind levels, by slot index k
 	input  wire        w_v,          // one cycle: an entry is in w_d
 	input  wire        w_head,       // it is a SEC_HEAD
+	/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN a head is the disc slot's read
+	input  wire        w_wr,         // a head's direction: a mount slot's WRITE
+	input  wire  [1:0] w_k,          // a head's slot index
+	/* verilator lint_on UNUSEDSIGNAL */
 	input  wire [31:0] w_d,          // held until the entry is answered
 	output reg         a_go = 1'b0,  // one cycle: the entry's answer
 	output reg   [1:0] a_code = 2'd0,// 0 took, 1 accept, 2 mismatch, 3 no request
-	output wire        rest,         // idle: no entry, no frame, the mux on SPI
+	output reg  [31:0] a_d = 32'd0,  // a WRITE token's answer: the core's buffer word
+	output wire        rest,         // idle: no entry, no frame, every mux on SPI
 
 	input  wire        c_reset,
 	input  wire        hps_ack,
@@ -744,27 +996,40 @@ module hps_ocram_sfeed #(parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP 
 	input  wire [31:0] c_lba,
 	input  wire        c_commit,
 	input  wire        c_wide,
+	/* verilator lint_off UNUSEDSIGNAL */   // without MNT_EN the mount slots' inputs are not read
+	input  wire  [1:0] m_hps_ack,    // the mount slots', {k = 2, k = 1}: the SPI ack,
+	input  wire  [1:0] m_rd,         //   the core's requests,
+	input  wire  [1:0] m_wr,
+	input  wire [63:0] m_lba,        //   the LBA, or while the slot's ack is up its buffer word,
+	input  wire [11:0] m_cnt,        //   and blk_cnt
+	/* verilator lint_on UNUSEDSIGNAL */
 	output reg         en_sys = 1'b0,
+	output reg   [1:0] m_en = 2'd0,
 	output wire        o_ack,
+	output wire  [1:0] m_ack,
 	output reg         o_wr = 1'b0,
 	output reg  [15:0] o_dat = 16'd0,
 	output reg  [13:0] o_adr = 14'd0
 );
 
 localparam [1:0] A_TOOK = 2'd0, A_ACCEPT = 2'd1, A_MISMATCH = 2'd2, A_NOREQ = 2'd3;
-localparam [1:0] F_IDLE = 2'd0, F_STREAM = 2'd2, F_FILL = 2'd3;
+localparam [1:0] F_IDLE = 2'd0, F_WRITE = 2'd1, F_STREAM = 2'd2, F_FILL = 2'd3;
 localparam [12:0] FLAST = FRAME[12:0] - 13'd1;
 
 reg   [1:0] fs = F_IDLE;
 reg         have = 1'b0;               // an entry waits
 reg         qv = 1'b0;                 // the entry popped last cycle
-reg         fack = 1'b0;
+reg   [2:0] fack = 3'd0;               // the acks, by slot index
+reg   [1:0] fsel = 2'd0;               // the slot of the open frame or WRITE
+reg  [12:0] flast = FLAST;             // its last word
 reg   [3:0] gc = 4'd0;
 reg   [1:0] sn = 2'd0;
 reg         em = 1'b0;
 reg         fz = 1'b0;                 // the word being strobed is the fill's zero
 reg  [12:0] fexp = 13'd0;
 reg   [1:0] mt = 2'd0, ml = 2'd0;
+reg         wrd = 1'b0;                // a WRITE's word is read whole
+reg  [31:0] rword = 32'd0;             // its lanes
 
 wire        fidle  = fs == F_IDLE;
 wire        head   = w_head;
@@ -776,16 +1041,30 @@ wire        wend   = em && sn >= slast && nxt_ok;
 wire        wplay  = w_v && (head ? fidle : fs == F_STREAM);     // the entry just arrived and can be played
 wire        hv     = have || wplay;
 wire        pop    = hv && !qv && ((fidle && head) || (fs == F_STREAM && (!em || wend) && nxt_ok));
-wire        bmatch = en_sys && c_req && w_d == c_lba;
+// the head's slot: the disc slot's request, or a declared mount slot's in the head's direction
+wire        k1     = MNT_EN[0] && w_k == 2'd1;
+wire        k2     = MNT_EN[1] && w_k == 2'd2;
+wire        mup    = k1 ? (w_wr ? m_wr[0] : m_rd[0]) : k2 ? (w_wr ? m_wr[1] : m_rd[1]) : 1'b0;
+wire        mlive  = (k1 && m_en[0] && (m_rd[0] | m_wr[0])) || (k2 && m_en[1] && (m_rd[1] | m_wr[1]));
+wire        bmatch = (w_k == 2'd0) ? (!w_wr && en_sys && c_req && w_d == c_lba) :
+                     (((k1 && m_en[0] && w_d == m_lba[31:0]) || (k2 && m_en[1] && w_d == m_lba[63:32])) && mup);
+wire        live   = (w_k == 2'd0) ? (en_sys && c_req) : mlive;
+/* verilator lint_off UNUSEDSIGNAL */   // a block of at most MFRAME (1,020) words
+wire [18:0] mwn    = ({13'd0, k2 ? m_cnt[11:6] : m_cnt[5:0]} + 19'd1) << ({1'b0, BLKSZ} + 4'd5);
+/* verilator lint_on UNUSEDSIGNAL */
+// the frame in flight gets no more words: the disc slot's bind fell (a mount slot's is held while its record is
+// walked), or the enable did; it is filled from its next word
 wire        cut    = fs == F_STREAM && !have && !qv && !em &&
-                     ((!bind_s && mt == 2'd2) || (!hen_s && ml == 2'd2));
+                     ((fsel == 2'd0 && !bind_s[0] && mt == 2'd2) || (!hen_s && ml == 2'd2));
 wire [31:0] wsrc   = fz ? 32'd0 : w_d;
+wire [15:0] din    = (fsel == 2'd2) ? m_lba[47:32] : m_lba[15:0];   // the WRITE's buffer word, through its mux
 function automatic [13:0] sadr(input wide, input [12:0] w, input [1:0] j);
 	sadr = wide ? {w, j[0]} : {w[11:0], j};
 endfunction
 
-assign o_ack = fack;
-assign rest  = fidle && !have && !qv && !em && !fack && !o_wr && !en_sys && !a_go;
+assign o_ack = fack[0];
+assign m_ack = fack[2:1] & MNT_EN;
+assign rest  = fidle && !have && !qv && !em && fack == 3'd0 && !o_wr && !en_sys && m_en == 2'd0 && !a_go;
 
 always @(posedge clk_sys) begin
 	a_go <= 1'b0;
@@ -803,12 +1082,14 @@ always @(posedge clk_sys) begin
 	qv <= pop;
 	if (pop) have <= 1'b0;
 	gc <= (gc == 4'd15) ? gc : gc + 4'd1;
-	mt <= (have || bind_s) ? 2'd0 : (mt == 2'd2) ? 2'd2 : mt + 2'd1;
+	mt <= (have || bind_s[0]) ? 2'd0 : (mt == 2'd2) ? 2'd2 : mt + 2'd1;
 	ml <= (have || hen_s) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
 
-	// the mux follows the bind level only while the feeder is idle and the SPI ack is low, and moves here only
-	// while the commit mark reads 0
-	if (fidle && !hps_ack) en_sys <= bind_s & (en_sys | ~c_commit);
+	// each slot's mux follows its bind level only while the feeder is off that slot and its SPI ack is low, and
+	// moves here only while the commit mark reads 0
+	if ((fidle || fsel != 2'd0) && !hps_ack) en_sys <= bind_s[0] & (en_sys | ~c_commit);
+	if (MNT_EN[0] && (fidle || fsel != 2'd1) && !m_hps_ack[0]) m_en[0] <= bind_s[1] & (m_en[0] | ~c_commit);
+	if (MNT_EN[1] && (fidle || fsel != 2'd2) && !m_hps_ack[1]) m_en[1] <= bind_s[2] & (m_en[1] | ~c_commit);
 
 	if (fs == F_FILL && !em && gap_ok) begin
 		o_wr  <= 1'b1;
@@ -820,7 +1101,7 @@ always @(posedge clk_sys) begin
 		gc    <= 4'd1;
 	end
 
-	if (fidle) fack <= 1'b0;
+	if (fidle) fack <= 3'd0;
 
 	if (qv) case (fs)
 		F_IDLE: begin
@@ -829,11 +1110,20 @@ always @(posedge clk_sys) begin
 			if (hen_s && bmatch) begin
 				a_code <= A_ACCEPT;
 				fexp   <= 13'd0;
-				fack   <= 1'b1;
+				fsel   <= w_k;
+				flast  <= (w_k == 2'd0) ? FLAST : mwn[12:0] - 13'd1;
+				fack[w_k] <= 1'b1;
 				gc     <= 4'd1;
-				fs     <= F_STREAM;
+				if (w_wr) begin
+					// a WRITE: its first word's lanes are read from the buffer, GAP cycles after each address
+					o_adr <= sadr(c_wide, 13'd0, 2'd0);
+					sn    <= 2'd0;
+					wrd   <= 1'b0;
+					fs    <= F_WRITE;
+				end
+				else fs <= F_STREAM;
 			end
-			else a_code <= (hen_s && en_sys && c_req) ? A_MISMATCH : A_NOREQ;
+			else a_code <= (hen_s && live) ? A_MISMATCH : A_NOREQ;
 		end
 		F_STREAM:
 			if (head) begin
@@ -867,18 +1157,54 @@ always @(posedge clk_sys) begin
 		else if (nxt_ok) begin
 			em <= 1'b0;
 			sn <= 2'd0;
-			if (fexp >= FLAST) begin   // or past it: a frame ends from any count
+			if (fexp >= flast) begin   // or past it: a frame ends from any count
 				fexp <= 13'd0;
-				fack <= 1'b0;
+				fack <= 3'd0;
 				fs   <= F_IDLE;
 			end
 			else fexp <= fexp + 13'd1;
 		end
 	end
 
+	// a WRITE: each lane is read GAP cycles after its address; a token takes the word read, the end token drops
+	// the ack; with the enable low for two cycles and no token in hand the WRITE ends unpublished
+	if (fs == F_WRITE) begin
+		if (!wrd && gap_ok) begin
+			if (c_wide) begin
+				if (sn[0]) rword[31:16] <= din;
+				else       rword[15:0]  <= din;
+			end
+			else rword[{sn, 3'd0} +: 8] <= din[7:0];
+			if (sn == slast) wrd <= 1'b1;
+			else begin
+				sn    <= sn + 2'd1;
+				o_adr <= sadr(c_wide, fexp, sn + 2'd1);
+				gc    <= 4'd1;
+			end
+		end
+		if (have && head) begin have <= 1'b0; a_go <= 1'b1; a_code <= A_NOREQ; end
+		else if (have && w_d[0]) begin
+			have <= 1'b0; a_go <= 1'b1; a_code <= A_TOOK;
+			fack <= 3'd0;
+			fs   <= F_IDLE;
+		end
+		else if (have && wrd) begin
+			have  <= 1'b0; a_go <= 1'b1; a_code <= A_TOOK; a_d <= rword;
+			wrd   <= 1'b0;
+			sn    <= 2'd0;
+			fexp  <= fexp + 13'd1;
+			o_adr <= sadr(c_wide, fexp + 13'd1, 2'd0);
+			gc    <= 4'd1;
+		end
+		else if (!have && ml == 2'd2) begin
+			fack <= 3'd0;
+			fs   <= F_IDLE;
+		end
+	end
+
 	if (cut) fs <= F_FILL;
-	// the consumer's reset zero-fills the frame
-	if (c_reset && fs == F_STREAM) fs <= F_FILL;
+	// the consumer's reset zero-fills the disc slot's frame; a mount slot's plays out whole
+	if (c_reset && fs == F_STREAM && fsel == 2'd0) fs <= F_FILL;
 end
 
 endmodule

@@ -12,9 +12,10 @@ host-to-core rings: the OSD half writes the OSD ring's rows into every `osd`'s `
 writer's port, and the SECTOR half plays block frames into one `hps_io` slot and posts its REQUEST records ("The
 SECTOR tier as built"). `MISTER_OCRAM_FIO` adds a third host-to-core ring to that walker, ring 1: link frames
 played into `hps_io`'s download block through `lw_link`, with a mark line on `f2h_irq[12]` ("The download tier as
-built"). `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters, the GPO 27/26
+built"). `MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` add two mount slots beside the SECTOR slot: their
+reads from ring 0 and their writes as EVT records ("The mount slots as built"). `MISTER_OCRAM_DIAG` adds the diagnostic MARK records, the latency counters, the GPO 27/26
 test knobs, the GPO 25 freeze knob and the host-to-fabric torture sink (below); it cannot be built with the SECTOR
-tier. Nothing else in this document is built: no EVT, LANE or PAD tier. The SECTOR and download tiers are benched, not yet fitted
+tier. Nothing else in this document is built: no EVT, LANE or PAD tier. The SECTOR, download and mount tiers are benched, not yet fitted
 or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that
 core and host authors can read both paths side by side and say which they would build.
 
@@ -56,6 +57,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor | 60-80 ALMs |
 | `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor and `MISTER_LW` (it drives the LW sector bits of `HPS_BUS`); not `MISTER_OCRAM_DIAG`, not `MISTER_LW_SECTOR_SLOT` | about 130 ALMs beside the OSD tier, about 250 alone |
 | `MISTER_OCRAM_FIO` (PROVISIONAL), `MISTER_OCRAM_FIO_GAP` (4-7, default 4), `MISTER_OCRAM_FIO_RING` (log2 words, 2-10 or 13, default 10) | file downloads: link frames from ring 1 into `hps_io`'s download block through `lw_link`, and ring 1's mark line | the floor; not `MISTER_LW_LANE` (`link_on_two_players`) | 110-150 ALMs (ESTIMATED) |
+| `MISTER_OCRAM_MOUNT0_SLOT`, `MISTER_OCRAM_MOUNT1_SLOT`, `MISTER_OCRAM_MOUNT_FRAME` (1-1,020, default 128) (PROVISIONAL) | two mount slots (block slot index 1, 2) through `lw_save_mux`: reads from ring 0, writes as WRITE records | `MISTER_OCRAM_SECTOR_SLOT` (`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), so `MISTER_LW`; not `MISTER_LW_SECTOR_SLOT` | 195-205 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_EVT` | the status back-channel and `hps_io`'s flags as records | the floor | 70-120 ALMs |
 | `MISTER_OCRAM_LANE` | link frames from a ring into the frame-lane player; replies as records | `MISTER_OCRAM_EVT` | 130-180 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
@@ -150,10 +152,11 @@ later layout needs no host change.
 | offset | size | ring | *r* | direction | carries |
 |---|---|---|---|---|---|
 | `0x0000` | `0x0100` | control page | - | both | the hello, binds, every index, the fabric's descriptors |
-| `0x0400` | `0x0400` | PAD | 0 | host to core | pad stores |
+| `0x0400` | `0x0400` | PAD | 0 | host to core | pad stores (not built; never in a build with the mount ring) |
 | `0x1000` | `0x1000` | LANE | 1 | host to core | link frames |
 | `0x2000` | `0x2000` | OSD | 2 | host to core | image rows, 65 words each |
-| `0x4000` | `0x2000` | EVT | 3 | core to host | status, block requests, replies |
+| `0x4000` | `0x2000` | EVT | 3 | core to host | status, block requests, writes, binds, replies |
+| `0x6000` | `0x1000` | mount | 0 | host to core | the mount slots' block frames, 1,024 words (PROVISIONAL) |
 | `0x7000` | `0x8000` | SECTOR | 4 | host to core | block read frames: thirteen of 2,352 bytes |
 | `0xF000` | `0x1000` | never touched | - | - | the boot ROM's workspace |
 
@@ -186,17 +189,17 @@ replaces the firewall").
 | `0x00` | H_HELLO | host | `{0x4F43, nonce[15:0]}`, the nonce never 0; 0 = no session. Stored last |
 | `0x04` | H_BIND | host | the functions the host takes from SPI for the whole session: EVT `[8]`, LANE `[9]`, PAD `[10]`, OSD `[11]` |
 | `0x08` | H_LINE | host | bit *r*: ring *r*'s interrupt line may rise |
-| `0x0C` | H_SECTOR | host | bit 0: the SECTOR slot is served here. It may change within a session ("Records") |
+| `0x0C` | H_SECTOR | host | bit 0: the SECTOR slot is served here; bits 1, 2: the mount slots k = 1, 2 are (PROVISIONAL). Each may change within a session ("Records") |
 | `0x10` + 4*r* | H_IDX[*r*] | host | its head of a host-to-core ring, its tail of a core-to-host ring |
 | `0x30` + 4*r* | H_MARK[*r*] | host | a host-to-core ring's mark, where its descriptor declares a line: `[31]` armed, `[15:0]` an index. Only H_MARK[1] (`0x34`) is built (PROVISIONAL) |
 | `0x80` | C_HELLO | fabric | the master's state, below; in a session, the echo of H_HELLO, stored last |
 | `0x84` | C_VERSION | fabric | `{major, minor}` of the layout |
-| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; the rest 0 |
+| `0x88` | C_CAPS | fabric | `[4:0]` ring *r* is built; `[8]` the bell register; `[9]` a configuration-string record follows the hello; `[10]` the master posts a BIND record after every C_BIND store (PROVISIONAL); `[11]` reserved; the rest 0 |
 | `0x8C` | C_STATE | fabric | `[7:0]` hellos taken since configuration; `[12:8]` ring *r* is stopped on a fault; `[20:16]` ring *r* ended the session before this one mid-record |
 | `0x90` + 4*r* | C_IDX[*r*] | fabric | its tail of a host-to-core ring, its head of a core-to-host ring |
-| `0xA4` | C_BIND | fabric | the binds in effect: H_BIND's bits, and bit 0 = the SECTOR slot's mux is on the mailbox side. Stored at every change; a bind or its drop has taken effect when this word shows it |
+| `0xA4` | C_BIND | fabric | the binds in effect: H_BIND's bits, bit 0 = the SECTOR slot's mux is on the mailbox side, bits 1, 2 = each mount slot's is (PROVISIONAL). Stored at every change; a bind or its drop has taken effect when this word shows it |
 | `0xB0` + 4*r* | C_RING[*r*] | fabric | `{kind[31:27], line ordinal[26:22], log2 words[21:18], 0[17:14], offset in words[13:0]}`; kind is the function's kind in the LW directory (PAD 1, SECTOR 2, OSD 3, EVT 4, LANE 5); 0 = absent |
-| `0xD0` + 4*n* | C_K[*n*], *n* 0-11 | fabric | `[0..7]` SECTOR: the SECTOR block's K0-K7 for its one slot, with K0's FIFO field 0 and K2 = 1. `[8]` OSD: OSDBUF's K0, `{rows, row bytes}`. `[9]` the download tier: `{select mask[31:16], gap[15:0]}`, the mask `0x0002` (UIO select 1, the file-I/O block) (PROVISIONAL). `[10..11]` 0 |
+| `0xD0` + 4*n* | C_K[*n*], *n* 0-11 | fabric | `[0..7]` SECTOR: the SECTOR block's K0-K7 for its one slot, with K0's FIFO field 0 and K2 = 1. `[8]` OSD: OSDBUF's K0, `{rows, row bytes}`. `[9]` the download tier: `{select mask[31:16], gap[15:0]}`, the mask `0x0002` (UIO select 1, the file-I/O block) (PROVISIONAL). `[10..11]` the mount slots k = 1, 2: `{RD 0x01[31:24], slot[19:16], frame words[12:0]}`, 0 for an undeclared slot (PROVISIONAL) |
 
 | C_HELLO | the master is | stored by |
 |---|---|---|
@@ -301,9 +304,12 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 | ring | kind | payload | meaning |
 |---|---|---|---|
 | OSD | `0x01` ROW, `arg` = row | 64 words: the row's 256 bytes | written into `osd_buffer` as the LW OSDBUF writer does, under the same guard |
-| SECTOR | `0x10` FRAME, `arg` = slot index | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
+| SECTOR | `0x10` FRAME, `arg` = `{blk_cnt[5:0], k[1:0]}`, 0 | the LBA, then the frame's words | played into the slot if it answers the core's standing request |
+| mount | `0x10` FRAME, `arg` = `{blk_cnt[5:0], k[1:0]}`, k 1 or 2 | the LBA, then the block's `(blk_cnt + 1) << (BLKSZ + 5)` words | played into slot k if it answers its standing read with that LBA and length (PROVISIONAL) |
 | EVT | `0x20` STATUS | four words | a status transfer landed, whole |
-| EVT | `0x21` REQUEST, `arg` = slot index | the LBA | the bound slot's request stands and the ring holds no answer, including a request that already stood when the bind arrived |
+| EVT | `0x21` REQUEST, `arg` = `{blk_cnt[5:0], k[1:0]}` | the LBA | the bound slot's request stands and the ring holds no answer, including a request that already stood when the bind arrived |
+| EVT | `0x26` WRITE, `arg` = `{blk_cnt[5:0], k[1:0]}`, `len` = 1 + n | the LBA, then the block's n words | mount slot k's write, read from the core's buffer; its head store is the publish (PROVISIONAL) |
+| EVT | `0x27` BIND, `arg` = C_BIND[7:0], `len` 0 | none | posted after every C_BIND store (PROVISIONAL) |
 | EVT | `0x22` REPLY | reply words | the frame lane's captured replies |
 | EVT | `0x23` MARK, `arg` = ring | its deepest fill | a ring's high-water mark, for sizing |
 | EVT | `0x24` CONFSTR | the string, four bytes a word | the configuration string, once after the hello |
@@ -313,6 +319,13 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 - **OSD.** A byte in rows 8-15 sets highres, as an LW or SPI write does, so a host sends an SPI OSD control word
   only when the OSD ring is drained (`C_IDX` equals its head), and binds the OSD before its first row. There is no
   atomic flip: a repaint is visible as it lands.
+- **FRAME, REQUEST and WRITE share one `arg`,** `{blk_cnt[5:0], k[1:0]}`. For k = 0 (the SECTOR slot) it is 0 in
+  both directions: the frame's length is C_K[4]'s.
+- **BIND `0x27`:** `arg` = C_BIND[7:0], no payload. Posted after every C_BIND store, under the rule that holds the
+  bit-0 drop behind a record in flight. A REQUEST read before a BIND record that shows its slot's bit clear is void.
+- **The mount slots** each keep the SECTOR slot's rule: a request that already stands when its bind arrives is that
+  bind's first REQUEST. A host that has stopped polling GET_SDSTAT relies on it.
+- **Ring 1:** no bind bit. A published LFRAME is played; nothing is taken from the link.
 - **Block frames** carry their slot and LBA. While no request stands, the frame at the ring's tail waits. When one
   stands, the fabric plays the tail frame if it answers it and discards it if it does not, and posts a REQUEST when
   the ring holds no answer. So a host may queue blocks ahead of the core's requests, and a wrong guess costs only
@@ -341,9 +354,9 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
   that stood on the mailbox then shows in the SPI poll, and if it still stands at the next bind the fabric posts it
   again. Serve SPI; once C_BIND shows 0 or C_HELLO no longer holds the echo, drain the core-to-host ring, change
   the mount, then set the bit again. No stale frame survives and no request is left unanswered.
-- **Save slots are not carried.** A save slot's read must reach the core whole or not at all, which the SECTOR
-  block keeps by holding the frame in its FIFO; a consumer with no FIFO cannot withdraw a frame that the session's
-  end cuts short. Save slots stay on SPI, or on the SECTOR block of `docs/LW_BRIDGE.md` where that is built.
+- **Mount slots are carried, with no hold and no staging.** A block the session's end cuts ends as a SECTOR frame
+  does: a read is zero-filled from the cut, a WRITE is never published, and the core never waits. A published frame
+  plays whole while RUN stays up.
 
 ### The SECTOR tier as built
 
@@ -370,7 +383,8 @@ K3, K6 and K7 read 0. The wire items (the kind, the K words, the REQUEST's `arg`
   is read on the poll period, and back to back only while a record can be consumed.
 - **H_SECTOR bit 0 cleared:** a frame being played finishes; the walker then reads H_IDX[4] and stores C_IDX[4] =
   that head, which discards every queued frame; only after that does the mux return to SPI and C_BIND bit 0 = 0 get
-  stored. That store waits for a REQUEST record in flight to finish, and no REQUEST starts once the drop is owed.
+  stored. Every C_BIND store waits for a record in flight to finish, no REQUEST starts once a store is owed, and the
+  store's BIND record (C_CAPS bit 10) is the next record posted.
 - **A fault** on ring 4 (a head more than the ring ahead, a length past the head: C_STATE bit 12) or on ring 3 (C_STATE
   bit 11) drops the bind the same way, without the flush. A session that ends mid-record sets bit 20 at the next
   hello.
@@ -379,6 +393,33 @@ K3, K6 and K7 read 0. The wire items (the kind, the K words, the REQUEST's `arg`
   four bytes, GAP apart, the first GAP after the ack. Each word is held in the crossing's capture register until its
   strobes have issued. It zero-fills the rest of a frame on the consumer's reset, or once the session's enable or the
   bind level has been low for two cycles while a word is awaited.
+
+### The mount slots as built
+
+`MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` (each an `hps_io` slot, 0-15, neither the SECTOR slot nor the
+other's) and `MISTER_OCRAM_MOUNT_FRAME` (the largest block in 32-bit words, 1-1,020, default 128) declare them; a
+build stops on an unservable one (`ocram_mount_unservable_geometry`) and without `MISTER_OCRAM_SECTOR_SLOT`
+(`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), whose feeder, walker and record writer they share. The core hooks
+each slot through `lw_save_mux`, its `core_din` the slot's `sd_buff_din`. The hello stores C_CAPS bit 0, C_IDX[0] = 0,
+C_RING[0] = `{kind 2, no line, 1,024 words, 0x6000}` (`0x10281800`) and C_K[10, 11]. Every wire item here is
+PROVISIONAL.
+
+- **The binds:** H_SECTOR bit k asks for mount slot k and C_BIND bit k answers, under the SECTOR slot's rules, with
+  no flush: no frame waits in ring 0.
+- **A request** crosses from `clk_sys` as `{k, wr, blk_cnt, offered, lba}`, one slot's at a time; a block longer
+  than `MISTER_OCRAM_MOUNT_FRAME` is never offered. The save-slot bits of `HPS_BUS` carry no `blk_cnt`, so the
+  Template ties it to 0: one block a request.
+- **A read** is posted at once as REQUEST `{0x21, {blk_cnt, k}, 1}` then the LBA. The host answers with one FRAME on
+  ring 0; the feeder accepts it only if the request stands with that LBA and length, raises the slot's ack and plays
+  `hps_io`'s strobes as for the SECTOR slot. Any other record on ring 0 is skipped by its length.
+- **A write:** the feeder raises the slot's ack, steps the buffer address from 0 and reads each word back through
+  `lw_save_mux`, whose LBA field carries the buffer word while the slot's mux and ack are up. The master posts WRITE
+  `{0x26, {blk_cnt, k}, 1 + n}`, the LBA and the n words, behind a room check of n + 2 words; the ack falls once the
+  head store has landed. With no room the WRITE waits, its ack up.
+- **The record writer** posts every record one at a time: a REQUEST or WRITE starts only while its slot's C_BIND
+  bit is stored 1 and no C_BIND store or BIND is owed; a C_BIND store waits for a record in flight.
+- **A fault** on ring 0 (C_STATE bit 8) drops both mount binds; a session that ends mid-record sets bit 16 at the
+  next hello.
 
 ### The download tier as built
 
@@ -421,7 +462,8 @@ walker serves it in every session.
 - that the top 4 KB (`0xF000`-`0xFFFF`) is the mailbox's: it is never read or written;
 - that the session survives an identification, a core reset through GPO, or an HPS reset;
 - that a bind is in effect because it was stored: C_BIND says when;
-- that a save slot can be served here;
+- that a mount request longer than `MISTER_OCRAM_MOUNT_FRAME` is served by a host that no longer polls: size the
+  macro to the core's largest request;
 - that an index it does not write holds still, or that an index it writes is read at once: the fabric polls;
 - that an interrupt means the ring holds a record: one may arrive after the drain.
 
@@ -492,8 +534,8 @@ share the master at record granularity, so two running together split one budget
 - Write-combined ordering with the ring part-full (every torture run kept it full; `torture --band` is the probe, not yet run on the rig).
 - What this traffic costs the other HPS masters (a loaded run lost 3.5 %, not attributed).
 - Read bursts and a multi-word crossing: designed in prose only.
-- The SECTOR tier and `hps_ocram_rx.sv`: benched only (`tb/ocram_tb.sv`, `tb/sfeed_tb.sv`), not fitted, not run on
-  hardware.
+- The SECTOR tier, the mount slots and `hps_ocram_rx.sv`: benched only (`tb/ocram_tb.sv`, `tb/sfeed_tb.sv`), not
+  fitted, not run on hardware.
 - A greenfield host driving a real core's menu over the ring on hardware (the probe has; the host path is in diagnosis).
 - A stock Main host.
 - A warm reset with `warmramgrp.enable` cleared: stock U-Boot hangs on a hardware warm reset with or without this

@@ -183,6 +183,13 @@ lint() {
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
     slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv \
       sys/hps_ocram_rx.sv >> "$1" 2>&1 || st=1
+    # the mount slots beside the SECTOR tier: the master, the walker and feeder, the window's save-slot nets, the muxes
+    m="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
+    t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_sfeed --top lw_sys_window --top lw_save_mux"
+    t="$t --top lw_blk_mux -G SEC_EN=1 -G MNT_EN=3 -G SEC_EXT=1 -G MNT_EXT=3"
+    echo "slang -DLW_DIAG=$d $m $t" >> "$1"
+    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv sys/hps_ocram_rx.sv \
+      >> "$1" 2>&1 || st=1
   done
   return $st
 }
@@ -196,7 +203,7 @@ sfeedc() {
             "g5w1:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=1" "g5w0:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=0" \
             "f588:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1 -DSFEED_TB_FRAME=588" \
             "tpl:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1 -DSFEED_TB_SYS_HP_PS=25000"; do
-    t=${sh%%:*}; X=${sh#*:}
+    t=${sh%%:*}; X=${sh#*:}   # every shape also compares the mount slot k = 1 against the save slot X0
     for m in plain cdc; do
       d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
       echo "-- the trace bench compiles ($t, $m)" >> "$1"
@@ -245,8 +252,8 @@ fioc() {
   done
 }
 
-# ocram LOG: arm O. The bench compiles five times (with DIAG; the OSD shape and the OSD + SECTOR shape, each at two
-# clk_sys rates), each plain and
+# ocram LOG: arm O. The bench compiles once per shape (with DIAG; the OSD shape, the OSD + SECTOR shape, the download
+# shape and the OSD + SECTOR + mount slots shape, each at two clk_sys rates), each plain and
 # with the crossing cells' delay models, runs under every seed of LW_TB_SEEDS, then verilator lints
 # hps_ocram_master.sv and hps_ocram_rx.sv with lw_cdc.sv (each OCRAM macro set), warnings as errors.
 ocram() {
@@ -256,12 +263,14 @@ ocram() {
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10"
   OCS="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
   OCF="$OCE -DMISTER_OCRAM_FIO"
+  OCM="$OCS -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
   # shape:macros; diag at the bench's 50 MHz, the others at 33.8688 MHz and the Template's 20 MHz
   for m in plain cdc; do
-    for c in diag osd33 osd20 sec33 sec20 fio33 fio20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20; do
       case $c in diag) D=$OCD;; osd33) D="$OCE -DOCRAM_TB_SYS_HP_PS=14762";; osd20) D="$OCE -DOCRAM_TB_SYS_HP_PS=25000";;
         sec33) D="$OCS -DOCRAM_TB_SYS_HP_PS=14762";; sec20) D="$OCS -DOCRAM_TB_SYS_HP_PS=25000";;
-        fio33) D="$OCF -DOCRAM_TB_SYS_HP_PS=14762";; fio20) D="$OCF -DOCRAM_TB_SYS_HP_PS=25000";; esac
+        fio33) D="$OCF -DOCRAM_TB_SYS_HP_PS=14762";; fio20) D="$OCF -DOCRAM_TB_SYS_HP_PS=25000";;
+        mnt33) D="$OCM -DOCRAM_TB_SYS_HP_PS=14762";; mnt20) D="$OCM -DOCRAM_TB_SYS_HP_PS=25000";; esac
       d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
       F=$OCB; case $c in fio*) F="$OCB sys/lw_lane.sv sys/hps_io.sv";; esac
       echo "-- the bench compiles ($c, $m)" >> "$1"
@@ -274,7 +283,7 @@ ocram() {
     done
   done
   for m in plain cdc; do
-    for c in diag osd33 osd20 sec33 sec20 fio33 fio20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20; do
       [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
       for s in ${LW_TB_SEEDS:-1 2 3}; do
         vvp -n "$O/ocramO_${c}_$m.vvp" +lw_seed=$s > "$O/ocramO_${c}_$m.$s.log" 2>&1 &
@@ -283,7 +292,7 @@ ocram() {
     done
   done
   for s in ${LW_TB_SEEDS:-1 2 3}; do
-    for c in diag osd33 osd20 sec33 sec20 fio33 fio20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20; do
       for m in plain cdc; do
         [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
         echo "== seed $s $c $m" >> "$1"
@@ -298,14 +307,16 @@ ocram() {
     vok=1
     for VS in "diag:-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD" "osd:-DMISTER_OCRAM -DMISTER_OCRAM_OSD" \
               "sec:-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2" "both:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2" \
-              "fio:-DMISTER_OCRAM -DMISTER_OCRAM_FIO" "fioall:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_FIO"; do
+              "fio:-DMISTER_OCRAM -DMISTER_OCRAM_FIO" "fioall:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_FIO" \
+              "mnt:-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_MOUNT1_SLOT=4"; do
       vn=${VS%%:*}; VF=${VS#*:}
       for t in hps_ocram_master hps_ocram_rx hps_ocram_sfeed hps_ocram_fplay; do
         G=""; fl=$t
-        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
+        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both|fioall) fl=hps_ocram_rx;; mnt) fl=hps_ocram_rx; G="-GMNT_EN=3";;
+          *) continue;; esac; }
         [ $t = hps_ocram_fplay ] && { case $vn in fio|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
         [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";;
-          fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; esac
+          fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; mnt) G="-GOSD_EN=0 -GSEC_EN=1 -GMNT_EN=3";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
              > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
@@ -411,6 +422,12 @@ hps_ocram_rx #(.OSD_EN(0), .SEC_EN(1), .FRAME(`XO_FRAME), .GAP(`XO_GAP)) r();
 `ifdef XO_FRX
 hps_ocram_rx #(.OSD_EN(0), .SEC_EN(`XO_SEC), .FIO_EN(1), .FIO_RING(`XO_RING), .FIO_GAP(`XO_FGAP)) f();
 `endif
+`ifdef XO_MMASTER
+hps_ocram_master #(.SEC_SLOT(1), .MNT0_SLOT(`XO_M0), .MNT1_SLOT(`XO_M1), .MNT_FRAME(`XO_MF)) mm();
+`endif
+`ifdef XO_MRX
+hps_ocram_rx #(.OSD_EN(0), .SEC_EN(0), .FIO_EN(1), .MNT_EN(2'b01)) mr();
+`endif
 endmodule
 EOS
   XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
@@ -451,6 +468,19 @@ bad|ocram_fio_ring_on_ring4_span|a download ring of 2^13 beside DIAG|-DMISTER_OC
 ok|-|the download edges: 2^13 words alone, gap 7|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=13 -DXO_FGAP=7
 ok|-|the download edges: 2^2 words, gap 4|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=2 -DXO_FGAP=4
 ok|-|the download edges: 2^10 words, gap 7|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_FRX -DXO_SEC=0 -DXO_RING=10 -DXO_FGAP=7
+bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT0_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT0_SLOT=2
+bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|MISTER_OCRAM_MOUNT1_SLOT without the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_MOUNT1_SLOT=3
+bad|ocram_sector_needs_MISTER_LW|the mount slots without MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2
+bad|sector_slot_on_two_feeders|the mount slots beside the LW SECTOR block|-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DXO_WIN
+bad|ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT|the walker with a mount slot and no SECTOR ring|-DMISTER_OCRAM -DMISTER_OCRAM_FIO -DXO_MRX
+ok|-|two mount slots beside the SECTOR tier|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_MMASTER -DXO_M0=2 -DXO_M1=3 -DXO_MF=256
+bad|ocram_mount_unservable_geometry|a mount slot on the disc slot|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=1 -DXO_MMASTER -DXO_M0=1 -DXO_M1=3 -DXO_MF=256
+bad|ocram_mount_unservable_geometry|two mount slots on one hps_io slot|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=2 -DXO_MMASTER -DXO_M0=2 -DXO_M1=2 -DXO_MF=256
+bad|ocram_mount_unservable_geometry|a mount slot of 16|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT1_SLOT=16 -DXO_MMASTER -DXO_M0=2 -DXO_M1=16 -DXO_MF=256
+bad|ocram_mount_unservable_geometry|a mount frame of 0 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DXO_MMASTER -DXO_M0=2 -DXO_M1=3 -DXO_MF=0
+bad|ocram_mount_unservable_geometry|a mount frame of 1021 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DXO_MMASTER -DXO_M0=2 -DXO_M1=3 -DXO_MF=1021
+ok|-|the mount edges: 1,020 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DXO_MMASTER -DXO_M0=2 -DXO_M1=3 -DXO_MF=1020
+ok|-|the mount edges: 1 word, slot 15|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT1_SLOT=15 -DXO_MMASTER -DXO_M0=2 -DXO_M1=15 -DXO_MF=1
 EOG
   echo "-- no tier macro" >> "$1"
   iverilog -g2012 -I sys -s lw_x_top -o "$O/lw_x.vvp" "$O/lw_x_top.sv" sys/hps_io.sv > "$O/lw_x.err" 2>&1

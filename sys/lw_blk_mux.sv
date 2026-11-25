@@ -69,10 +69,28 @@ assign core_data = en ? HPS_BUS[113:98] : hps_data;
 endmodule
 
 `ifdef MISTER_LW_SECTOR_SLOT
-// emu side of a save slot on the LW SECTOR route (MISTER_LW_SECTOR_SLOT only): SAVE 0 is the slot MISTER_LW_SAVE0_SLOT declares (the block's
-// slot index 1), SAVE 1 the MISTER_LW_SAVE1_SLOT one (index 2). While the slot's en_sys is set its rd/wr are hidden
-// from hps_io and the slot's ack/write/addr/data come from the feeder, the write gated by the slot's own ack. The
-// core's buffer read data keeps feeding hps_io's sd_buff_din (the SPI save path). All on hps_io's clk_sys.
+`define LW_SAVE_MUX_BUILT
+`endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_SAVE_MUX_BUILT
+`define LW_SAVE_MUX_DIN
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef LW_SAVE_MUX_BUILT
+`define LW_SAVE_MUX_BUILT
+`endif
+`ifndef LW_SAVE_MUX_DIN
+`define LW_SAVE_MUX_DIN
+`endif
+`endif
+`ifdef LW_SAVE_MUX_BUILT
+// emu side of a save slot on the LW SECTOR route (MISTER_LW_SECTOR_SLOT), or of a mount slot on the OCRAM one
+// (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT): SAVE 0 is the slot MISTER_LW_SAVE0_SLOT or MISTER_OCRAM_MOUNT0_SLOT
+// declares (the slot index 1), SAVE 1 the MISTER_LW_SAVE1_SLOT or MISTER_OCRAM_MOUNT1_SLOT one (index 2). While
+// the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's ack/write/addr/data come from the feeder,
+// the write gated by the slot's own ack. The core's buffer read data keeps feeding hps_io's sd_buff_din (the SPI
+// save path); on the OCRAM route it also crosses to the feeder: while en_sys and the slot's ack are both up the
+// LBA field carries core_din, the word at core_addr. All on hps_io's clk_sys.
 // HPS_BUS bits: to the core [128 + 2 SAVE] en_sys, [129 + 2 SAVE] ack, [97] the shared strobe, [113:98] its data,
 // [127:114] its address; from the core [201:167] (SAVE 0) or [236:202] (SAVE 1) {lba[31:0], rd, wr, hps_ack},
 // and [378 + SAVE], this mux's presence bit, a constant 1.
@@ -84,6 +102,9 @@ module lw_save_mux #(parameter SAVE = 0)
 	input wire         core_rd,
 	input wire         core_wr,
 	input wire  [31:0] core_lba,    // kept, crossed and compared on the slot's MISTER_LW_SAVE<n>_LBA_BITS
+	/* verilator lint_off UNUSEDSIGNAL */   // read on the OCRAM route only
+	input wire  [15:0] core_din,    // the core's buffer word at core_addr (its sd_buff_din)
+	/* verilator lint_on UNUSEDSIGNAL */
 	output wire        core_ack,
 	output wire        core_write,
 	output wire [13:0] core_addr,
@@ -102,7 +123,11 @@ localparam U = SAVE ? 202 : 167;
 wire en  = HPS_BUS[128 + 2 * SAVE];
 wire ack = HPS_BUS[129 + 2 * SAVE];
 
+`ifdef LW_SAVE_MUX_DIN
+assign HPS_BUS[U + 34:U]     = {(en & ack) ? {16'd0, core_din} : core_lba, core_rd, core_wr, hps_ack};
+`else
 assign HPS_BUS[U + 34:U]     = {core_lba, core_rd, core_wr, hps_ack};
+`endif
 assign HPS_BUS[378 + SAVE]   = 1'b1;
 
 assign hps_rd     = core_rd & ~en;
@@ -113,6 +138,12 @@ assign core_addr  = en ? HPS_BUS[127:114]     : hps_addr;
 assign core_data  = en ? HPS_BUS[113:98]      : hps_data;
 
 endmodule
+`endif
+`ifdef LW_SAVE_MUX_DIN
+`undef LW_SAVE_MUX_DIN
+`endif
+`ifdef LW_SAVE_MUX_BUILT
+`undef LW_SAVE_MUX_BUILT
 `endif
 
 `default_nettype wire

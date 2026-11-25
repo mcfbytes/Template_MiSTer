@@ -666,7 +666,8 @@ assign cd_ack = TB_GEOMW ? 1'b0 : p_ack, cd_wr = TB_GEOMW ? 1'b0 : p_wr, cd_addr
 lw_save_mux #(.SAVE(0)) sv1_lw
 (
 	.HPS_BUS(`TB_CORE_BUS),
-	.core_rd(sv1.rd), .core_wr(sv1.wr), .core_lba(sv1.lba), .core_ack(sv1_ack), .core_write(sv1_write),
+	.core_rd(sv1.rd), .core_wr(sv1.wr), .core_lba(sv1.lba), .core_din(16'd0), .core_ack(sv1_ack),
+	.core_write(sv1_write),
 	.core_addr(sv1_addr), .core_data(sv1_din),
 	.hps_rd(sd_rd[TB_S1H]), .hps_wr(sd_wr[TB_S1H]), .hps_ack(sd_ack[TB_S1H]), .hps_write(sd_buff_wr),
 	.hps_addr(sd_addr14), .hps_data(sd_dout16)
@@ -678,7 +679,8 @@ assign sv2_addr = sd_addr14, sv2_din = sd_dout16;
 lw_save_mux #(.SAVE(1)) sv2_lw
 (
 	.HPS_BUS(`TB_CORE_BUS),
-	.core_rd(sv2.rd), .core_wr(sv2.wr), .core_lba(sv2.lba), .core_ack(sv2_ack), .core_write(sv2_write),
+	.core_rd(sv2.rd), .core_wr(sv2.wr), .core_lba(sv2.lba), .core_din(16'd0), .core_ack(sv2_ack),
+	.core_write(sv2_write),
 	.core_addr(sv2_addr), .core_data(sv2_din),
 	.hps_rd(sd_rd[TB_S2H]), .hps_wr(sd_wr[TB_S2H]), .hps_ack(sd_ack[TB_S2H]), .hps_write(sd_buff_wr),
 	.hps_addr(sd_addr14), .hps_data(sd_dout16)

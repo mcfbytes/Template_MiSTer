@@ -52,7 +52,13 @@
 //  * MISTER_OCRAM_SECTOR_SLOT (not with MISTER_OCRAM_DIAG: the record writer and the span are shared): the SECTOR
 //    ring r = 4, H_SECTOR read in the session poll, C_BIND bit 0 (stored as hps_ocram_rx reports it), C_K[0..7],
 //    and the REQUEST record {0x21, 0, 1} then the LBA, written by the EVT ring's writer behind a room check of 2
-//    words. A store of C_BIND that drops bit 0 waits for a record in flight, and no REQUEST starts once it is owed.
+//    words. After every C_BIND store it posts BIND {0x27, C_BIND[7:0], 0} (C_CAPS bit 10): a C_BIND store waits
+//    for a record in flight and for an owed BIND, and no REQUEST or WRITE starts while either is owed.
+//  * MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT (beside the SECTOR tier): the mount ring r = 0 (hps_ocram_rx plays its
+//    FRAME records), C_CAPS bit 0, C_RING[0], C_K[10, 11], H_SECTOR and C_BIND bits 1, 2, and the mount slots'
+//    records: REQUEST {0x21, {blk_cnt, k}, 1} then the LBA, and WRITE {0x26, {blk_cnt, k}, 1 + n} then the LBA and
+//    the n words hps_ocram_rx hands over one at a time, behind a room check of n + 2 words; the head store
+//    publishes it and m_pub tells hps_ocram_rx, whose feeder then drops the slot's ack.
 //  * MISTER_OCRAM_FIO: the download ring r = 1 (hps_ocram_rx plays its LFRAME records), C_CAPS bit 1, C_RING[1]
 //    with line ordinal 5, C_K[9] {sel mask, gap}, and the ring's mark line: H_MARK[1] is read in the session poll,
 //    and the line (mark_line, f2h_irq[12]) is high in a session while H_MARK[1] bit 31 is set and the ring's tail
@@ -63,8 +69,8 @@
 // H_IDX[2], H_IDX[3], H_IDX[4]; the fabric half C_HELLO, C_VERSION, C_CAPS, C_STATE, C_IDX[2], C_IDX[3],
 // C_IDX[4], C_BIND, C_RING[2..4], C_K[8]; the EVT ring at EVT_BASE, 2,048 words; the torture ring at TS_BASE,
 // 8,192 words (the SECTOR span, DIAG test cores only); H_SECTOR and C_K[0..2, 4, 5] with the SECTOR tier;
-// H_MARK[1], C_IDX[1], C_RING[1] and C_K[9] with the download tier. The OSD, SECTOR and download rings are
-// hps_ocram_rx.sv's.
+// H_MARK[1], C_IDX[1], C_RING[1] and C_K[9] with the download tier; C_IDX[0], C_RING[0] and C_K[10, 11] with the
+// mount slots. The OSD, SECTOR, download and mount rings are hps_ocram_rx.sv's.
 // Every other word is never read and never written.
 
 `ifndef MISTER_OCRAM_POLL
@@ -82,7 +88,11 @@ module hps_ocram_master #(
 	parameter  [2:0] SEC_BLKSZ = 3'd2,
 	// The download tier's declaration (MISTER_OCRAM_FIO_RING, MISTER_OCRAM_FIO_GAP), for C_RING[1] and C_K[9]
 	parameter [31:0] FIO_RING  = 32'd10,
-	parameter [31:0] FIO_GAP   = 32'd4
+	parameter [31:0] FIO_GAP   = 32'd4,
+	// The mount slots' declaration (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT, _MOUNT_FRAME), for C_K[10, 11]
+	parameter [31:0] MNT0_SLOT = 32'd2,
+	parameter [31:0] MNT1_SLOT = 32'd3,
+	parameter [31:0] MNT_FRAME = 32'd128
 )
 (
 	input  wire        clk,          // clk_100m == h2f_user0_clk
@@ -114,16 +124,30 @@ module hps_ocram_master #(
 	/* verilator lint_off UNUSEDSIGNAL */   // the VERDICT record's (DIAG), the REQUEST's (SECTOR): one or the other
 	input  wire [15:0] osd_rows,     // ROW records the OSD walker finished this session
 	input  wire [15:0] osd_deepest,  // its deepest fill
-	output wire        sec_ask,      // H_SECTOR bit 0, read this session
+	output wire  [2:0] sec_ask,      // H_SECTOR bits 2:0, read this session
 	output wire        evt_stop,     // the EVT ring stopped on a fault
 	input  wire        c0_sfault,    // one cycle: the SECTOR ring stopped on a fault
 	input  wire        c0_smid,      // level: a SECTOR record is part-consumed
-	input  wire        c0_sbind,     // the C_BIND bit 0 to store
+	input  wire  [2:0] c0_sbind,     // the C_BIND bits 2:0 to store
 	input  wire        c0_wide,      // hps_io's io_wide, through a crossing cell (C_K[1])
 	input  wire        rq_post,      // a REQUEST for rq_lba is owed
 	input  wire [31:0] rq_lba,
 	/* verilator lint_on UNUSEDSIGNAL */
 	output wire        rq_start,     // one cycle: that REQUEST's header store is launched
+	/* verilator lint_off UNUSEDSIGNAL */   // the mount slots' (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT)
+	input  wire        c0_mfault,    // one cycle: the mount ring stopped on a fault
+	input  wire        c0_mmid,      // level: a mount record is part-consumed
+	input  wire        m_post,       // a mount slot's REQUEST or WRITE is owed
+	input  wire        m_write,      // it is a WRITE
+	input  wire  [7:0] m_arg,        // {blk_cnt, k}
+	input  wire [10:0] m_n,          // the block's words
+	input  wire [31:0] m_lba,
+	input  wire        m_wv,         // a WRITE's next word is in m_wd
+	input  wire [31:0] m_wd,
+	/* verilator lint_on UNUSEDSIGNAL */
+	output wire        m_start,      // one cycle: that record's header store is launched
+	output wire        m_wtake,      // one cycle: a WRITE word's store is launched
+	output wire        m_pub,        // one cycle: the WRITE's head store is done
 	/* verilator lint_off UNUSEDSIGNAL */   // the download tier's (MISTER_OCRAM_FIO)
 	input  wire [15:0] f_tail,       // the download ring's tail, as last stored in C_IDX[1]
 	input  wire        c0_ffault,    // one cycle: the download ring stopped on a fault
@@ -186,6 +210,10 @@ localparam [15:0] H_LINE  = 16'h0008;      // host: bit 3 lets the EVT line rise
 localparam [15:0] H_SECTOR = 16'h000C;     // host: bit 0 asks for the SECTOR slot
 localparam [15:0] H_IDX3  = 16'h001C;      // host: the EVT ring's tail
 localparam [15:0] H_MARK1 = 16'h0034;      // host: the download ring's mark, {arm[31], 0, index[15:0]}
+localparam [15:0] C_IDX0  = 16'h0090;      // fabric: the mount ring's tail
+localparam [15:0] C_RING0 = 16'h00B0;      // fabric: the mount ring's descriptor
+localparam [15:0] C_K10   = 16'h00F8;      // fabric: the mount slots' {RD, slot, frame words}
+localparam [15:0] C_K11   = 16'h00FC;
 localparam [15:0] C_HELLO = 16'h0080;      // fabric: the master's state
 localparam [15:0] C_VERSION = 16'h0084;    // fabric: {major, minor} = 1.0
 localparam [15:0] C_CAPS  = 16'h0088;      // fabric: bit 2 OSD, bit 3 EVT, bit 4 the torture sink
@@ -222,7 +250,13 @@ localparam [31:0] C_CAPS_W      = 32'h0000_0008
                                   | 32'h0000_0010
 `endif
 `ifdef MISTER_OCRAM_SECTOR_SLOT
-                                  | 32'h0000_0010
+                                  | 32'h0000_0410
+`endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+                                  | 32'h0000_0001
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+                                  | 32'h0000_0001
 `endif
 `ifdef MISTER_OCRAM_FIO
                                   | 32'h0000_0002
@@ -240,6 +274,8 @@ localparam [31:0] C_K9_FIO      = {16'h0002, FIO_GAP[15:0]};
 localparam [31:0] C_K0_SEC      = {24'd0, SEC_GAP[7:0]};                 // {FIFO entries 0, 0, strobe gap}
 localparam [31:0] C_K4_SEC      = {8'h01, 4'd0, SEC_SLOT[3:0], 3'd0, SEC_FRAME[12:0]};   // {RD, slot, frame words}
 localparam [31:0] REQ_HEADER    = {8'h21, 8'd0, 16'd1};                  // kind REQUEST, arg 0, len 1
+// the mount ring: SECTOR, no line, 1,024 words at 0x6000
+localparam [31:0] C_RING0_MNT   = {5'd2, 5'd0, 4'd10, 4'd0, 14'h1800};
 `ifdef MENU_CORE
 localparam [15:0] OSD_ROWS      = 16'd20;                                // lw_osd's ROWS with MENU_CORE
 `else
@@ -271,6 +307,23 @@ localparam FIO_EN = 1;
 `else
 localparam FIO_EN = 0;
 `endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+localparam MNT0_EN = 1;
+`else
+localparam MNT0_EN = 0;
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+localparam MNT1_EN = 1;
+`else
+localparam MNT1_EN = 0;
+`endif
+localparam MNT_EN = MNT0_EN != 0 || MNT1_EN != 0;
+localparam [2:0] SEC_MASK = {MNT1_EN != 0, MNT0_EN != 0, 1'b1};    // the H_SECTOR bits this build serves
+// a mount slot's K word {RD, slot, frame words}, 0 if undeclared
+/* verilator lint_off UNUSEDPARAM */   // a mount build's
+localparam [31:0] C_K10_MNT     = MNT0_EN ? {8'h01, 4'd0, MNT0_SLOT[3:0], 3'd0, MNT_FRAME[12:0]} : 32'd0;
+localparam [31:0] C_K11_MNT     = MNT1_EN ? {8'h01, 4'd0, MNT1_SLOT[3:0], 3'd0, MNT_FRAME[12:0]} : 32'd0;
+/* verilator lint_on UNUSEDPARAM */
 localparam RX_EN = OSD_EN != 0 || SEC_EN != 0 || FIO_EN != 0;     // hps_ocram_rx takes port 0
 
 // A static assertion: an address that could leave the mailbox stops elaboration.
@@ -285,8 +338,16 @@ generate
 	    C_HELLO >= 16'h0100 || C_VERSION >= 16'h0100 || C_CAPS >= 16'h0100 ||
 	    C_STATE >= 16'h0100 || C_IDX2 >= 16'h0100 || C_IDX3 >= 16'h0100 || C_IDX4 >= 16'h0100 ||
 	    C_BIND >= 16'h0100 || C_RING2 >= 16'h0100 || C_RING3 >= 16'h0100 || C_RING4 >= 16'h0100 ||
-	    C_K8 >= 16'h0100) begin : g_ctrl_span
+	    C_K8 >= 16'h0100 || C_IDX0 >= 16'h0100 || C_RING0 >= 16'h0100 || C_K10 >= 16'h0100 ||
+	    C_K11 >= 16'h0100) begin : g_ctrl_span
 		ocram_control_constant_above_0xFF guard();
+	end
+	// the mount slots: hps_io slots 0-15, none the disc slot's or the other's; a block of 1 to 1,020 words
+	if ((MNT0_EN != 0 && (MNT0_SLOT > 15 || MNT0_SLOT == SEC_SLOT)) ||
+	    (MNT1_EN != 0 && (MNT1_SLOT > 15 || MNT1_SLOT == SEC_SLOT)) ||
+	    (MNT0_EN != 0 && MNT1_EN != 0 && MNT0_SLOT == MNT1_SLOT) ||
+	    (MNT_EN && (MNT_FRAME == 0 || MNT_FRAME > 1020))) begin : g_mnt_geometry
+		ocram_mount_unservable_geometry guard();
 	end
 endgenerate
 
@@ -459,8 +520,8 @@ reg         stopped_q = 1'b0;          // the EVT ring stopped on a fault this s
 reg         prev_mid_q = 1'b0;         // the EVT record of the session before this one was part-written
 reg         rec_mid_q = 1'b0;          // an EVT record is being written and not yet published
 reg         osd_bind_q = 1'b0;         // H_BIND bit 11 read: the OSD bind asked for this session
-reg  [1:0]  bind_q = 2'd0;             // the C_BIND bits {11, 0} last stored
-reg         sec_ask_q = 1'b0;          // H_SECTOR bit 0 read this session
+reg  [3:0]  bind_q = 4'd0;             // the C_BIND bits {11, 2:0} last stored
+reg  [2:0]  sec_ask_q = 3'd0;          // H_SECTOR bits 2:0 read this session (those this build serves)
 reg         bind_pend = 1'b0;          // a C_BIND store is owed
 reg         osd_stopped_q = 1'b0;      // the OSD ring stopped on a fault this session
 reg         ts_stopped_q = 1'b0;       // the torture ring stopped on a fault this session
@@ -468,6 +529,8 @@ reg         prev_mid_osd_q = 1'b0;     // the OSD record of the previous session
 reg         prev_mid_ts_q = 1'b0;      // the torture record of the previous session was part-read
 reg         fio_stopped_q = 1'b0;      // the download ring stopped on a fault this session
 reg         prev_mid_fio_q = 1'b0;     // the download record of the previous session was part-consumed
+reg         mnt_stopped_q = 1'b0;      // the mount ring stopped on a fault this session
+reg         prev_mid_mnt_q = 1'b0;     // the mount record of the previous session was part-consumed
 reg         mark_arm_q = 1'b0;         // H_MARK[1] bit 31 at its last read this session
 reg  [15:0] mark_idx_q = 16'd0;        // H_MARK[1][15:0] at its last read
 `ifdef MISTER_OCRAM_DIAG
@@ -513,20 +576,22 @@ assign evt_stop = stopped_q;
 
 // C_STATE: [7:0] hellos taken, [12:8] ring r stopped on a fault this session, [20:16] ring r ended the previous
 // session mid-record; every other bit 0. The ring numbers are fixed: EVT r = 3 (bits 11, 19), OSD r = 2 (bits
-// 10, 18), the torture ring r = 4 (bits 12, 20), the download ring r = 1 (bits 9, 17). cnt is the hello count the
-// word reports: the incremented one at a hello, the current one at a fault.
-function [31:0] state_word(input [7:0] cnt, input fe, input fo, input ft, input ff, input me, input mo, input mt,
-                           input mf);
+// 10, 18), the torture ring r = 4 (bits 12, 20), the download ring r = 1 (bits 9, 17), the mount ring r = 0 (bits
+// 8, 16). cnt is the hello count the word reports: the incremented one at a hello, the current one at a fault.
+function [31:0] state_word(input [7:0] cnt, input fe, input fo, input ft, input ff, input fm, input me, input mo,
+                           input mt, input mf, input mm);
 	begin
 		state_word = {24'd0, cnt};
 		if (me) state_word[19] = 1'b1;
 		if (mo) state_word[18] = 1'b1;
 		if (mt) state_word[20] = 1'b1;
 		if (mf) state_word[17] = 1'b1;
+		if (mm) state_word[16] = 1'b1;
 		if (fe) state_word[11] = 1'b1;
 		if (fo) state_word[10] = 1'b1;
 		if (ft) state_word[12] = 1'b1;
 		if (ff) state_word[9] = 1'b1;
+		if (fm) state_word[8] = 1'b1;
 	end
 endfunction
 
@@ -538,10 +603,10 @@ endfunction
 // The hello's stores, in their fixed order, the last C_HELLO (HJ_LAST). hj_has says whether a step is stored in this
 // build; a step that is
 // not is passed without a transaction. Args only: Quartus drops a module-scope read in a function.
-localparam [4:0] HJ_LAST = 5'd19;
+localparam [4:0] HJ_LAST = 5'd23;
 function hj_has(input [4:0] k);
 	begin
-		hj_has = (k <= 5'd19);
+		hj_has = (k <= 5'd23);
 `ifndef MISTER_OCRAM_OSD
 		if (k == 5'd3 || k == 5'd7 || k == 5'd10) hj_has = 1'b0;
 `endif
@@ -556,15 +621,26 @@ function hj_has(input [4:0] k);
 `ifndef MISTER_OCRAM_FIO
 		if (k >= 5'd16 && k <= 5'd18) hj_has = 1'b0;
 `endif
+`ifndef MISTER_OCRAM_MOUNT0_SLOT
+`ifndef MISTER_OCRAM_MOUNT1_SLOT
+		if (k >= 5'd19 && k <= 5'd22) hj_has = 1'b0;
+`endif
+`endif
 	end
 endfunction
 
-// The step after k. Without the download tier its three steps take no cycle: C_HELLO follows C_K5's step at once.
+// The step after k. Without the download tier its three steps take no cycle, nor without the mount slots their four:
+// C_HELLO follows the last step built at once.
 function [4:0] hj_next(input [4:0] k);
 	begin
 		hj_next = k + 5'd1;
 `ifndef MISTER_OCRAM_FIO
 		if (k == 5'd15) hj_next = 5'd19;
+`endif
+`ifndef MISTER_OCRAM_MOUNT0_SLOT
+`ifndef MISTER_OCRAM_MOUNT1_SLOT
+		if (hj_next == 5'd19) hj_next = 5'd23;
+`endif
 `endif
 	end
 endfunction
@@ -591,6 +667,10 @@ function [15:0] hj_off(input [4:0] k);
 		5'd16: hj_off = C_IDX1;
 		5'd17: hj_off = C_RING1;
 		5'd18: hj_off = C_K9;
+		5'd19: hj_off = C_IDX0;
+		5'd20: hj_off = C_RING0;
+		5'd21: hj_off = C_K10;
+		5'd22: hj_off = C_K11;
 		default: hj_off = C_HELLO;
 		endcase
 	end
@@ -622,6 +702,10 @@ function [31:0] hello_data(input [4:0] k, input [31:0] state, input [31:0] echo,
 		5'd16: hello_data = 32'd0;
 		5'd17: hello_data = C_RING1_FIO;
 		5'd18: hello_data = C_K9_FIO;
+		5'd19: hello_data = 32'd0;
+		5'd20: hello_data = C_RING0_MNT;
+		5'd21: hello_data = C_K10_MNT;
+		5'd22: hello_data = C_K11_MNT;
 		default: hello_data = echo;
 		endcase
 	end
@@ -719,7 +803,7 @@ reg  [3:0] t_job = 4'd0;               // the job the arbiter chose this cycle, 
 /* verilator lint_off UNUSEDPARAM */   // the record jobs are a DIAG build's or a SECTOR build's
 localparam [3:0] J_NONE = 4'd0, J_TERM = 4'd1, J_FAULT = 4'd2, J_POLL = 4'd3, J_HELLO = 4'd4,
                  J_STO = 4'd5, J_BIND = 4'd6, J_REC = 4'd7, J_MARK = 4'd8, J_VERDICT = 4'd9,
-                 J_C0 = 4'd10, J_C1 = 4'd11, J_RQ = 4'd12;
+                 J_C0 = 4'd10, J_C1 = 4'd11, J_RQ = 4'd12, J_BREC = 4'd13, J_MRQ = 4'd14;
 /* verilator lint_on UNUSEDPARAM */
 wire c0_go = (t_job == J_C0);
 /* verilator lint_off UNUSEDSIGNAL */   // port 1 is built with DIAG
@@ -814,24 +898,43 @@ wire mark_start = (t_job == J_MARK);
 
 `ifndef MISTER_OCRAM_DIAG
 `ifdef MISTER_OCRAM_SECTOR_SLOT
-// The SECTOR tier's REQUEST record: its header, the LBA, then the head, behind a room check of 2 words; it starts
-// only while C_BIND bit 0 is stored 1 and no C_BIND store is owed, and a store that drops bit 0 waits for it.
-reg  [5:0]  rec_k = 6'd0;              // 0 header, 1 the LBA, 2 the head store
+// The SECTOR tier's records: a REQUEST (the disc slot's or a mount slot's: its header, the LBA, then the head,
+// behind a room check of 2 words), a mount slot's WRITE (its header, the LBA, the n words as hps_ocram_rx hands
+// them over, then the head, behind n + 2), and the BIND posted after each C_BIND store (its header, then the head,
+// behind 1). A REQUEST or WRITE starts only while its slot's C_BIND bit is stored 1 and no C_BIND store or BIND is
+// owed; a C_BIND store waits for a record in flight and for an owed BIND. With the EVT ring stopped no BIND is owed.
+localparam [1:0] RS_DISC = 2'd0, RS_MREQ = 2'd1, RS_MWRITE = 2'd2, RS_BIND = 2'd3;
+reg  [10:0] rec_k = 11'd0;             // 0 header, 1..len payload, len + 1 the head store
 reg         rec_act = 1'b0;
+reg   [1:0] rec_src_q = RS_DISC;
+reg  [10:0] rec_len_q = 11'd1;
+reg         brec_pend = 1'b0;          // the BIND record after a C_BIND store is owed
 wire [15:0] wait_now = head_q - tail_q;
-wire [15:0] evt_index = head_q + {10'd0, rec_k};
+wire [15:0] evt_index = head_q + {5'd0, rec_k};
 wire [15:0] evt_off = EVT_BASE + ((evt_index & (EVT_WORDS - 1)) << 2);
-wire rq_ok = (phase == P_SESSION) && !stopped_q && !rec_act && rq_post && c0_sbind && bind_q[0] && !bind_pend &&
-             (wait_now <= EVT_WORDS - 16'd2);
-wire bind_hold = bind_q[0] && !c0_sbind && rec_act;
+wire        m_bound = (m_arg[1:0] == 2'd2) ? (c0_sbind[2] && bind_q[2]) : (c0_sbind[1] && bind_q[1]);
+wire [10:0] m_len   = m_write ? m_n + 11'd1 : 11'd1;
+wire rq_ok = (phase == P_SESSION) && !stopped_q && !rec_act && rq_post && c0_sbind[0] && bind_q[0] && !bind_pend &&
+             !brec_pend && (wait_now <= EVT_WORDS - 16'd2);
+wire brec_ok = (phase == P_SESSION) && !stopped_q && !rec_act && brec_pend && (wait_now <= EVT_WORDS - 16'd1);
+wire mq_ok = MNT_EN && (phase == P_SESSION) && !stopped_q && !rec_act && m_post && m_bound && !bind_pend &&
+             !brec_pend && (wait_now <= EVT_WORDS - {5'd0, m_len} - 16'd1);
+wire bind_hold = rec_act || (brec_pend && !stopped_q);
+wire rec_word = rec_src_q == RS_MWRITE && rec_k >= 11'd2;     // a WRITE word: it waits for hps_ocram_rx's
+reg  [31:0] rec_lba_q = 32'd0;         // a mount record's LBA, as it was at the record's start
 assign rq_start = (t_job == J_RQ);
+assign m_start  = (t_job == J_MRQ);
+assign m_wtake  = (t_job == J_REC) && rec_word && (rec_k != rec_len_q + 11'd1);
+assign m_pub    = t_done && !run_ended && (wr_act == W_RECHEAD) && rec_src_q == RS_MWRITE;
 `else
 wire bind_hold = 1'b0;
 assign rq_start = 1'b0;
+assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
 `endif
 `else
 wire bind_hold = 1'b0;
 assign rq_start = 1'b0;
+assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
 `endif
 
 // The arbiter: the terminal store, the fault's C_STATE store, the poll's or the line's reads when due, the
@@ -845,8 +948,8 @@ always @(*) begin
 		end
 		else if (fault_pend) begin
 			t_go = 1'b1; t_we = 1'b1; t_off = C_STATE; t_job = J_FAULT;
-			t_wdata = state_word(hello_cnt, stopped_q, osd_stopped_q, ts_stopped_q, fio_stopped_q,
-			                     prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q);
+			t_wdata = state_word(hello_cnt, stopped_q, osd_stopped_q, ts_stopped_q, fio_stopped_q, mnt_stopped_q,
+			                     prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q, prev_mid_mnt_q);
 		end
 		else if (poll_sel) begin
 			t_go = 1'b1; t_we = 1'b0; t_job = J_POLL;
@@ -868,17 +971,31 @@ always @(*) begin
 			t_go = 1'b1; t_we = 1'b1; t_off = C_HELLO; t_wdata = sto_data; t_job = J_STO;
 		end
 		else if (bind_pend && !bind_hold) begin
-			t_go = 1'b1; t_we = 1'b1; t_off = C_BIND; t_wdata = {20'd0, c0_open, 10'd0, c0_sbind}; t_job = J_BIND;
+			t_go = 1'b1; t_we = 1'b1; t_off = C_BIND; t_wdata = {20'd0, c0_open, 8'd0, c0_sbind}; t_job = J_BIND;
 		end
 `ifndef MISTER_OCRAM_DIAG
 `ifdef MISTER_OCRAM_SECTOR_SLOT
-		else if (rec_act) begin
-			t_go = 1'b1; t_we = 1'b1; t_job = J_REC;
-			if (rec_k == 6'd2) begin t_off = C_IDX3; t_wdata = {16'd0, head_q + 16'd2}; end
-			else begin t_off = evt_off; t_wdata = rq_lba; end        // hps_ocram_rx's request register
+		else if (rec_act && (!rec_word || m_wv || rec_k == rec_len_q + 11'd1)) begin
+			// a WRITE word not yet handed over lets the consumers in
+			if (rec_k == rec_len_q + 11'd1) begin
+				t_go = 1'b1; t_we = 1'b1; t_job = J_REC;
+				t_off = C_IDX3; t_wdata = {16'd0, head_q + {5'd0, rec_len_q} + 16'd1};
+			end
+			else begin
+				// the disc REQUEST's LBA is hps_ocram_rx's request register
+				t_go = 1'b1; t_we = 1'b1; t_job = J_REC; t_off = evt_off;
+				t_wdata = rec_word ? m_wd : (rec_src_q == RS_DISC) ? rq_lba : rec_lba_q;
+			end
+		end
+		else if (brec_ok) begin
+			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_wdata = {8'h27, 5'd0, bind_q[2:0], 16'd0}; t_job = J_BREC;
 		end
 		else if (rq_ok) begin
 			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_wdata = REQ_HEADER; t_job = J_RQ;
+		end
+		else if (mq_ok) begin
+			t_go = 1'b1; t_we = 1'b1; t_off = evt_off; t_job = J_MRQ;
+			t_wdata = {m_write ? 8'h26 : 8'h21, m_arg, 5'd0, m_len};
 		end
 `endif
 `endif
@@ -955,9 +1072,10 @@ always @(posedge clk) begin
 	if (TS_EN != 0 && c1_fault) ts_stopped_q <= 1'b1;
 	if (SEC_EN != 0 && c0_sfault) ts_stopped_q <= 1'b1;
 	if (FIO_EN != 0 && c0_ffault) fio_stopped_q <= 1'b1;
+	if (MNT_EN && c0_mfault) mnt_stopped_q <= 1'b1;
 	if (fault_go) fault_pend <= 1'b0;
 	if ((OSD_EN != 0 && c0_fault) || (TS_EN != 0 && c1_fault) || (SEC_EN != 0 && c0_sfault) ||
-	    (FIO_EN != 0 && c0_ffault)) fault_pend <= 1'b1;
+	    (FIO_EN != 0 && c0_ffault) || (MNT_EN && c0_mfault)) fault_pend <= 1'b1;
 
 	// the mark line, raised while a session is idle between polls: its re-read starts at once
 	if (FIO_EN != 0 && phase == P_SESSION && poll_step == 3'd0 && mark_line) poll_step <= 3'd7;
@@ -983,11 +1101,12 @@ always @(posedge clk) begin
 		fio_stopped_q <= 1'b0;
 		mark_arm_q  <= 1'b0;
 		osd_bind_q  <= 1'b0;
-		bind_q      <= 2'd0;
-		sec_ask_q   <= 1'b0;
+		bind_q      <= 4'd0;
+		sec_ask_q   <= 3'd0;
 		bind_pend   <= 1'b0;
-		hj_state    <= state_word(hello_cnt + 8'd1, 1'b0, 1'b0, 1'b0, 1'b0,
-		                          prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q);
+		mnt_stopped_q <= 1'b0;
+		hj_state    <= state_word(hello_cnt + 8'd1, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0,
+		                          prev_mid_q, prev_mid_osd_q, prev_mid_ts_q, prev_mid_fio_q, prev_mid_mnt_q);
 `ifdef MISTER_OCRAM_DIAG
 		rec_act     <= 1'b0;
 		rec_k       <= 6'd0;
@@ -1018,7 +1137,8 @@ always @(posedge clk) begin
 		`ifndef MISTER_OCRAM_DIAG
 		`ifdef MISTER_OCRAM_SECTOR_SLOT
 			rec_act <= 1'b0;
-			rec_k   <= 6'd0;
+			rec_k   <= 11'd0;
+			brec_pend <= 1'b0;
 		`endif
 		`endif
 		boot_pend  <= 1'b0;
@@ -1028,8 +1148,8 @@ always @(posedge clk) begin
 		rd_act     <= R_NONE;
 		wr_act     <= W_NONE;
 		osd_bind_q <= 1'b0;
-		bind_q     <= 2'd0;
-		sec_ask_q  <= 1'b0;
+		bind_q     <= 4'd0;
+		sec_ask_q  <= 3'd0;
 		bind_pend  <= 1'b0;
 		c_act_v    <= 1'b0;
 		if (rec_mid_q) prev_mid_q <= 1'b1;
@@ -1037,6 +1157,7 @@ always @(posedge clk) begin
 		if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
 		if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 		if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
+		if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
 		rec_mid_q  <= 1'b0;
 	end
 	else if (run_fall) begin
@@ -1049,6 +1170,7 @@ always @(posedge clk) begin
 		if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
 		if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 		if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
+		if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
 		rec_mid_q  <= 1'b0;
 		`ifdef MISTER_OCRAM_DIAG
 			rec_act <= 1'b0;
@@ -1058,7 +1180,8 @@ always @(posedge clk) begin
 		`ifndef MISTER_OCRAM_DIAG
 		`ifdef MISTER_OCRAM_SECTOR_SLOT
 			rec_act <= 1'b0;
-			rec_k   <= 6'd0;
+			rec_k   <= 11'd0;
+			brec_pend <= 1'b0;
 		`endif
 		`endif
 		hj_act     <= 1'b0;
@@ -1070,8 +1193,8 @@ always @(posedge clk) begin
 		poll_step  <= 3'd0;
 		rd_act     <= R_NONE;
 		osd_bind_q <= 1'b0;
-		bind_q     <= 2'd0;
-		sec_ask_q  <= 1'b0;
+		bind_q     <= 4'd0;
+		sec_ask_q  <= 3'd0;
 		bind_pend  <= 1'b0;
 		if (!hrst_q) term_pend <= 1'b1;
 	end
@@ -1092,7 +1215,8 @@ always @(posedge clk) begin
 		`ifndef MISTER_OCRAM_DIAG
 		`ifdef MISTER_OCRAM_SECTOR_SLOT
 			rec_act <= 1'b0;
-			rec_k   <= 6'd0;
+			rec_k   <= 11'd0;
+			brec_pend <= 1'b0;
 		`endif
 		`endif
 		rd_act     <= R_NONE;
@@ -1106,18 +1230,29 @@ always @(posedge clk) begin
 			J_FAULT: begin wr_act <= W_FAULT; fault_pend <= 1'b0; end
 			J_HELLO: wr_act <= W_HELLO;
 			J_STO: begin wr_act <= W_ONE; sto_pend <= 1'b0; end
-			J_BIND: begin wr_act <= W_BIND; bind_pend <= 1'b0; bind_q <= {c0_open, c0_sbind}; end
+			J_BIND: begin
+				wr_act <= W_BIND; bind_pend <= 1'b0; bind_q <= {c0_open, c0_sbind};
+`ifndef MISTER_OCRAM_DIAG
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+				brec_pend <= !stopped_q;
+`endif
+`endif
+			end
 `ifndef MISTER_OCRAM_DIAG
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 			J_REC: begin
-				wr_act <= (rec_k == 6'd2) ? W_RECHEAD : W_REC;
-				rec_k  <= rec_k + 6'd1;
+				wr_act <= (rec_k == rec_len_q + 11'd1) ? W_RECHEAD : W_REC;
+				rec_k  <= rec_k + 11'd1;
 			end
-			J_RQ: begin
+			J_RQ, J_MRQ, J_BREC: begin
 				wr_act    <= W_REC;
 				rec_act   <= 1'b1;
-				rec_k     <= 6'd1;
 				rec_mid_q <= 1'b1;
+				rec_k     <= 11'd1;
+				rec_lba_q <= m_lba;
+				if (t_job == J_BREC) begin rec_src_q <= RS_BIND; rec_len_q <= 11'd0; brec_pend <= 1'b0; end
+				else if (t_job == J_MRQ) begin rec_src_q <= m_write ? RS_MWRITE : RS_MREQ; rec_len_q <= m_len; end
+				else begin rec_src_q <= RS_DISC; rec_len_q <= 11'd1; end
 			end
 `endif
 `endif
@@ -1179,6 +1314,7 @@ always @(posedge clk) begin
 					prev_mid_osd_q <= 1'b0;
 					prev_mid_ts_q  <= 1'b0;
 					prev_mid_fio_q <= 1'b0;
+					prev_mid_mnt_q <= 1'b0;
 				end
 				else hj_k <= hj_next(hj_k);
 			end
@@ -1198,10 +1334,10 @@ always @(posedge clk) begin
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 		else if (wr_act == W_RECHEAD) begin
 			wr_act    <= W_NONE;
-			head_q    <= head_q + 16'd2;
+			head_q    <= head_q + {5'd0, rec_len_q} + 16'd1;
 			rec_act   <= 1'b0;
 			rec_mid_q <= 1'b0;
-			rec_k     <= 6'd0;
+			rec_k     <= 11'd0;
 		end
 `endif
 `endif
@@ -1254,9 +1390,10 @@ always @(posedge clk) begin
 					`endif
 					`ifndef MISTER_OCRAM_DIAG
 					`ifdef MISTER_OCRAM_SECTOR_SLOT
+						brec_pend <= 1'b0;
 						if (rec_act) begin
 							rec_act <= 1'b0;
-							rec_k <= 6'd0;
+							rec_k <= 11'd0;
 							if (rec_mid_q) prev_mid_q <= 1'b1;
 							rec_mid_q <= 1'b0;
 						end
@@ -1266,14 +1403,15 @@ always @(posedge clk) begin
 					if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
 					if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 					if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
+					if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
 					rec_mid_q <= 1'b0;
 					poll_step <= 3'd0;
 					sto_pend  <= 1'b1;
 					sto_data  <= (rdata == 32'd0) ? C_HELLO_ARMED : C_HELLO_WAIT;
 					phase     <= (rdata == 32'd0) ? P_ARMED : P_WAIT;
 					osd_bind_q<= 1'b0;
-					bind_q    <= 2'd0;
-					sec_ask_q <= 1'b0;
+					bind_q    <= 4'd0;
+					sec_ask_q <= 3'd0;
 					bind_pend <= 1'b0;
 				end
 			end
@@ -1283,7 +1421,7 @@ always @(posedge clk) begin
 			poll_step <= SEC_EN != 0 ? 3'd5 : FIO_EN != 0 ? 3'd6 : 3'd2;
 		end
 		else if (rd_act == R_SECT) begin
-			sec_ask_q <= rdata[0];
+			sec_ask_q <= rdata[2:0] & SEC_MASK;
 			poll_step <= FIO_EN != 0 ? 3'd6 : 3'd2;
 		end
 		else if (rd_act == R_MARK) begin
@@ -1316,9 +1454,10 @@ always @(posedge clk) begin
 				`endif
 				`ifndef MISTER_OCRAM_DIAG
 				`ifdef MISTER_OCRAM_SECTOR_SLOT
+					brec_pend <= 1'b0;
 					if (rec_act) begin
 						rec_act <= 1'b0;
-						rec_k <= 6'd0;
+						rec_k <= 11'd0;
 						if (rec_mid_q) prev_mid_q <= 1'b1;
 						rec_mid_q <= 1'b0;
 					end

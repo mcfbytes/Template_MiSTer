@@ -116,7 +116,14 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                ('ocram-osd-fio-diag', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_FIO', 'MISTER_OCRAM_DIAG']),
                ('ocram-osd-sec-fio-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
                                          'MISTER_OCRAM_FIO', 'MISTER_OCRAM_FIO_GAP=7', 'MISTER_LW', 'MISTER_LW_PAD',
-                                         'MISTER_LW_EVT', 'MISTER_LW_OSD'])]
+                                         'MISTER_LW_EVT', 'MISTER_LW_OSD']),
+               # the mount slots beside the SECTOR tier: both, and one beside the download tier
+               ('ocram-osd-sec-mnt-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1',
+                                         'MISTER_OCRAM_MOUNT0_SLOT=2', 'MISTER_OCRAM_MOUNT1_SLOT=3',
+                                         'MISTER_OCRAM_MOUNT_FRAME=256', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
+                                         'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD']),
+               ('ocram-sec-mnt1-fio-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=2', 'MISTER_OCRAM_MOUNT1_SLOT=4',
+                                          'MISTER_OCRAM_FIO', 'MISTER_LW'])]
 OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
 CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
@@ -128,8 +135,9 @@ GPI = {25: ('lw_present', 'hps_lw_bridge', 'present'), 24: ('lw_idle', 'hps_lw_b
 # it)}; the EVT ring's line is ordinal 4, the download ring's mark line ordinal 5
 OCRAM_LINES = {11: ('ocram_line', 'line', None), 12: ('ocram_mline', 'mark_line', 'MISTER_OCRAM_FIO')}
 OCMACS = ['MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD']
-# the SECTOR tier's text (its REQUEST writer is the EVT writer of a build without DIAG)
-OCMACS_SEC = ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
+# the SECTOR tier's text (its record writer is the EVT writer of a build without DIAG), with both mount slots
+OCMACS_SEC = ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1', 'MISTER_OCRAM_MOUNT0_SLOT=2',
+              'MISTER_OCRAM_MOUNT1_SLOT=3']
 
 if args[:1] == ['--configs']:
     for n, d in CONFIGS:
@@ -468,9 +476,10 @@ PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit c_wide
            'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
-           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide l_busy l_wait'),
+           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide l_busy l_wait '
+                                       'xm_hps_ack xm_rd xm_wr xm_lba xm_cnt'),
            'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide xsec_en '
-                                        'xsec_ack xsec_wr xsec_dat xsec_adr')}
+                                        'xsec_ack xsec_wr xsec_dat xsec_adr xmnt_en xmnt_ack')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
 # piece leaves it to the pull-down. Only these nets, each assigned exactly this select, are exempt; every other bit
 # of hps_lw is on clk_sys and crosses through a cell.
@@ -934,17 +943,19 @@ OTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS)))
 OSTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS_SEC)))
 ODTXT = ' '.join(tokens(pp('sys/hps_ocram_rx.sv', OCMACS_SEC)))
 ALLT = OTXT + ' ' + OSTXT + ' ' + ODTXT
-CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX1': 0x14, 'H_IDX2': 0x18,
-        'H_IDX3': 0x1c, 'H_IDX4': 0x20, 'H_MARK1': 0x34, 'C_HELLO': 0x80, 'C_VERSION': 0x84, 'C_CAPS': 0x88,
-        'C_STATE': 0x8c, 'C_IDX1': 0x94, 'C_IDX2': 0x98, 'C_IDX3': 0x9c, 'C_IDX4': 0xa0, 'C_BIND': 0xa4,
-        'C_RING1': 0xb4, 'C_RING2': 0xb8, 'C_RING3': 0xbc, 'C_RING4': 0xc0, 'C_K0': 0xd0, 'C_K1': 0xd4,
-        'C_K2': 0xd8, 'C_K4': 0xe0, 'C_K5': 0xe4, 'C_K8': 0xf0, 'C_K9': 0xf4}
+CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX0': 0x10, 'H_IDX1': 0x14,
+        'H_IDX2': 0x18, 'H_IDX3': 0x1c, 'H_IDX4': 0x20, 'H_MARK1': 0x34, 'C_HELLO': 0x80, 'C_VERSION': 0x84,
+        'C_CAPS': 0x88, 'C_STATE': 0x8c, 'C_IDX0': 0x90, 'C_IDX1': 0x94, 'C_IDX2': 0x98, 'C_IDX3': 0x9c,
+        'C_IDX4': 0xa0, 'C_BIND': 0xa4, 'C_RING0': 0xb0, 'C_RING1': 0xb4, 'C_RING2': 0xb8, 'C_RING3': 0xbc,
+        'C_RING4': 0xc0, 'C_K0': 0xd0, 'C_K1': 0xd4, 'C_K2': 0xd8, 'C_K4': 0xe0, 'C_K5': 0xe4, 'C_K8': 0xf0,
+        'C_K9': 0xf4, 'C_K10': 0xf8, 'C_K11': 0xfc}
 LITS = dict(re.findall(r"localparam \[ 15 : 0 \] (\w+) = 16'h([0-9A-Fa-f]+) ;", ALLT))
 for n_, v_ in sorted(CTRL.items()):
     check(int(LITS.get(n_, '-1'), 16) == v_ and v_ < 0x100,
           'hps_ocram_*: %s is not 16''h%02X below 0x100' % (n_, v_))
 for b_, w_, bv, wv in (('EVT_BASE', 'EVT_WORDS', 0x4000, 2048), ('TS_BASE', 'TS_WORDS', 0x7000, 8192),
-                       ('OSD_BASE', 'OSD_WORDS', 0x2000, 2048), ('SEC_BASE', 'SEC_WORDS', 0x7000, 8192)):
+                       ('OSD_BASE', 'OSD_WORDS', 0x2000, 2048), ('SEC_BASE', 'SEC_WORDS', 0x7000, 8192),
+                       ('MNT_BASE', 'MNT_WORDS', 0x6000, 1024)):
     M_ = re.search(r"localparam \[ 15 : 0 \] %s = 16'd(\d+) ;" % w_, ALLT)
     ew = int(M_.group(1)) if M_ else -1
     check(int(LITS.get(b_, '-1'), 16) == bv and ew == wv,
@@ -975,7 +986,7 @@ for OT_, OWHO in ((OTXT, 'DIAG'), (OSTXT, 'SECTOR')):
     check(len(re.findall(r"wire \[ 15 : 0 \] evt_off = EVT_BASE \+ \( \( evt_index & \( EVT_WORDS - 1 \) \) < < 2 \) ;", OT_)) == 1
           and len(re.findall(r"evt_off = ", OT_)) == 1,
           'hps_ocram_master (%s): ' % OWHO + 'evt_off is not one EVT_BASE + ((index & (EVT_WORDS-1)) << 2) assignment')
-    check(len(re.findall(r"wire \[ 15 : 0 \] evt_index = head_q \+ \{ 10'd0 , rec_k \} ;", OT_)) == 1,
+    check(len(re.findall(r"wire \[ 15 : 0 \] evt_index = head_q \+ \{ (?:10|5)'d0 , rec_k \} ;", OT_)) == 1,
           'hps_ocram_master (%s): ' % OWHO + 'evt_index is not head_q + rec_k')
 # The consumers' own offsets: a control localparam or a ring word, hdr_off/pay1_off/pay2_off, each one
 # base + ((index & (words - 1)) << 2) of a localparam base and the ring's size.
@@ -996,8 +1007,9 @@ def ring_wires(text, base, words, who):
 rx_named = consumer_offsets(ODTXT, 'hps_ocram_rx')
 rx_rings = ring_wires(ODTXT, 'OSD_BASE', 'OSD_WORDS', 'hps_ocram_rx') | \
            ring_wires(ODTXT, 'SEC_BASE', 'SEC_WORDS', 'hps_ocram_rx') | \
-           ring_wires(ODTXT, 'FIO_BASE', 'FIO_WORDS', 'hps_ocram_rx')
-check(rx_named == rx_rings, 'hps_ocram_rx: an offset wire is not an OSD_BASE, SEC_BASE or FIO_BASE ring word: %s'
+           ring_wires(ODTXT, 'FIO_BASE', 'FIO_WORDS', 'hps_ocram_rx') | \
+           ring_wires(ODTXT, 'MNT_BASE', 'MNT_WORDS', 'hps_ocram_rx')
+check(rx_named == rx_rings, 'hps_ocram_rx: an offset wire is not an OSD, SEC, FIO or MNT_BASE ring word: %s'
       % (rx_named ^ rx_rings))
 ts_named = consumer_offsets(OTXT, 'hps_ocram_tsink') - {'evt_off'}
 check(ts_named == ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink'),
@@ -1007,6 +1019,10 @@ check(ts_named == ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink'),
 for pat, who in ((r"OSD_BASE \+ OSD_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
                  (r"SEC_BASE \+ SEC_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
                  (r"FIO_BASE \+ FIO_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"MNT_BASE \+ MNT_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"H_IDX0 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"C_IDX0 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"C_K11 > = 16'h0100", 'hps_ocram_master'),
                  (r"H_IDX1 > = 16'h0100", 'hps_ocram_rx'),
                  (r"C_IDX1 > = 16'h0100", 'hps_ocram_rx'),
                  (r"H_IDX2 > = 16'h0100", 'hps_ocram_rx'),

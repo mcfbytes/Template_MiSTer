@@ -95,7 +95,10 @@ module lw_sys_window #(
 	parameter        LANE_EN   = 0,
 	// The OCRAM SECTOR feeder (sys_top.v sets it with MISTER_OCRAM_SECTOR_SLOT): 1 = the primary slot's to-core bits
 	// of HPS_BUS take the xsec_* inputs; no SECTOR entry is listed. With SEC_EN the build stops.
-	parameter        SEC_EXT   = 0
+	parameter        SEC_EXT   = 0,
+	// The OCRAM mount slots (sys_top.v sets it with MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT; beside SEC_EXT): bit
+	// i = 1, save slot i's to-core bits of HPS_BUS take the xmnt_* inputs. Its save-slot entry is not listed.
+	parameter  [1:0] MNT_EXT   = 2'd0
 )
 (
 	input wire         clk,          // clk_100m
@@ -145,7 +148,14 @@ module lw_sys_window #(
 	output wire        xsec_hps_ack, // [133]
 	output wire        xsec_req,     // [134], with the mux's and the mark's presence
 	output wire [31:0] xsec_lba,     // [166:135]
-	output wire        xsec_commit   // [380]
+	output wire        xsec_commit,  // [380]
+	// The OCRAM mount slots' bits, {save slot 1, save slot 0} (MNT_EXT)
+	input wire   [1:0] xmnt_en,      // en_sys
+	input wire   [1:0] xmnt_ack,
+	output wire  [1:0] xmnt_hps_ack, // [202], [167]
+	output wire  [1:0] xmnt_rd,      // [204], [169], with the mux's and the mark's presence
+	output wire  [1:0] xmnt_wr,      // [203], [168], likewise
+	output wire [63:0] xmnt_lba      // [236:205], [201:170]
 );
 
 `ifdef LW_DIAG
@@ -521,7 +531,9 @@ assign hps_lw[96]      = sec_ack;
 assign hps_lw[97]      = sec_wr;                         // the shared strobe, its data and address
 assign hps_lw[113:98]  = sec_dat;
 assign hps_lw[127:114] = sec_adr;
-assign hps_lw[131:128] = {sec_xack[1], sec_xen[1], sec_xack[0], sec_xen[0]};   // the save slots' en_sys, ack
+// the save slots' en_sys, ack; a slot the OCRAM feeder serves takes its bits
+assign hps_lw[131:128] = {MNT_EXT[1] ? xmnt_ack[1] : sec_xack[1], MNT_EXT[1] ? xmnt_en[1] : sec_xen[1],
+                          MNT_EXT[0] ? xmnt_ack[0] : sec_xack[0], MNT_EXT[0] ? xmnt_en[0] : sec_xen[0]};
 
 generate
 `ifdef MISTER_LW_PAD
@@ -644,6 +656,12 @@ assign xsec_hps_ack = SEC_EXT ? hps_lw[133] : 1'b0;
 assign xsec_req     = SEC_EXT ? hps_lw[134] & pres_sec[0] & pres_cmt : 1'b0;
 assign xsec_lba     = SEC_EXT ? hps_lw[166:135] : 32'd0;
 assign xsec_commit  = SEC_EXT ? hps_lw[380] : 1'b0;
+// and of the mount slots
+wire  [1:0] mnt_wired = MNT_EXT & pres_sec[2:1] & {2{pres_cmt}};
+assign xmnt_hps_ack = MNT_EXT & {hps_lw[202], hps_lw[167]};
+assign xmnt_rd      = mnt_wired & {hps_lw[204], hps_lw[169]};
+assign xmnt_wr      = mnt_wired & {hps_lw[203], hps_lw[168]};
+assign xmnt_lba     = {MNT_EXT[1] ? hps_lw[236:205] : 32'd0, MNT_EXT[0] ? hps_lw[201:170] : 32'd0};
 
 generate
 `ifdef MISTER_LW_LANE

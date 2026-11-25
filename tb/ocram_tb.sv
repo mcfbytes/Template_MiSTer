@@ -32,9 +32,26 @@
 // own copy of the DIAG counters and the EVT records. The cases are the design note's M7 bench, §5 of
 // M7-BRIEF.md, and the floor's §6 of M3-BRIEF.md. Run: tb/run.sh (arm O), one seed per run and one compile
 // shape per pass; the DIAG-only cases do not run in the shipping shape.
+//
+// With the SECTOR tier the monitor also holds every C_BIND store outside a hello to its BIND record: the next
+// record header after the store is that BIND, with C_BIND[7:0] as its arg, and no store falls inside a record.
+// With the mount slots (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT) two block-device cores sit on the window's save-slot
+// nets: each drops its request at its ack's rise, takes the shared strobes under its own ack, and shows its buffer
+// word at the strobe address one clk_sys later in its LBA field while its mux and ack are up (lw_save_mux's). The
+// bench sets each request's blk_cnt directly (the window carries none) and gives the walker BLKSZ 2 for the mount
+// slots, so a block is 128 words and blk_cnt 3 is 512 (MISTER_OCRAM_MOUNT_FRAME 512 in the shape).
 
 `timescale 1ns/1ps
 `default_nettype none
+
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define OCRAM_TB_MNT
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef OCRAM_TB_MNT
+`define OCRAM_TB_MNT
+`endif
+`endif
 
 `ifndef MISTER_OCRAM_POLL
 `define MISTER_OCRAM_POLL 12
@@ -138,6 +155,40 @@ localparam integer SSLOT = `MISTER_OCRAM_SECTOR_SLOT;
 `else
 localparam integer SSLOT = 1;
 `endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+localparam MNT0_B = 1;
+localparam integer MSLOT0 = `MISTER_OCRAM_MOUNT0_SLOT;
+`else
+localparam MNT0_B = 0;
+localparam integer MSLOT0 = 2;
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+localparam MNT1_B = 1;
+localparam integer MSLOT1 = `MISTER_OCRAM_MOUNT1_SLOT;
+`else
+localparam MNT1_B = 0;
+localparam integer MSLOT1 = 3;
+`endif
+`ifdef MISTER_OCRAM_MOUNT_FRAME
+localparam integer MFRAME = `MISTER_OCRAM_MOUNT_FRAME;
+`else
+localparam integer MFRAME = 128;
+`endif
+localparam MNT_B = MNT0_B || MNT1_B;
+localparam  [1:0] MNT_MASK = {MNT1_B != 0, MNT0_B != 0};
+localparam integer MK  = MNT0_B ? 1 : 2;                  // the first declared mount slot's index
+localparam integer MK2 = (MNT0_B && MNT1_B) ? 2 : 0;      // the other, 0 if none
+localparam  [2:0] MBLKSZ = 3'd2;                 // the mount slots' blocks in this bench: 128 words
+localparam [15:0] H_IDX0  = 16'h0010;
+localparam [15:0] C_IDX0  = 16'h0090;
+localparam [15:0] C_RING0 = 16'h00B0;
+localparam [15:0] C_K10   = 16'h00F8;
+localparam [15:0] C_K11   = 16'h00FC;
+localparam [15:0] MNT_BASE = 16'h6000;
+localparam integer MNT_WORDS = 1024;
+localparam [31:0] C_RING0_MNT = 32'h1028_1800;   // kind 2 (SECTOR), no line, 1024 words at 0x6000
+localparam [31:0] C_K10_EXP = MNT0_B ? {8'h01, 4'd0, MSLOT0[3:0], 3'd0, MFRAME[12:0]} : 32'd0;
+localparam [31:0] C_K11_EXP = MNT1_B ? {8'h01, 4'd0, MSLOT1[3:0], 3'd0, MFRAME[12:0]} : 32'd0;
 localparam  [2:0] SBLKSZ = 3'd3;                 // a CD core's: 2,352-byte frames
 // the SECTOR tier's C_K words: K0 {0, gap}, K1 {BLKSZ, wide}, K2 one descriptor, K4 {RD, slot, frame}, K5 32
 localparam [31:0] C_K0_EXP = SGAP;
@@ -150,7 +201,7 @@ localparam integer ROWS = 16;
 `endif
 localparam  [15:0] ROWS16 = ROWS;
 localparam [31:0] C_CAPS_EXP = 32'h0000_0008 | (OSD_B ? 32'h4 : 32'h0) | ((TS_B || SEC_B) ? 32'h10 : 32'h0) |
-                               (FIO_B ? 32'h2 : 32'h0);
+                               (FIO_B ? 32'h2 : 32'h0) | (SEC_B ? 32'h400 : 32'h0) | (MNT_B ? 32'h1 : 32'h0);
 localparam [31:0] C_K8_EXP   = {ROWS16, 16'd256};
 
 localparam integer M_NORMAL = 0, M_SECURE_REFUSE = 1, M_NEVER = 2;
@@ -212,8 +263,14 @@ wire [31:0] ocram_c0_rdata;
 wire        s_hello, s_live, s_tick, osd_bind;
 wire        c0_rest, c0_fault, c0_mid, c0_open;
 wire [15:0] osd_rows, osd_deepest;
-wire        sec_ask, evt_stop, c0_sfault, c0_smid, c0_sbind, c0_wide, rq_post, rq_start;
+wire  [2:0] sec_ask, c0_sbind;
+wire        evt_stop, c0_sfault, c0_smid, c0_wide, rq_post, rq_start;
 wire [31:0] rq_lba;
+// the mount slots: the ring's levels and the records to the EVT writer
+wire        c0_mfault, c0_mmid, m_post, m_write, m_wv, m_start, m_wtake, m_pub;
+wire  [7:0] m_arg;
+wire [10:0] m_n;
+wire [31:0] m_lba, m_wd;
 // the download tier: the ring's tail and levels, the mark line, and the player's side of lw_link
 wire [15:0] f_tail;
 wire        c0_ffault, c0_fmid, mark_out;
@@ -228,13 +285,22 @@ reg         x_wide = 1'b1;
 wire        x_en, x_ack, x_wr;
 wire [15:0] x_dat;
 wire [13:0] x_adr;
+// the mount slots' core side (the window's save-slot nets), {k = 2, k = 1}: the slot models drive them
+reg   [1:0] mc_rd = 2'd0, mc_wr = 2'd0;
+reg  [31:0] mc_lba1 = 32'd0, mc_lba2 = 32'd0;
+reg   [5:0] mc_cnt1 = 6'd0, mc_cnt2 = 6'd0;
+reg  [15:0] mc_din1 = 16'd0, mc_din2 = 16'd0;
+wire  [1:0] xm_en, xm_ack;
+wire [63:0] xm_lba = {(xm_en[1] & xm_ack[1]) ? {16'd0, mc_din2} : mc_lba2,
+                      (xm_en[0] & xm_ack[0]) ? {16'd0, mc_din1} : mc_lba1};
 wire        ocram_we;
 wire [12:0] ocram_addr;
 wire  [7:0] ocram_byte;
 reg   [1:0] sel_m = 2'b00;   // both osd selects low: the quiet guard
 reg         view_m = 1'b1;   // the I/O view
 
-hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ), .FIO_GAP(FGAP)) dut
+hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ), .FIO_GAP(FGAP),
+                   .MNT0_SLOT(MSLOT0), .MNT1_SLOT(MSLOT1), .MNT_FRAME(MFRAME)) dut
 (
 	.clk(clk),
 	.hps_rst_n(hps_rst_n),
@@ -249,6 +315,8 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 	.sec_ask(sec_ask), .evt_stop(evt_stop), .c0_sfault(c0_sfault), .c0_smid(c0_smid), .c0_sbind(c0_sbind),
 	.c0_wide(c0_wide), .rq_post(rq_post), .rq_lba(rq_lba), .rq_start(rq_start),
 	.f_tail(f_tail), .c0_ffault(c0_ffault), .c0_fmid(c0_fmid), .mark_line(mark_out),
+	.c0_mfault(c0_mfault), .c0_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
+	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
 	.awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst),
 	.awlock(awlock), .awcache(awcache), .awprot(awprot), .awuser(awuser), .awvalid(awvalid),
 	.awready(awready),
@@ -261,7 +329,7 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 );
 
 hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP(SGAP), .FIO_EN(FIO_B),
-               .FIO_GAP(FGAP)) u_osd
+               .FIO_GAP(FGAP), .MNT_EN(MNT_MASK), .MFRAME(MFRAME), .BLKSZ(MBLKSZ)) u_osd
 (
 	.clk(clk),
 	.clk_sys(clk_sys),
@@ -301,6 +369,10 @@ hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP
 	.x_reset(x_reset), .x_hps_ack(x_hps_ack), .x_req(x_req), .x_lba(x_lba), .x_commit(x_commit), .x_wide(x_wide),
 	.x_en(x_en), .x_ack(x_ack), .x_wr(x_wr), .x_dat(x_dat), .x_adr(x_adr),
 	.f_tail(f_tail), .c_ffault(c0_ffault), .c_fmid(c0_fmid),
+	.c_mfault(c0_mfault), .c_mmid(c0_mmid), .m_post(m_post), .m_write(m_write), .m_arg(m_arg), .m_n(m_n),
+	.m_lba(m_lba), .m_wv(m_wv), .m_wd(m_wd), .m_start(m_start), .m_wtake(m_wtake), .m_pub(m_pub),
+	.xm_hps_ack(2'd0), .xm_rd(mc_rd), .xm_wr(mc_wr), .xm_lba(xm_lba), .xm_cnt({mc_cnt2, mc_cnt1}),
+	.xm_en(xm_en), .xm_ack(xm_ack),
 	.l_busy(l_busy_m), .l_wait(l_wait_m),
 	.l_own(p_own), .l_hold(p_hold), .l_sel(p_sel), .l_strobe(p_strobe), .l_din(p_din)
 );
@@ -722,6 +794,9 @@ endfunction
 function in_fio(input [15:0] a);
 	in_fio = (a >= FIO_BASE) && (a <= FIO_BASE + FIO_WORDS * 4 - 1);
 endfunction
+function in_mnt(input [15:0] a);
+	in_mnt = (a >= MNT_BASE) && (a <= MNT_BASE + MNT_WORDS * 4 - 1);
+endfunction
 
 reg [4:0]  rst_grace = 5'd0;
 reg        awv_d = 0, wv_d = 0, arv_d = 0, bv_d = 0, rv_d = 0;
@@ -764,12 +839,18 @@ integer m_term = 0;
 integer m_hidx_reads = 0, m_hello_reads = 0;
 integer m_deepest = 0;
 integer rq_published = 0;    // REQUEST records whose head store was seen
+integer bind_published = 0, mrq_published = 0, wr_published = 0;   // BIND, mount REQUEST and WRITE records
+reg     bind_owed = 0;        // a C_BIND store outside a hello whose BIND record has not begun
+reg [7:0] bind_val = 0;       // that store's C_BIND[7:0]
+reg     wr_ack_at_pub = 0;    // a mount slot's ack was up at the last WRITE's head store
+integer wtakes = 0;           // WRITE words the master has taken
 integer tail_seen = 0;        // the master's last-read EVT tail, not the host's last store
 
 // the EVT records
 integer rec_writes = 0;       // words of the current record, the header included
 integer rec_len_m = 0;
 integer rec_kind_m = 0;
+integer rec_arg_m = 0;
 integer pub_words = 0;        // every EVT word published since the hello
 integer pub_head = 0;         // the last C_IDX[3] store
 integer mark_started = 0, mark_published = 0, verdict_started = 0, verdict_published = 0;
@@ -792,6 +873,19 @@ integer s_wr_hist [0:15];
 reg [31:0] vd_last [0:7];
 integer    rq_n = 0;              // REQUEST records the host has taken
 reg [31:0] rq_lba_log [0:255];
+// the SECTOR tier's other records as the host takes them: every record's {kind, arg} in order, the BIND args, the
+// mount REQUESTs' {arg, LBA}, the last WRITE's arg, LBA and words
+integer    ev_n = 0;
+reg [15:0] ev_log [0:1023];
+integer    bind_n = 0;
+reg  [7:0] bind_log [0:255];
+integer    mrq_n = 0;
+reg  [7:0] mrq_arg [0:255];
+reg [31:0] mrq_lba [0:255];
+integer    wr_n = 0, wr_len = 0;
+reg  [7:0] wr_arg = 0;
+reg [31:0] wr_lba = 0;
+reg [31:0] wr_w [0:1023];
 integer vd_seen = 0;
 
 function integer bin_of(input integer lat);
@@ -887,6 +981,7 @@ always @(posedge clk) begin
 		if (!(araddr[15:0] === H_HELLO || araddr[15:0] === H_BIND || araddr[15:0] === H_LINE ||
 		      araddr[15:0] === H_IDX2 || araddr[15:0] === H_IDX3 || araddr[15:0] === H_IDX4 ||
 		      (SEC_B && araddr[15:0] === H_SECTOR) ||
+		      (MNT_B && (araddr[15:0] === H_IDX0 || in_mnt(araddr[15:0]))) ||
 		      (FIO_B && (araddr[15:0] === H_IDX1 || araddr[15:0] === H_MARK1 || in_fio(araddr[15:0]))) ||
 		      in_osd(araddr[15:0]) || in_ts(araddr[15:0])))
 			merr("ARADDR outside the control page's host half and the ring spans");
@@ -980,6 +1075,17 @@ always @(posedge clk) begin
 		pub_words = 0; pub_head = 0; rec_writes = 0;
 		mark_started = 0; mark_published = 0; verdict_started = 0; verdict_published = 0;
 		mark_consumed = 0;
+		bind_owed = 0;
+	end
+	if (dut.stopped_q) bind_owed = 0;            // a stopped EVT ring owes no record
+	if (dut.m_wtake) wtakes = wtakes + 1;
+
+	// every C_BIND store outside a hello is followed by its BIND record before any other record
+	if (SEC_B && awvalid && !awv_d && awaddr[15:0] == C_BIND && !in_hello) begin
+		if (rec_writes != 0) merr("a C_BIND store inside an EVT record");
+		if (bind_owed) merr("a C_BIND store before the last one's BIND record");
+		bind_owed = !dut.stopped_q;
+		bind_val = wdata[7:0];
 	end
 
 	// the event-ring accounting from the stores the master makes
@@ -991,6 +1097,7 @@ always @(posedge clk) begin
 			if (rec_writes == 0) begin
 				rec_len_m = wdata[15:0];
 				rec_kind_m = wdata[31:24];
+				rec_arg_m = wdata[23:16];
 				if (rec_kind_m == 8'h23) begin
 					if (wdata !== MARK_HEADER) merr("a MARK header word");
 					if (mark_started > 0) begin
@@ -1019,8 +1126,22 @@ always @(posedge clk) begin
 					if (wdata !== VERDICT_HEADER) merr("a VERDICT header word");
 					verdict_started = verdict_started + 1;
 				end else if (SEC_B && rec_kind_m == 8'h21) begin
-					if (wdata !== REQ_HEADER) merr("a REQUEST header word");
+					if (wdata[15:0] !== 16'd1 || (wdata[17:16] == 2'd0 && wdata[23:16] !== 8'd0) ||
+					    (wdata[17:16] == 2'd1 && !MNT0_B) || (wdata[17:16] == 2'd2 && !MNT1_B) || wdata[17:16] == 2'd3)
+						merr("a REQUEST header word");
+				end else if (MNT_B && rec_kind_m == 8'h26) begin
+					if (wdata[15:0] !== ((wdata[23:18] + 16'd1) << (MBLKSZ + 5)) + 16'd1 ||
+					    !(wdata[17:16] == 2'd1 || wdata[17:16] == 2'd2))
+						merr("a WRITE header word");
+				end else if (SEC_B && rec_kind_m == 8'h27) begin
+					if (wdata[15:0] !== 16'd0) merr("a BIND header's length");
 				end else merr("an EVT header of an unknown kind");
+				if (SEC_B && bind_owed) begin
+					if (rec_kind_m != 8'h27) merr("a record between a C_BIND store and its BIND");
+					else if (wdata[23:16] !== bind_val) merr("the BIND record's arg is not the stored C_BIND[7:0]");
+					bind_owed = 0;
+				end
+				else if (SEC_B && rec_kind_m == 8'h27) merr("a BIND record with no C_BIND store before it");
 			end else if (rec_writes > rec_len_m) begin
 				merr("an EVT record longer than its header's length");
 			end
@@ -1038,7 +1159,13 @@ always @(posedge clk) begin
 				pub_head = wdata[15:0];
 				pub_words = pub_words + rec_writes;
 				if (rec_kind_m == 8'h23) mark_published = mark_published + 1;
-				else if (rec_kind_m == 8'h21) rq_published = rq_published + 1;
+				else if (rec_kind_m == 8'h21 && rec_arg_m == 0) rq_published = rq_published + 1;
+				else if (rec_kind_m == 8'h21) mrq_published = mrq_published + 1;
+				else if (rec_kind_m == 8'h26) begin
+					wr_published = wr_published + 1;
+					wr_ack_at_pub = |xm_ack;
+				end
+				else if (rec_kind_m == 8'h27) bind_published = bind_published + 1;
 				else verdict_published = verdict_published + 1;
 				b = (pub_head - (tail_seen & 16'hFFFF)) & 16'hFFFF;
 				if (b <= EVT_WORDS && b > m_deepest) m_deepest = b;
@@ -1095,13 +1222,27 @@ task evt_take(output integer got);
 					for (i = 0; i < 8; i = i + 1)
 						vd_last[i] = evt_word(host_tail + 1 + i[15:0]);
 					vd_seen = vd_seen + 1;
-				end else if (SEC_B && kind == 8'h21) begin
+				end else if (SEC_B && kind == 8'h21 && hdr[23:16] == 8'd0) begin
 					check("REQUEST record: header", hdr, REQ_HEADER);
 					if (rq_n < 256) rq_lba_log[rq_n] = evt_word(host_tail + 16'd1);
 					rq_n = rq_n + 1;
+				end else if (MNT_B && kind == 8'h21) begin
+					check("a mount REQUEST record: its length", hdr[15:0], 16'd1);
+					if (mrq_n < 256) begin mrq_arg[mrq_n] = hdr[23:16]; mrq_lba[mrq_n] = evt_word(host_tail + 16'd1); end
+					mrq_n = mrq_n + 1;
+				end else if (MNT_B && kind == 8'h26) begin
+					wr_arg = hdr[23:16]; wr_lba = evt_word(host_tail + 16'd1); wr_len = len - 1;
+					for (i = 0; i < len - 1 && i < 1024; i = i + 1) wr_w[i] = evt_word(host_tail + 16'd2 + i[15:0]);
+					wr_n = wr_n + 1;
+				end else if (SEC_B && kind == 8'h27) begin
+					check("a BIND record: its length", hdr[15:0], 16'd0);
+					if (bind_n < 256) bind_log[bind_n] = hdr[23:16];
+					bind_n = bind_n + 1;
 				end else begin
 					check("EVT record: a known kind", kind, 8'h23);
 				end
+				if (ev_n < 1024) ev_log[ev_n] = hdr[31:16];
+				ev_n = ev_n + 1;
 				host_tail = host_tail + 1 + len;
 				poke(H_IDX3, {16'd0, host_tail});
 				got = 1;
@@ -1747,6 +1888,7 @@ task case15;
 		if (dut.prev_mid_osd_q) state_exp = state_exp | 32'h0004_0000;
 		if (dut.prev_mid_ts_q)  state_exp = state_exp | 32'h0010_0000;
 		if (dut.prev_mid_fio_q) state_exp = state_exp | 32'h0002_0000;
+		if (dut.prev_mid_mnt_q) state_exp = state_exp | 32'h0001_0000;
 		start_session(0, 0, 0, 16'h0A01, ok);
 		k = 0;
 		check_hello_word(k, C_VERSION, C_VERSION_1_0); k = k + 1;
@@ -1788,6 +1930,12 @@ task case15;
 		check_hello_word(k, C_RING1, C_RING1_FIO); k = k + 1;
 		check_hello_word(k, C_K9, C_K9_EXP); k = k + 1;
 `endif
+		if (MNT_B) begin
+			check_hello_word(k, C_IDX0, 32'd0); k = k + 1;
+			check_hello_word(k, C_RING0, C_RING0_MNT); k = k + 1;
+			check_hello_word(k, C_K10, C_K10_EXP); k = k + 1;
+			check_hello_word(k, C_K11, C_K11_EXP); k = k + 1;
+		end
 		check_hello_word(k, C_HELLO, {16'h4F43, 16'h0A01}); k = k + 1;
 		check("the hello's store count", hseq_n, k);
 		peek(C_BIND, v); check("C_BIND is 0 at the hello", v, 32'd0);
@@ -2297,7 +2445,7 @@ reg         c_ack_d = 1'b0;
 always @(posedge clk_sys) begin
 	c_ack_d <= x_ack;
 	if (x_ack && !c_ack_d) x_req <= 1'b0;
-	if (x_wr) begin cbuf[x_adr] <= x_dat; c_strobes = c_strobes + 1; end
+	if (x_wr && x_ack) begin cbuf[x_adr] <= x_dat; c_strobes = c_strobes + 1; end   // lw_blk_mux's gate
 	if (!x_ack && c_ack_d) c_frames = c_frames + 1;
 end
 task core_ask(input [31:0] lba);
@@ -2753,6 +2901,458 @@ task sec_case15;
 		wait_word(C_IDX4, {16'd0, sec_head[15:0]}, 200, ok);
 		check("C_IDX[4] at the head once the last word's done is back", ok, 1);
 		check("no REQUEST: every frame was ahead", rq_n, 0);
+	end
+endtask
+
+// B1. a C_BIND store made while a REQUEST is part-written waits for the record's head; its BIND follows at once
+task sec_case16;
+	integer b0, b, d, e, q;
+	begin
+		$display("-- SECTOR B1: a C_BIND store owed while a REQUEST is part-written follows its head; its BIND next");
+		sec_session(16'h0C12, 0);
+		repeat (4 << POLLC) @(posedge clk);
+		rq_drain;
+		tl_n = 0; tl_on = 1;
+		stall_wd = 32'd7100; stall_n = 3000; stall_w_en = 1;    // the LBA's store: longer than a poll period
+		core_ask(32'd7100);
+		i = 0; while (!stall_on && i < 200000) begin @(posedge clk); i = i + 1; end
+		check("the REQUEST's LBA store is in flight", stall_on, 1);
+		poke(H_BIND, 32'h0000_0800);
+		wait_word(C_BIND, 32'h0000_0801, 3000, ok);
+		repeat (10 << POLLC) @(posedge clk);
+		tl_on = 0;
+		check("C_BIND = 0x801", ok, 1);
+		b0 = -1;
+		for (q = 0; q < tl_n; q = q + 1) if (b0 < 0 && tl_we[q] && tl_dat[q] == 32'd7100) b0 = q;
+		d = tl_find(b0 < 0 ? 0 : b0, C_IDX3, 0, 0, 1);
+		b = tl_find(0, C_BIND, 32'h0000_0801, 1, 1);
+		e = -1;
+		for (q = (b < 0 ? 0 : b); q < tl_n; q = q + 1)
+			if (e < 0 && tl_we[q] && in_evt(tl_off[q]) && tl_dat[q][31:24] == 8'h27) e = q;
+		check("the REQUEST's head, then the C_BIND store, then the BIND header", b0 >= 0 && d > b0 && b > d && e > b, 1);
+		if (e >= 0) check("the BIND's arg is C_BIND[7:0]", tl_dat[e][23:16], 8'h01);
+		rq_drain;
+		check("the host takes that BIND last", bind_n > 0 && bind_log[bind_n - 1] == 8'h01, 1);
+		core_drop;
+	end
+endtask
+
+// B2. a bind change learnt from the EVT line and the BIND record behind it, with no read of C_BIND
+task sec_case17;
+	reg [31:0] ask1, ask2;
+	integer b0, t;
+	begin
+		$display("-- SECTOR B2: a dropped bind is learnt from the line and its BIND record, with no timed C_BIND read");
+		reset_floor;
+		sec_head = 0; rq_n = 0; bind_n = 0; ev_n = 0;
+		x_req = 1'b0; x_reset = 1'b0;
+		start_session(0, 0, 1, 16'h0C13, ok);           // H_LINE bit 3: the EVT line
+		ask1 = {29'd0, MNT_MASK, 1'b1};
+		ask2 = MNT_B ? {29'd0, MNT_MASK & ~((MK == 1) ? 2'b01 : 2'b10), 1'b1} : 32'd0;
+		poke(H_SECTOR, ask1);
+		wait_word(C_BIND, ask1, 3000, ok);
+		check("every slot bound", ok, 1);
+		repeat (4 << POLLC) @(posedge clk);
+		rq_drain;
+		repeat (8 << POLLC) @(posedge clk);
+		check("the line is low with the ring drained", line_out, 0);
+		b0 = bind_n;
+		poke(H_SECTOR, ask2);
+		t = 0; while (!line_out && t < 300000) begin @(posedge clk); t = t + 1; end
+		check("the line rises", line_out, 1);
+		rq_drain;
+		check("a BIND record is behind it", bind_n - b0 >= 1, 1);
+		check("the last BIND shows the dropped bit", bind_n > 0 ? bind_log[bind_n - 1] : 8'hFF, ask2[7:0]);
+		repeat (8 << POLLC) @(posedge clk);
+		check("the line falls once the ring is drained", line_out, 0);
+	end
+endtask
+`endif
+
+`ifdef OCRAM_TB_MNT
+// The mount slots: two block-device cores on the window's save-slot nets, the host's mount ring
+reg  [15:0] mbuf1 [0:2047];
+reg  [15:0] mbuf2 [0:2047];
+reg   [1:0] mack_d = 2'd0;
+integer     mc_strobes1 = 0, mc_strobes2 = 0, mc_frames1 = 0, mc_frames2 = 0;
+always @(posedge clk_sys) begin
+	mack_d <= xm_ack;
+	if (xm_ack[0] && !mack_d[0]) begin mc_rd[0] <= 1'b0; mc_wr[0] <= 1'b0; end
+	if (xm_ack[1] && !mack_d[1]) begin mc_rd[1] <= 1'b0; mc_wr[1] <= 1'b0; end
+	if (x_wr && xm_ack[0]) begin mbuf1[x_adr[10:0]] <= x_dat; mc_strobes1 = mc_strobes1 + 1; end
+	if (x_wr && xm_ack[1]) begin mbuf2[x_adr[10:0]] <= x_dat; mc_strobes2 = mc_strobes2 + 1; end
+	mc_din1 <= mbuf1[x_adr[10:0]];
+	mc_din2 <= mbuf2[x_adr[10:0]];
+	if (!xm_ack[0] && mack_d[0]) mc_frames1 = mc_frames1 + 1;
+	if (!xm_ack[1] && mack_d[1]) mc_frames2 = mc_frames2 + 1;
+end
+function integer mwords(input integer cnt);
+	mwords = (cnt + 1) << (MBLKSZ + 5);
+endfunction
+function [31:0] mword(input integer k, input [31:0] lba, input integer gen, input integer j);
+	mword = v_of({k[1:0], lba[9:0], gen[3:0], j[15:0]});
+endfunction
+function integer mc_frames(input integer k);
+	mc_frames = (k == 1) ? mc_frames1 : mc_frames2;
+endfunction
+function integer mc_strobes(input integer k);
+	mc_strobes = (k == 1) ? mc_strobes1 : mc_strobes2;
+endfunction
+function [15:0] mb(input integer k, input integer a);
+	mb = (k == 1) ? mbuf1[a] : mbuf2[a];
+endfunction
+function [7:0] mbl(input integer k, input integer a);
+	reg [15:0] h;
+	begin h = mb(k, a); mbl = h[7:0]; end
+endfunction
+// word j of slot k's buffer, as the core's strobes lay it: two halfwords wide, four bytes narrow
+function [31:0] mc_word(input integer k, input integer j);
+	mc_word = x_wide ? {mb(k, 2 * j + 1), mb(k, 2 * j)} :
+	                   {mbl(k, 4 * j + 3), mbl(k, 4 * j + 2), mbl(k, 4 * j + 1), mbl(k, 4 * j)};
+endfunction
+task mc_clear(input integer k);
+	integer j;
+	begin for (j = 0; j < 2048; j = j + 1) if (k == 1) mbuf1[j] = 16'hDEAD; else mbuf2[j] = 16'hDEAD; end
+endtask
+task mc_pattern(input integer k);
+	integer j;
+	reg [15:0] r;
+	begin
+		for (j = 0; j < 2048; j = j + 1) begin
+			r = $random(seed);
+			if (!x_wide) r[15:8] = 8'd0;
+			if (k == 1) mbuf1[j] = r; else mbuf2[j] = r;
+		end
+	end
+endtask
+task mc_ask(input integer k, input integer wr, input [31:0] lba, input integer cnt);
+	begin
+		@(negedge clk_sys);
+		if (k == 1) begin mc_lba1 = lba; mc_cnt1 = cnt; if (wr) mc_wr[0] = 1'b1; else mc_rd[0] = 1'b1; end
+		else begin mc_lba2 = lba; mc_cnt2 = cnt; if (wr) mc_wr[1] = 1'b1; else mc_rd[1] = 1'b1; end
+	end
+endtask
+task mc_wait(input integer k, input integer f0, input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 100) begin
+			if (mc_frames(k) > f0) ok = 1;
+			else begin @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+// slot k's block as the core holds it: zeros from word z on
+task mc_check(input string what, input integer k, input [31:0] lba, input integer gen, input integer n,
+              input integer z);
+	integer j, bad;
+	reg [31:0] w;
+	begin
+		bad = 0;
+		for (j = 0; j < n; j = j + 1) begin
+			w = (j >= z) ? 32'd0 : mword(k, lba, gen, j);
+			if (mc_word(k, j) !== w) begin
+				if (bad < 4) $display("   %s: word %0d: got %08h exp %08h", what, j, mc_word(k, j), w);
+				bad = bad + 1;
+			end
+		end
+		check(what, bad, 0);
+	end
+endtask
+
+// the host's mount ring: records at the free-running word index mnt_head, one H_IDX[0] store publishes them
+integer mnt_head = 0;
+task mnt_put(input [31:0] v);
+	begin poke(MNT_BASE + ((mnt_head[15:0] & (MNT_WORDS - 1)) << 2), v); mnt_head = mnt_head + 1; end
+endtask
+task mnt_frame(input integer k, input integer cnt, input [31:0] lba, input integer gen);
+	integer j, n;
+	begin
+		n = mwords(cnt);
+		mnt_put({8'h10, cnt[5:0], k[1:0], n[15:0] + 16'd1});
+		mnt_put(lba);
+		for (j = 0; j < n; j = j + 1) mnt_put(mword(k, lba, gen, j));
+	end
+endtask
+task mnt_publish;
+	begin poke(H_IDX0, {16'd0, mnt_head[15:0]}); end
+endtask
+function [15:0] mnt_tail(input dummy);
+	mnt_tail = mem[C_IDX0 >> 2][15:0];
+endfunction
+task mnt_room(input integer need, input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 100) begin
+			if (MNT_WORDS - ((mnt_head - mnt_tail(1'b0)) & 16'hFFFF) >= need) ok = 1;
+			else begin @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+task mrq_wait(input integer n0, input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 20) begin
+			rq_drain;
+			if (mrq_n > n0) ok = 1;
+			else begin repeat (5) @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+task wr_wait(input integer n0, input integer us, output integer ok);
+	integer t;
+	begin
+		ok = 0; t = 0;
+		while (!ok && t < us * 20) begin
+			rq_drain;
+			if (wr_n > n0) ok = 1;
+			else begin repeat (5) @(posedge clk); t = t + 1; end
+		end
+	end
+endtask
+// a SECTOR session with the mount slots in mask bound beside the disc slot
+task mnt_session(input [15:0] nonce, input [1:0] mask);
+	reg [31:0] want;
+	begin
+		mnt_head = 0; mrq_n = 0; wr_n = 0; bind_n = 0; ev_n = 0;
+		mc_rd = 2'd0; mc_wr = 2'd0; x_commit = 1'b0;
+		sec_session(nonce, 0);
+		want = {29'd0, mask & MNT_MASK, 1'b1};
+		poke(H_SECTOR, want);
+		wait_word(C_BIND, want, 3000, ok);
+		check("the asked mount slots are bound", ok, 1);
+	end
+endtask
+
+// M1. mount reads, k = 1, 2, wide and byte, blk_cnt 0 and 3, each behind a stale frame
+task mnt_case1;
+	integer w, kk, c, n, n0, f0;
+	reg [31:0] lba;
+	begin
+		$display("-- mount M1: a read of one block and of four, each slot, wide and byte: the core holds the block");
+		for (w = 1; w >= 0; w = w - 1) begin
+			mnt_session(16'h0D01 + w[15:0], 2'b11);
+			x_wide = w[0];
+			for (kk = 1; kk <= 2; kk = kk + 1) if (MNT_MASK[kk - 1]) for (c = 0; c <= 3; c = c + 3) begin
+				lba = 100 * kk + 10 * w + c;
+				n = mwords(c);
+				mc_clear(kk);
+				n0 = mrq_n; f0 = mc_frames(kk);
+				mc_ask(kk, 0, lba, c);
+				mrq_wait(n0, 3000, ok);
+				check($sformatf("k %0d blk_cnt %0d wide %0d: a mount REQUEST is posted", kk, c, w), ok, 1);
+				check("its arg {blk_cnt, k}", mrq_arg[n0], {c[5:0], kk[1:0]});
+				check("its LBA", mrq_lba[n0], lba);
+				mnt_room(mwords(3 - c) + n + 4, 3000, ok);
+				mnt_frame(kk, 3 - c, lba, 1);       // another blk_cnt: skipped by its length
+				mnt_frame(kk, c, lba, 0);
+				mnt_publish;
+				mc_wait(kk, f0, 20000, ok);
+				check("the block plays", ok, 1);
+				mc_check("the block, as the core holds it", kk, lba, 0, n, n);
+				wait_word(C_IDX0, {16'd0, mnt_head[15:0]}, 1000, ok);
+				check("C_IDX[0] moves past both records", ok, 1);
+			end
+			x_wide = 1'b1;
+		end
+		$display("-- mount M1: a request longer than MISTER_OCRAM_MOUNT_FRAME is never offered");
+		mnt_session(16'h0D03, 2'b11);
+		n0 = mrq_n;
+		mc_ask(MK, 0, 32'd150, MFRAME / 128);
+		repeat (40 << POLLC) @(posedge clk);
+		rq_drain;
+		check("no REQUEST for it", mrq_n - n0, 0);
+		@(negedge clk_sys); mc_rd = 2'd0;
+	end
+endtask
+
+// M2. WRITEs: the words, the ack's fall at the publish, the room check and the wrap
+task mnt_case2;
+	integer w, n, n0, f0, b, j;
+	begin
+		$display("-- mount M2: a WRITE's words are the core's buffer; the ack falls at the publish");
+		mnt_session(16'h0D10, 2'b11);
+		for (w = 1; w >= 0; w = w - 1) begin
+			x_wide = w[0];
+			n = mwords(0);
+			mc_pattern(MK);
+			n0 = wr_n; f0 = mc_frames(MK);
+			mc_ask(MK, 1, 32'd200 + w, 0);
+			wr_wait(n0, 5000, ok);
+			check($sformatf("wide %0d: a WRITE record is published", w), ok, 1);
+			check("its arg {blk_cnt, k}", wr_arg, {6'd0, MK[1:0]});
+			check("its LBA", wr_lba, 32'd200 + w);
+			check("its length", wr_len, n);
+			bad = 0;
+			for (j = 0; j < n; j = j + 1) if (wr_w[j] !== mc_word(MK, j)) bad = bad + 1;
+			check("its words are the buffer's", bad, 0);
+			check("the slot's ack was up at the head store", wr_ack_at_pub, 1);
+			mc_wait(MK, f0, 2000, ok);
+			check("then the ack falls", ok, 1);
+		end
+		x_wide = 1'b1;
+
+		$display("-- mount M2: three 514-word WRITEs left in the ring: the fourth waits for room, then wraps it");
+		for (b = 0; b < 3; b = b + 1) begin
+			mc_pattern(MK); f0 = mc_frames(MK);
+			mc_ask(MK, 1, 32'd300 + b, 3);
+			mc_wait(MK, f0, 20000, ok);
+			check($sformatf("WRITE %0d completes with room", b), ok, 1);
+		end
+		n0 = wr_published;
+		mc_pattern(MK); f0 = mc_frames(MK);
+		mc_ask(MK, 1, 32'd303, 3);
+		repeat (40 << POLLC) @(posedge clk);
+		check("with no room for its 514 words the fourth is not published", wr_published, n0);
+		check("its ack stays up: the core waits for the ring, not the host", xm_ack[MK - 1], 1'b1);
+		n0 = wr_n;
+		rq_drain;
+		check("the three are taken", wr_n - n0, 3);
+		wr_wait(n0 + 3, 20000, ok);
+		check("after the drain the fourth is published", ok, 1);
+		check("its LBA", wr_lba, 32'd303);
+		bad = 0;
+		for (j = 0; j < mwords(3); j = j + 1) if (wr_w[j] !== mc_word(MK, j)) bad = bad + 1;
+		check("its words are the buffer's", bad, 0);
+		check("the EVT ring wrapped under the four", pub_words > EVT_WORDS, 1);
+		mc_wait(MK, f0, 2000, ok);
+		check("its ack falls at the publish", ok, 1);
+	end
+endtask
+
+// M3. the session ends after word p, both directions
+task mnt_case3;
+	integer pi, p, n, n0, f0, s0, z, w0, pub0;
+	begin
+		$display("-- mount M3: the session ends inside a read and inside a WRITE: the ack falls, a cut WRITE publishes nothing");
+		n = mwords(0);
+		for (pi = 0; pi < 4; pi = pi + 1) begin
+			p = (pi == 0) ? 0 : (pi == 1) ? 1 : (pi == 2) ? n / 2 : n - 1;
+			mnt_session(16'h0D20 + pi[15:0], 2'b11);
+			mc_clear(MK); n0 = mrq_n; f0 = mc_frames(MK);
+			mc_ask(MK, 0, 32'd400 + pi, 0);
+			mrq_wait(n0, 3000, ok);
+			s0 = mc_strobes(MK);
+			mnt_frame(MK, 0, 32'd400 + pi, 0); mnt_publish;
+			i = 0; while (mc_strobes(MK) < s0 + 2 * p + 1 && i < 400000) begin @(posedge clk); i = i + 1; end
+			gpo_store(GPO_IO);
+			mc_wait(MK, f0, 5000, ok);
+			check($sformatf("a read cut after word %0d: the ack falls", p), ok, 1);
+			z = 0; while (z < n && mc_word(MK, z) === mword(MK, 32'd400 + pi, 0, z)) z = z + 1;
+			check("the words before the cut are the block's", z >= p, 1);
+			mc_check("then zeros to the end", MK, 32'd400 + pi, 0, n, z);
+			wait_stopped(1000, ok);
+			if (p < n - 1) begin
+				start_session(0, 0, 0, 16'h0D30 + pi[15:0], ok);
+				peek(C_STATE, v); check("the next hello's C_STATE bit 16 (a mount record abandoned)", v[16], 1);
+			end
+
+			p = (pi == 0) ? 0 : (pi == 1) ? 1 : (pi == 2) ? n / 2 : n;
+			mnt_session(16'h0D28 + pi[15:0], 2'b11);
+			mc_pattern(MK); f0 = mc_frames(MK); w0 = wtakes; pub0 = wr_published;
+			if (p == n) begin stall_wd = mc_word(MK, n - 1); stall_n = 3000; stall_w_en = 1; end
+			mc_ask(MK, 1, 32'd410 + pi, 0);
+			i = 0;
+			while (!(p == n ? stall_on : p == 0 ? xm_ack[MK - 1] : (wtakes >= w0 + p)) && i < 400000) begin
+				@(posedge clk); i = i + 1;
+			end
+			gpo_store(GPO_IO);
+			mc_wait(MK, f0, 5000, ok);
+			check($sformatf("a WRITE cut after word %0d: the ack falls", p), ok, 1);
+			repeat (200) @(posedge clk);
+			check("the cut WRITE publishes nothing", wr_published, pub0);
+			check("C_IDX[3] holds the last whole record's head", mem[C_IDX3 >> 2][15:0], pub_head[15:0]);
+			wait_stopped(1000, ok);
+			stall_w_en = 0;
+		end
+	end
+endtask
+
+// M4. a disc read and both mount slots contending; the commit mark per slot
+task mnt_case4;
+	integer n0, m0, w0, f0, g0, h0, j;
+	begin
+		$display("-- mount M4: with the commit mark at 1 no mount mux moves; then a disc read and both mount slots together");
+		mnt_session(16'h0D40, 2'b00);
+		x_commit = 1'b1;
+		poke(H_SECTOR, {29'd0, MNT_MASK, 1'b1});
+		repeat (20 << POLLC) @(posedge clk);
+		check("no mount mux moves while the mark reads 1", xm_en, 2'b00);
+		check("C_BIND shows no mount bit", mem[C_BIND >> 2][2:1], 2'b00);
+		check("the disc slot's mux, already here, stays", x_en, 1);
+		x_commit = 1'b0;
+		wait_word(C_BIND, {29'd0, MNT_MASK, 1'b1}, 3000, ok);
+		check("with the mark at 0 the mount bits rise", ok, 1);
+		n0 = rq_n; m0 = mrq_n; w0 = wr_n;
+		f0 = c_frames; g0 = mc_frames(MK); h0 = MK2 ? mc_frames(MK2) : 0;
+		mc_clear(MK);
+		if (MK2) mc_pattern(MK2);
+		core_ask(32'd500);
+		mc_ask(MK, 0, 32'd501, 0);
+		if (MK2) mc_ask(MK2, 1, 32'd502, 0);
+		rq_wait(n0, 3000, ok);
+		check("the disc's REQUEST", ok && rq_lba_log[n0] == 32'd500, 1);
+		mrq_wait(m0, 3000, ok);
+		check("the mount slot's REQUEST", ok && mrq_lba[m0] == 32'd501, 1);
+		sec_frame(32'd500, 0); sec_publish;
+		mnt_frame(MK, 0, 32'd501, 0); mnt_publish;
+		core_wait(f0, 5000, ok);
+		check("the disc frame plays", ok, 1);
+		core_check("its payload", 32'd500, 0, SFRAME);
+		mc_wait(MK, g0, 5000, ok);
+		check("the mount slot's block plays", ok, 1);
+		mc_check("its payload", MK, 32'd501, 0, mwords(0), mwords(0));
+		if (MK2) begin
+			wr_wait(w0, 5000, ok);
+			check("the other mount slot's WRITE is published", ok && wr_lba == 32'd502 && wr_arg == {6'd0, MK2[1:0]}, 1);
+			bad = 0;
+			for (j = 0; j < mwords(0); j = j + 1) if (wr_w[j] !== mc_word(MK2, j)) bad = bad + 1;
+			check("its words are its buffer's", bad, 0);
+			mc_wait(MK2, h0, 2000, ok);
+			check("its ack falls", ok, 1);
+		end
+	end
+endtask
+
+// M5. requests standing while their bits are 0 are posted as each bind's first REQUEST, after a BIND showing it
+task mnt_case5;
+	integer e0, q, k, bad5, nk;
+	reg [7:0] lastb;
+	begin
+		$display("-- mount M5: requests raised while H_SECTOR is 0 are each bind's first REQUEST, after its BIND");
+		reset_floor;
+		sec_head = 0; rq_n = 0; mnt_head = 0; mrq_n = 0; wr_n = 0; bind_n = 0; ev_n = 0;
+		x_req = 1'b0; x_reset = 1'b0; mc_rd = 2'd0; mc_wr = 2'd0;
+		start_session(0, 0, 0, 16'h0D50, ok);
+		core_ask(32'd800);
+		mc_ask(MK, 0, 32'd801, 0);
+		if (MK2) mc_ask(MK2, 0, 32'd802, 0);
+		repeat (40 << POLLC) @(posedge clk);
+		rq_drain;
+		check("no REQUEST while every bit is 0", rq_n + mrq_n, 0);
+		e0 = ev_n;
+		poke(H_SECTOR, {29'd0, MNT_MASK, 1'b1});
+		nk = MK2 ? 2 : 1;
+		rq_wait(0, 3000, ok);
+		check("the disc slot's REQUEST, for its standing request", ok && rq_lba_log[0] == 32'd800, 1);
+		mrq_wait(nk - 1, 3000, ok);
+		check("each mount slot's REQUEST", ok, 1);
+		for (q = 0; q < mrq_n && q < 2; q = q + 1)
+			check($sformatf("mount REQUEST %0d: the slot's standing LBA", q), mrq_lba[q],
+			      (mrq_arg[q][1:0] == 2'd1) ? 32'd801 : 32'd802);
+		// each REQUEST is read under the last BIND before it, which shows its slot's bit
+		bad5 = 0; lastb = 8'd0;
+		for (q = e0; q < ev_n && q < 1024; q = q + 1) begin
+			if (ev_log[q][15:8] == 8'h27) lastb = ev_log[q][7:0];
+			else if (ev_log[q][15:8] == 8'h21) begin
+				k = ev_log[q][1:0];
+				if (!lastb[k]) bad5 = bad5 + 1;
+			end
+		end
+		check("every REQUEST follows a BIND that shows its bit", bad5, 0);
+		core_drop;
 	end
 endtask
 `endif
@@ -3369,6 +3969,15 @@ initial begin
 	sec_case11;
 	sec_case13;
 	sec_case15;
+	sec_case16;
+	sec_case17;
+`endif
+`ifdef OCRAM_TB_MNT
+	mnt_case1;
+	mnt_case2;
+	mnt_case3;
+	mnt_case4;
+	mnt_case5;
 `endif
 `ifdef MISTER_OCRAM_FIO
 	fio_case1;
@@ -3399,3 +4008,6 @@ initial begin #100000000 $display("FAILED: timeout"); $finish; end
 endmodule
 
 `default_nettype wire
+`ifdef OCRAM_TB_MNT
+`undef OCRAM_TB_MNT
+`endif
