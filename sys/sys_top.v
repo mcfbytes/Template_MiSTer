@@ -343,6 +343,17 @@ localparam [31:0] OCRAM_FIO_GAP   = `MISTER_OCRAM_FIO_GAP;
 `else
 localparam [31:0] OCRAM_FIO_GAP   = 32'd4;
 `endif
+// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}, declared once for the walker and C_K[9]: the FPGA
+// select alone; with MISTER_OCRAM_UIO also the UIO select and the OSD selects, HDMI only with an HDMI osd
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_DEBUG_NOHDMI
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b1011;
+`else
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b1111;
+`endif
+`else
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b0010;
+`endif
 `ifdef LW_OCRAM_FIO_LINK
 // the download player's side of lw_link
 wire        ocram_fio_own, ocram_fio_hold, ocram_fio_strobe;
@@ -1044,6 +1055,7 @@ sysmem_lite sysmem
 // The OCRAM mailbox floor: the fpga2hps bridge's AXI3 master (docs/OCRAM_MAILBOX.md).
 hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_GAP(OCRAM_SEC_GAP),
                    .SEC_BLKSZ(OCRAM_BLKSZ), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),
+                   .FIO_SELS(OCRAM_FIO_SELS),
                    .MNT0_SLOT(OCRAM_MNT0_SLOT), .MNT1_SLOT(OCRAM_MNT1_SLOT), .MNT_FRAME(OCRAM_MNT_FRAME)) ocram_master
 (
 	.clk(clk_100m),
@@ -2254,7 +2266,7 @@ localparam        OCRAM_OSD_EN = 0;
 `endif
 hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_EN), .FRAME(OCRAM_SEC_FRAME),
                .GAP(OCRAM_SEC_GAP), .FIO_EN(OCRAM_FIO_EN), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),
-               .MNT_EN(OCRAM_MNT_EN), .MFRAME(OCRAM_MNT_FRAME), .BLKSZ(OCRAM_BLKSZ)) ocram_rx
+               .MNT_EN(OCRAM_MNT_EN), .MFRAME(OCRAM_MNT_FRAME), .BLKSZ(OCRAM_BLKSZ), .FIO_SELS(OCRAM_FIO_SELS)) ocram_rx
 (
 	.clk(clk_100m),
 	.clk_sys(clk_sys),

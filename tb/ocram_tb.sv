@@ -154,13 +154,15 @@ localparam [31:0] C_RING1_FIO = 32'h2968_0400;   // kind 5 (LANE), line 5, 1024 
 // the select mask: the FPGA select; with MISTER_OCRAM_UIO also the UIO and OSD selects (no HDMI osd: not select 2)
 `ifdef MISTER_OCRAM_UIO
 `ifdef MISTER_DEBUG_NOHDMI
-localparam [31:0] C_K9_EXP    = {16'h000B, FGAP[15:0]};
+localparam  [3:0] FSELS       = 4'b1011;
 `else
-localparam [31:0] C_K9_EXP    = {16'h000F, FGAP[15:0]};
+localparam  [3:0] FSELS       = 4'b1111;
 `endif
 `else
-localparam [31:0] C_K9_EXP    = {16'h0002, FGAP[15:0]};
+localparam  [3:0] FSELS       = 4'b0010;
 `endif
+// passed to the master and the walker as sys_top passes OCRAM_FIO_SELS
+localparam [31:0] C_K9_EXP    = {12'd0, FSELS, FGAP[15:0]};
 `ifdef MISTER_OCRAM_SECTOR_FRAME
 localparam integer SFRAME = `MISTER_OCRAM_SECTOR_FRAME;
 `else
@@ -365,7 +367,7 @@ reg   [1:0] sel_m = 2'b00;   // both osd selects low: the quiet guard
 reg         view_m = 1'b1;   // the I/O view
 
 hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BLKSZ(SBLKSZ), .FIO_GAP(FGAP),
-                   .MNT0_SLOT(MSLOT0), .MNT1_SLOT(MSLOT1), .MNT_FRAME(MFRAME)) dut
+                   .FIO_SELS(FSELS), .MNT0_SLOT(MSLOT0), .MNT1_SLOT(MSLOT1), .MNT_FRAME(MFRAME)) dut
 (
 	.clk(clk),
 	.hps_rst_n(hps_rst_n),
@@ -397,7 +399,7 @@ hps_ocram_master #(.SEC_SLOT(SSLOT), .SEC_FRAME(SFRAME), .SEC_GAP(SGAP), .SEC_BL
 );
 
 hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP(SGAP), .FIO_EN(FIO_B),
-               .FIO_GAP(FGAP), .MNT_EN(MNT_MASK), .MFRAME(MFRAME), .BLKSZ(MBLKSZ)) u_osd
+               .FIO_GAP(FGAP), .MNT_EN(MNT_MASK), .MFRAME(MFRAME), .BLKSZ(MBLKSZ), .FIO_SELS(FSELS)) u_osd
 (
 	.clk(clk),
 	.clk_sys(clk_sys),
@@ -4395,11 +4397,7 @@ endtask
 // fall: that stream is all sys_top's UIO write arms read, so equal streams are equal registers there; hps_io's and
 // the osds' registers are compared directly. A link OSD transaction raises both OSD selects; the mailbox sends it as
 // two frames, sel 2 then sel 3 (sel 2 only with an HDMI osd).
-`ifdef MISTER_DEBUG_NOHDMI
-localparam [3:0] U_SELS = 4'b1011;
-`else
-localparam [3:0] U_SELS = 4'b1111;
-`endif
+localparam [3:0] U_SELS = FSELS;
 reg   [3:0] tw_l = 4'd0;                 // the twin link's selects {vga, hdmi, fpga, uio}
 reg         tw_clk = 1'b0;
 reg  [15:0] tw_d = 16'd0;

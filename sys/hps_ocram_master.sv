@@ -105,6 +105,8 @@ module hps_ocram_master #(
 	// The download tier's declaration (MISTER_OCRAM_FIO_RING, MISTER_OCRAM_FIO_GAP), for C_RING[1] and C_K[9]
 	parameter [31:0] FIO_RING  = 32'd10,
 	parameter [31:0] FIO_GAP   = 32'd4,
+	// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: sys_top's OCRAM_FIO_SELS, also the walker's
+	parameter  [3:0] FIO_SELS  = 4'b0010,
 	// The mount slots' declaration (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT, _MOUNT_FRAME), for C_K[10, 11]
 	parameter [31:0] MNT0_SLOT = 32'd2,
 	parameter [31:0] MNT1_SLOT = 32'd3,
@@ -316,18 +318,8 @@ localparam [31:0] C_RING3_EVT   = {5'd4, 5'd4, 4'd11, 4'd0, 14'h1000};    // EVT
 /* verilator lint_off UNUSEDPARAM */   // a DIAG build's words or a SECTOR build's, never both
 localparam [31:0] C_RING4_TS    = {5'd31, 5'd0, 4'd13, 4'd0, 14'h1C00};   // DIAG, no line, 8192 words, 0x7000
 localparam [31:0] C_RING4_SEC   = {5'd2, 5'd0, 4'd13, 4'd0, 14'h1C00};    // SECTOR, no line, 8192 words, 0x7000
-// LANE, line 5, 2^FIO_RING words at 0x1000 (8,192 at 0x7000); the select mask and the gap. The mask is the
-// walker's FIO_SELS (hps_ocram_rx.sv), from the same macros: bit 1 the FPGA select; with MISTER_OCRAM_UIO also bit 0
-// the UIO select and the OSD selects, bit 3 VGA and bit 2 HDMI (not with MISTER_DEBUG_NOHDMI).
-`ifdef MISTER_OCRAM_UIO
-`ifdef MISTER_DEBUG_NOHDMI
-localparam  [3:0] FIO_SELS      = 4'b1011;
-`else
-localparam  [3:0] FIO_SELS      = 4'b1111;
-`endif
-`else
-localparam  [3:0] FIO_SELS      = 4'b0010;
-`endif
+// LANE, line 5, 2^FIO_RING words at 0x1000 (8,192 at 0x7000); the select mask (the FIO_SELS parameter, the one
+// hps_ocram_rx plays by) and the gap.
 localparam [13:0] FIO_OFF       = (FIO_RING == 32'd13) ? 14'h1C00 : 14'h0400;
 localparam [31:0] C_RING1_FIO   = {5'd5, 5'd5, FIO_RING[3:0], 4'd0, FIO_OFF};
 localparam [31:0] C_K9_FIO      = {12'd0, FIO_SELS, FIO_GAP[15:0]};

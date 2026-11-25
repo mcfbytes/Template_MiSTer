@@ -115,7 +115,8 @@
 module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_EN = 0,
                       parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2,
                       parameter FIO_EN = 0, parameter [31:0] FIO_RING = 32'd10, parameter [31:0] FIO_GAP = 32'd4,
-                      parameter [1:0] MNT_EN = 2'd0, parameter [31:0] MFRAME = 32'd128, parameter [2:0] BLKSZ = 3'd2)
+                      parameter [1:0] MNT_EN = 2'd0, parameter [31:0] MFRAME = 32'd128, parameter [2:0] BLKSZ = 3'd2,
+                      parameter [3:0] FIO_SELS = 4'b0010)
 (
 	input  wire        clk,          // clk_100m: the walker
 	input  wire        clk_sys,      // the core clock: the sinks
@@ -243,18 +244,8 @@ localparam [15:0] SEC_BASE  = 16'h7000;
 localparam [15:0] SEC_WORDS = 16'd8192;
 localparam [15:0] FIO_BASE  = (FIO_RING == 32'd13) ? 16'h7000 : 16'h1000;
 localparam [15:0] FIO_WORDS = 16'd1 << FIO_RING[3:0];
-// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: the FPGA select (1) alone; with MISTER_OCRAM_UIO
-// also the UIO select (0) and both OSD selects, the HDMI one (2) only with an HDMI osd. hps_ocram_master's C_K[9]
-// declares the same mask from the same macros.
-`ifdef MISTER_OCRAM_UIO
-`ifdef MISTER_DEBUG_NOHDMI
-localparam  [3:0] FIO_SELS  = 4'b1011;
-`else
-localparam  [3:0] FIO_SELS  = 4'b1111;
-`endif
-`else
-localparam  [3:0] FIO_SELS  = 4'b0010;
-`endif
+// FIO_SELS, the selects an LFRAME may name ({osd_vga, osd_hdmi, fpga, uio}), is sys_top's OCRAM_FIO_SELS, the same
+// parameter hps_ocram_master declares in C_K[9].
 `ifdef MISTER_OCRAM_LANE
 localparam        CAP_EN    = 1;            // the capture lane: capture LFRAMEs and their REPLY records
 `else
