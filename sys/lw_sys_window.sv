@@ -92,7 +92,10 @@ module lw_sys_window #(
 	parameter [31:0] SAVE1_FRAME = 32'd256,
 	parameter [31:0] SAVE1_LBA_BITS = 32'd32,
 	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and list its entry.
-	parameter        LANE_EN   = 0
+	parameter        LANE_EN   = 0,
+	// The OCRAM SECTOR feeder (sys_top.v sets it with MISTER_OCRAM_SECTOR_SLOT): 1 = the primary slot's to-core bits
+	// of HPS_BUS take the xsec_* inputs; no SECTOR entry is listed. With SEC_EN the build stops.
+	parameter        SEC_EXT   = 0
 )
 (
 	input wire         clk,          // clk_100m
@@ -130,7 +133,19 @@ module lw_sys_window #(
 	input wire         osd_view,     // clk_sys: GPO[31], 1 = the link's I/O view
 	output wire        osd_we,       // clk_sys: one byte of every osd's osd_buffer (lw_osd.sv)
 	output wire [12:0] osd_addr,
-	output wire  [7:0] osd_byte
+	output wire  [7:0] osd_byte,
+
+	// The OCRAM SECTOR feeder (hps_ocram_rx.sv), on clk_sys: its nets to and from the primary slot's bits
+	input wire         xsec_en,      // en_sys
+	input wire         xsec_ack,
+	input wire         xsec_wr,
+	input wire  [15:0] xsec_dat,
+	input wire  [13:0] xsec_adr,
+	output wire        xsec_reset,   // HPS_BUS[132]
+	output wire        xsec_hps_ack, // [133]
+	output wire        xsec_req,     // [134], with the mux's and the mark's presence
+	output wire [31:0] xsec_lba,     // [166:135]
+	output wire        xsec_commit   // [380]
 );
 
 `ifdef LW_DIAG
@@ -608,15 +623,27 @@ else begin : nosec
 	assign sec_open   = 1'b0;
 	assign sec_owned  = 1'b0;
 	assign sec_idle   = 1'b1;
-	assign sec_en_sys = 1'b0;
-	assign sec_ack    = 1'b0;
-	assign sec_wr     = 1'b0;
-	assign sec_dat    = 16'd0;
-	assign sec_adr    = 14'd0;
+	// with SEC_EXT the OCRAM feeder drives the primary's bits; the assigns above stay the one driver of each
+	assign sec_en_sys = SEC_EXT ? xsec_en  : 1'b0;
+	assign sec_ack    = SEC_EXT ? xsec_ack : 1'b0;
+	assign sec_wr     = SEC_EXT ? xsec_wr  : 1'b0;
+	assign sec_dat    = SEC_EXT ? xsec_dat : 16'd0;
+	assign sec_adr    = SEC_EXT ? xsec_adr : 14'd0;
 	assign sec_xen    = 2'd0;
 	assign sec_xack   = 2'd0;
 end
+// both SECTOR macros: two feeders for one slot's bits; the build stops here
+if (SEC_EN && SEC_EXT) begin : sec2
+	sector_slot_on_two_feeders guard();
+end
 endgenerate
+
+// The OCRAM feeder's view of the primary slot: the mux's request (wired by its presence and the mark's) and LBA.
+assign xsec_reset   = SEC_EXT ? hps_lw[132] : 1'b0;
+assign xsec_hps_ack = SEC_EXT ? hps_lw[133] : 1'b0;
+assign xsec_req     = SEC_EXT ? hps_lw[134] & pres_sec[0] & pres_cmt : 1'b0;
+assign xsec_lba     = SEC_EXT ? hps_lw[166:135] : 32'd0;
+assign xsec_commit  = SEC_EXT ? hps_lw[380] : 1'b0;
 
 generate
 `ifdef MISTER_LW_LANE

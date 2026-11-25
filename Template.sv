@@ -60,8 +60,16 @@ assign VIDEO_ARY = (!ar) ? 12'd3 : 12'd0;
 // field 1 (no comma after the macro), and TPL_LW_J names the example's pad buttons, with the SECTOR block after
 // an S line that lets a stock Main mount an image on the block reader's slot. Without MISTER_LW, CONF_STR is the
 // stock string byte for byte.
+// TPL_BLK: a block reader on the slot either SECTOR feeder serves, the LW block or the OCRAM mailbox's.
 `ifdef MISTER_LW_SECTOR_SLOT
-localparam       BLK_SLOT  = `MISTER_LW_SECTOR_SLOT;   // the hps_io slot the SECTOR block feeds: 1-9 here (below)
+`define TPL_BLK
+`define TPL_BLK_SLOT `MISTER_LW_SECTOR_SLOT
+`elsif MISTER_OCRAM_SECTOR_SLOT
+`define TPL_BLK
+`define TPL_BLK_SLOT `MISTER_OCRAM_SECTOR_SLOT
+`endif
+`ifdef TPL_BLK
+localparam       BLK_SLOT  = `TPL_BLK_SLOT;            // the hps_io slot the SECTOR feeder serves: 1-9 here (below)
 localparam [7:0] BLK_DIGIT = "0" + BLK_SLOT;
 `define TPL_LW_J "S", BLK_DIGIT, ",IMG,Block image;", "J,Colour,Read block;",
 `else
@@ -115,7 +123,7 @@ wire  [10:0] ps2_key;
 wire  [31:0] joystick_0;
 reg  [127:0] status_in;
 reg          status_set = 0;
-`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef TPL_BLK
 wire      [31:0] sd_lba[BLK_SLOT + 1];
 wire [BLK_SLOT:0] sd_rd;
 wire [BLK_SLOT:0] sd_ack;
@@ -127,10 +135,12 @@ wire             sd_buff_wr;
 
 hps_io #(.CONF_STR(CONF_STR)
 `ifdef MISTER_LW
-`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef TPL_BLK
 	, .WIDE(1), .VDNUM(BLK_SLOT + 1)
 `ifdef MISTER_LW_BLKSZ
 	, .BLKSZ(`MISTER_LW_BLKSZ)
+`elsif MISTER_OCRAM_BLKSZ
+	, .BLKSZ(`MISTER_OCRAM_BLKSZ)
 `endif
 `endif
 `endif
@@ -151,7 +161,7 @@ hps_io #(.CONF_STR(CONF_STR)
 	.status_set(status_set),
 
 	.joystick_0(joystick_0),
-`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef TPL_BLK
 
 	.sd_lba(sd_lba),
 	.sd_rd(sd_rd),
@@ -239,7 +249,7 @@ assign LED_USER    = act_cnt[26]  ? act_cnt[25:18]  > act_cnt[7:0]  : act_cnt[25
 //
 // The first pad button ("Colour" in CONF_STR's J line) cycles the Noise colour option. The core writes the new
 // status word back, and the OSD shows the change.
-`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef TPL_BLK
 // With the SECTOR block (docs/LW_BRIDGE.md, "Hooking the SECTOR block"): a block reader on hps_io slot BLK_SLOT.
 // The second pad button ("Read block") reads the next block, from LBA 0 after a reset, into a 256-word RAM,
 // then sums the RAM's 16-bit words and writes {the LBA's low 16 bits, the sum} back as status[63:32]. lw_blk_mux
@@ -321,7 +331,7 @@ always @(posedge clk_sys) begin
 	st = status;
 	wb = joystick_0[4] & ~old_btn;
 	if (wb) st[4:3] = st[4:3] + 1'd1;
-`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef TPL_BLK
 	if (blk_done) begin st[63:32] = {blk_lba[15:0], blk_sum}; wb = 1; end
 `endif
 

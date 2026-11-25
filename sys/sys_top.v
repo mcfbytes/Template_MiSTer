@@ -256,14 +256,25 @@ end
 `define OSD_WPORTS
 `endif
 `endif
+// OCRAM_RX_PORTS: hps_ocram_rx is built, for the OSD ring, the SECTOR ring (MISTER_OCRAM_SECTOR_SLOT) or both.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`define OCRAM_RX_PORTS
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`ifndef OCRAM_RX_PORTS
+`define OCRAM_RX_PORTS
+`endif
+`endif
+`endif
 
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
 `ifdef MISTER_OCRAM
 // gp_in[26] = 1 - the OCRAM floor is built and its master runs (hps_ocram_master.sv drives it)
 wire        ocram_present, ocram_line;
-// The master's consumer port 0 (the OSD walker) and its session interface. Without MISTER_OCRAM_OSD the port is
-// tied off and the OSD statistics are the constant 0.
+// The master's consumer port 0 (hps_ocram_rx's walker) and its session interface. With neither ring the port is
+// tied off and the OSD statistics are the constant 0; without the SECTOR tier its nets are constants.
 wire        ocram_c0_req, ocram_c0_we;
 wire [15:0] ocram_c0_off;
 wire [31:0] ocram_c0_wdata;
@@ -272,11 +283,52 @@ wire [31:0] ocram_c0_rdata;
 wire        ocram_s_hello, ocram_s_live, ocram_s_tick, ocram_osd_bind;
 wire        ocram_c0_rest, ocram_c0_fault, ocram_c0_mid, ocram_c0_open;
 wire [15:0] ocram_osd_rows, ocram_osd_deepest;
+wire        ocram_sec_ask, ocram_evt_stop, ocram_c0_sfault, ocram_c0_smid, ocram_c0_sbind, ocram_c0_wide;
+wire        ocram_rq_post, ocram_rq_start;
+wire [31:0] ocram_rq_lba;
+// The SECTOR tier's declaration (its .qsf macros): the hps_io slot, the frame in 32-bit words (1-4096), the
+// strobe gap (2-15) and BLKSZ; hps_ocram_rx stops the build on an unservable geometry.
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam        OCRAM_SEC_EN    = 1;
+localparam [31:0] OCRAM_SEC_SLOT  = `MISTER_OCRAM_SECTOR_SLOT;
+`else
+localparam        OCRAM_SEC_EN    = 0;
+localparam [31:0] OCRAM_SEC_SLOT  = 32'd1;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_FRAME
+localparam [31:0] OCRAM_SEC_FRAME = `MISTER_OCRAM_SECTOR_FRAME;
+`else
+localparam [31:0] OCRAM_SEC_FRAME = 32'd128;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_GAP
+localparam [31:0] OCRAM_SEC_GAP   = `MISTER_OCRAM_SECTOR_GAP;
+`else
+localparam [31:0] OCRAM_SEC_GAP   = 32'd2;
+`endif
+`ifdef MISTER_OCRAM_BLKSZ
+localparam  [2:0] OCRAM_BLKSZ     = `MISTER_OCRAM_BLKSZ;
+`else
+localparam  [2:0] OCRAM_BLKSZ     = 3'd2;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+// the feeder's nets to the window's primary-slot bits (lw_sys_window's xsec_*)
+wire        xsec_en, xsec_ack, xsec_wr, xsec_reset, xsec_hps_ack, xsec_req, xsec_commit;
+wire [15:0] xsec_dat;
+wire [13:0] xsec_adr;
+wire [31:0] xsec_lba;
+`endif
 `ifdef MISTER_OCRAM_OSD
 wire        ocram_osd_we;
 wire [12:0] ocram_osd_addr;
 wire  [7:0] ocram_osd_byte;
-`else
+`endif
+`ifndef OCRAM_RX_PORTS
+assign ocram_c0_sfault = 1'b0;
+assign ocram_c0_smid   = 1'b0;
+assign ocram_c0_sbind  = 1'b0;
+assign ocram_c0_wide   = 1'b0;
+assign ocram_rq_post   = 1'b0;
+assign ocram_rq_lba    = 32'd0;
 assign ocram_c0_req   = 1'b0;
 assign ocram_c0_we    = 1'b0;
 assign ocram_c0_off   = 16'd0;
@@ -887,7 +939,8 @@ sysmem_lite sysmem
 
 `ifdef MISTER_OCRAM
 // The OCRAM mailbox floor: the fpga2hps bridge's AXI3 master (docs/OCRAM_MAILBOX.md).
-hps_ocram_master ocram_master
+hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_GAP(OCRAM_SEC_GAP),
+                   .SEC_BLKSZ(OCRAM_BLKSZ)) ocram_master
 (
 	.clk(clk_100m),
 `ifdef MISTER_LW
@@ -918,6 +971,15 @@ hps_ocram_master ocram_master
 	.c0_open(ocram_c0_open),
 	.osd_rows(ocram_osd_rows),
 	.osd_deepest(ocram_osd_deepest),
+	.sec_ask(ocram_sec_ask),
+	.evt_stop(ocram_evt_stop),
+	.c0_sfault(ocram_c0_sfault),
+	.c0_smid(ocram_c0_smid),
+	.c0_sbind(ocram_c0_sbind),
+	.c0_wide(ocram_c0_wide),
+	.rq_post(ocram_rq_post),
+	.rq_lba(ocram_rq_lba),
+	.rq_start(ocram_rq_start),
 
 	.awid(ocram_awid),
 	.awaddr(ocram_awaddr),
@@ -2022,20 +2084,28 @@ assign user_in[6] =         USER_IO[6];
 ///////////////////  User module connection ////////////////////////////
 
 wire        clk_sys;
-`ifdef MISTER_OCRAM
-`ifdef MISTER_OCRAM_OSD
-// The OSD consumer: ROW records from the OSD ring into every osd's osd_buffer (hps_ocram_osd.sv).
+`ifdef OCRAM_RX_PORTS
+// The host-to-core rings' consumer (hps_ocram_rx.sv): ROW records into every osd's osd_buffer, and with the SECTOR
+// tier the FRAME records into one hps_io slot through the window's xsec nets.
 `ifdef MENU_CORE
 localparam integer OCRAM_OSD_ROWS = 20;
 `else
 localparam integer OCRAM_OSD_ROWS = 16;
 `endif
+`ifdef MISTER_OCRAM_OSD
 `ifdef MISTER_DEBUG_NOHDMI
 wire [1:0] ocram_osd_sel = {io_osd_vga, 1'b0};       // no HDMI osd
 `else
 wire [1:0] ocram_osd_sel = {io_osd_vga, io_osd_hdmi};
 `endif
-hps_ocram_osd #(.ROWS(OCRAM_OSD_ROWS)) ocram_osd
+`endif
+`ifdef MISTER_OCRAM_OSD
+localparam        OCRAM_OSD_EN = 1;
+`else
+localparam        OCRAM_OSD_EN = 0;
+`endif
+hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_EN), .FRAME(OCRAM_SEC_FRAME),
+               .GAP(OCRAM_SEC_GAP)) ocram_rx
 (
 	.clk(clk_100m),
 	.clk_sys(clk_sys),
@@ -2045,6 +2115,15 @@ hps_ocram_osd #(.ROWS(OCRAM_OSD_ROWS)) ocram_osd
 	.s_live(ocram_s_live),
 	.s_tick(ocram_s_tick),
 	.bind_en(ocram_osd_bind),
+	.sec_ask(ocram_sec_ask),
+	.evt_stop(ocram_evt_stop),
+	.c_sfault(ocram_c0_sfault),
+	.c_smid(ocram_c0_smid),
+	.c_sbind(ocram_c0_sbind),
+	.c_wide(ocram_c0_wide),
+	.rq_post(ocram_rq_post),
+	.rq_lba(ocram_rq_lba),
+	.rq_start(ocram_rq_start),
 	.c_rest(ocram_c0_rest),
 	.c_fault(ocram_c0_fault),
 	.c_mid(ocram_c0_mid),
@@ -2061,13 +2140,45 @@ hps_ocram_osd #(.ROWS(OCRAM_OSD_ROWS)) ocram_osd
 	.c_ok(ocram_c0_ok),
 	.c_rdata(ocram_c0_rdata),
 
+`ifdef MISTER_OCRAM_OSD
 	.sel(ocram_osd_sel),
 	.view(gp_outr[31]),
 	.we(ocram_osd_we),
 	.addr(ocram_osd_addr),
-	.dbyte(ocram_osd_byte)
-);
+	.dbyte(ocram_osd_byte),
+`else
+	.sel(2'b00),
+	.view(1'b0),
+	.we(),
+	.addr(),
+	.dbyte(),
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+	.x_reset(xsec_reset),
+	.x_hps_ack(xsec_hps_ack),
+	.x_req(xsec_req),
+	.x_lba(xsec_lba),
+	.x_commit(xsec_commit),
+	.x_wide(io_wide),
+	.x_en(xsec_en),
+	.x_ack(xsec_ack),
+	.x_wr(xsec_wr),
+	.x_dat(xsec_dat),
+	.x_adr(xsec_adr)
+`else
+	.x_reset(1'b0),
+	.x_hps_ack(1'b0),
+	.x_req(1'b0),
+	.x_lba(32'd0),
+	.x_commit(1'b0),
+	.x_wide(1'b0),
+	.x_en(),
+	.x_ack(),
+	.x_wr(),
+	.x_dat(),
+	.x_adr()
+`endif
+);
 `endif
 wire [15:0] audio_l, audio_r;
 wire        audio_s;
@@ -2183,6 +2294,18 @@ localparam        LW_EVT_EN    = 0;
 localparam        LW_OSD_EN    = 1;
 `else
 localparam        LW_OSD_EN    = 0;
+`endif
+
+// The OCRAM SECTOR feeder drives the primary slot's bits through the window (MISTER_OCRAM_SECTOR_SLOT).
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_SEC_XNETS
+`endif
+`endif
+`ifdef LW_SEC_XNETS
+localparam        LW_SEC_EXT   = 1;
+`else
+localparam        LW_SEC_EXT   = 0;
 `endif
 
 // The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
@@ -2316,7 +2439,8 @@ lw_sys_window #(
 	.SAVE0_FRAME(LW_SAVE0_FRAME), .SAVE0_LBA_BITS(LW_SAVE0_LBAB),
 	.SAVE1_EN(LW_SAVE1_EN), .SAVE1_SLOT(LW_SAVE1_SLOT), .SAVE1_WSRC(LW_SAVE1_WSRC), .SAVE1_EXT(LW_SAVE1_EXT),
 	.SAVE1_FRAME(LW_SAVE1_FRAME), .SAVE1_LBA_BITS(LW_SAVE1_LBAB),
-	.LANE_EN(LW_LANE_EN)
+	.LANE_EN(LW_LANE_EN),
+	.SEC_EXT(LW_SEC_EXT)
 ) lw_sys_window
 (
 	.clk(clk_100m),
@@ -2360,7 +2484,7 @@ lw_sys_window #(
 	.lane_hold(lane_hold),
 	.lane_sel(lane_sel),
 	.lane_strobe(lane_strobe),
-	.lane_din(lane_din)
+	.lane_din(lane_din),
 `else
 	.lane_busy(1'b0),
 	.lane_wait(1'b0),
@@ -2369,9 +2493,35 @@ lw_sys_window #(
 	.lane_hold(),
 	.lane_sel(),
 	.lane_strobe(),
-	.lane_din()
+	.lane_din(),
+`endif
+`ifdef LW_SEC_XNETS
+	.xsec_en(xsec_en),
+	.xsec_ack(xsec_ack),
+	.xsec_wr(xsec_wr),
+	.xsec_dat(xsec_dat),
+	.xsec_adr(xsec_adr),
+	.xsec_reset(xsec_reset),
+	.xsec_hps_ack(xsec_hps_ack),
+	.xsec_req(xsec_req),
+	.xsec_lba(xsec_lba),
+	.xsec_commit(xsec_commit)
+`else
+	.xsec_en(1'b0),
+	.xsec_ack(1'b0),
+	.xsec_wr(1'b0),
+	.xsec_dat(16'd0),
+	.xsec_adr(14'd0),
+	.xsec_reset(),
+	.xsec_hps_ack(),
+	.xsec_req(),
+	.xsec_lba(),
+	.xsec_commit()
 `endif
 );
+`ifdef LW_SEC_XNETS
+`undef LW_SEC_XNETS
+`endif
 `ifdef LW_LANE_LINK
 `undef LW_LANE_LINK
 `endif
@@ -2384,6 +2534,9 @@ lw_sys_window #(
 `endif
 `ifdef OCRAM_OSD_PORTS
 `undef OCRAM_OSD_PORTS
+`endif
+`ifdef OCRAM_RX_PORTS
+`undef OCRAM_RX_PORTS
 `endif
 
 emu emu

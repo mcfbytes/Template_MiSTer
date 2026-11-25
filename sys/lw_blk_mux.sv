@@ -17,9 +17,16 @@
 
 `ifdef MISTER_LW
 `ifdef MISTER_LW_SECTOR_SLOT
+`define LW_BLK_MUX_BUILT
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_BLK_MUX_BUILT
+`endif
+`ifdef LW_BLK_MUX_BUILT
 `default_nettype none
 
-// emu side of the LW SECTOR route (lw_sector.sv): one hps_io read slot's consumer is fed either by hps_io
+// emu side of the LW SECTOR route (lw_sector.sv, or the OCRAM mailbox's feeder in hps_ocram_rx.sv with
+// MISTER_OCRAM_SECTOR_SLOT): one hps_io read slot's consumer is fed either by hps_io
 // or, while sys_top's en_sys is set, by the LW feeder. The consumer's ack/write/address/data are muxed here, never
 // the shared sd_buff_wr, so an SPI transfer on another slot cannot land in an LW frame. With en_sys set the
 // slot's request is hidden from hps_io, so the slot has one writer. All signals are on hps_io's clk_sys. The feeder's
@@ -61,7 +68,8 @@ assign core_data = en ? HPS_BUS[113:98] : hps_data;
 
 endmodule
 
-// emu side of a save slot on the LW SECTOR route: SAVE 0 is the slot MISTER_LW_SAVE0_SLOT declares (the block's
+`ifdef MISTER_LW_SECTOR_SLOT
+// emu side of a save slot on the LW SECTOR route (MISTER_LW_SECTOR_SLOT only): SAVE 0 is the slot MISTER_LW_SAVE0_SLOT declares (the block's
 // slot index 1), SAVE 1 the MISTER_LW_SAVE1_SLOT one (index 2). While the slot's en_sys is set its rd/wr are hidden
 // from hps_io and the slot's ack/write/addr/data come from the feeder, the write gated by the slot's own ack. The
 // core's buffer read data keeps feeding hps_io's sd_buff_din (the SPI save path). All on hps_io's clk_sys.
@@ -105,7 +113,9 @@ assign core_addr  = en ? HPS_BUS[127:114]     : hps_addr;
 assign core_data  = en ? HPS_BUS[113:98]      : hps_data;
 
 endmodule
+`endif
 
 `default_nettype wire
 `endif
+`undef LW_BLK_MUX_BUILT
 `endif
