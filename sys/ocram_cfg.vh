@@ -91,8 +91,8 @@ localparam  [2:0] OCRAM_BLKSZ     = 3'd2;
 localparam integer OCRAM_BLKSZ_DECL = 2;
 `endif
 
-// The mount slots' declaration: each slot's hps_io slot and the frame in 32-bit words (1-1,020);
-// hps_ocram_master stops the build on an unservable one.
+// The mount slots' declaration: each slot's hps_io slot and the frame in 32-bit words (one block, 32 << BLKSZ,
+// to 1,020); hps_ocram_master stops the build on an unservable one.
 `ifdef MISTER_OCRAM_MOUNT0_SLOT
 localparam        OCRAM_MNT0_EN   = 1;
 localparam [31:0] OCRAM_MNT0_SLOT = `MISTER_OCRAM_MOUNT0_SLOT;

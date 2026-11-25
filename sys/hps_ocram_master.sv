@@ -334,11 +334,12 @@ generate
 	    C_K11 >= 16'h0100) begin : g_ctrl_span
 		ocram_control_constant_above_0xFF guard();
 	end
-	// the mount slots: hps_io slots 0-15, none the disc slot's or the other's; a block of 1 to 1,020 words
+	// the mount slots: hps_io slots 0-15, none the disc slot's or the other's; a frame of one hps_io block
+	// (32 << BLKSZ words) to 1,020 words
 	if ((MNT0_EN != 0 && (MNT0_SLOT > 15 || MNT0_SLOT == SEC_SLOT)) ||
 	    (MNT1_EN != 0 && (MNT1_SLOT > 15 || MNT1_SLOT == SEC_SLOT)) ||
 	    (MNT0_EN != 0 && MNT1_EN != 0 && MNT0_SLOT == MNT1_SLOT) ||
-	    (MNT_EN && (MNT_FRAME == 0 || MNT_FRAME > 1020))) begin : g_mnt_geometry
+	    (MNT_EN && (MNT_FRAME < (32'd32 << SEC_BLKSZ) || MNT_FRAME > 1020))) begin : g_mnt_geometry
 		ocram_mount_unservable_geometry guard();
 	end
 endgenerate
