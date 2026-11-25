@@ -31,7 +31,8 @@
 #      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
 #      file ends; it undefines no macro it did not define; it defines no LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
-#      SYSTEMVERILOG_FILE lines for LW-only files and one SDC_FILE line for lw_bridge.sdc, right after
+#      SYSTEMVERILOG_FILE lines for LW-only files, SOURCE_FILE lines for the OCRAM headers (sys/ocram_*.vh, which
+#      only a guarded `include reads) and one SDC_FILE line for lw_bridge.sdc, right after
 #      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's, and its
 #      bytes are: every upstream line kept byte for byte and in order, the lines added only comment or blank
 #      lines, and every line ending as upstream's lines end (CRLF), so a later upstream change merges.
@@ -455,8 +456,9 @@ for p in sorted(mine & theirs) + ['files.qip']:
         continue
     check(open(p, 'rb').read() == open(os.path.join(UP, p), 'rb').read(), '%s: differs from upstream' % p)
 qip = open('sys/sys.qip').read().splitlines()
-add = re.compile(r'set_global_assignment -name SYSTEMVERILOG_FILE \[file join \$::quartus\(qip_path\) '
-                 r'(hps_lw_|lw_|hps_ocram_|ocram_)\w+\.sv \]$')
+add = re.compile(r'set_global_assignment -name (SYSTEMVERILOG_FILE \[file join \$::quartus\(qip_path\) '
+                 r'(hps_lw_|lw_|hps_ocram_|ocram_)\w+\.sv|SOURCE_FILE +\[file join \$::quartus\(qip_path\) '
+                 r'ocram_\w+\.vh) \]$')
 sdc = re.compile(r'set_global_assignment -name SDC_FILE +\[file join \$::quartus\(qip_path\) lw_bridge\.sdc \]$')
 rest = [l for l in qip if not add.match(l) and not sdc.match(l)]
 check(rest == open(os.path.join(UP, 'sys/sys.qip')).read().splitlines(),

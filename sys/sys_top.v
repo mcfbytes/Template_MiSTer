@@ -326,86 +326,14 @@ wire [31:0] ocram_p_wd;
 // The download tier: the mark line (f2h_irq[12]), the ring's tail and its fault and mid levels; constants without it.
 wire        ocram_mline, ocram_c0_ffault, ocram_c0_fmid;
 wire [15:0] ocram_fio_tail;
-// The download tier's declaration (its .qsf macros): the ring's log2 words (2-10 at 0x1000, or 13 at 0x7000) and
-// the player's strobe gap (4-7); hps_ocram_rx stops the build on an unservable one.
-`ifdef MISTER_OCRAM_FIO
-localparam        OCRAM_FIO_EN    = 1;
-`else
-localparam        OCRAM_FIO_EN    = 0;
-`endif
-`ifdef MISTER_OCRAM_FIO_RING
-localparam [31:0] OCRAM_FIO_RING  = `MISTER_OCRAM_FIO_RING;
-`else
-localparam [31:0] OCRAM_FIO_RING  = 32'd10;
-`endif
-`ifdef MISTER_OCRAM_FIO_GAP
-localparam [31:0] OCRAM_FIO_GAP   = `MISTER_OCRAM_FIO_GAP;
-`else
-localparam [31:0] OCRAM_FIO_GAP   = 32'd4;
-`endif
-// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}, declared once for the walker and C_K[9]: the FPGA
-// select alone; with MISTER_OCRAM_UIO also the UIO select and the OSD selects, HDMI only with an HDMI osd
-`ifdef MISTER_OCRAM_UIO
-`ifdef MISTER_DEBUG_NOHDMI
-localparam  [3:0] OCRAM_FIO_SELS  = 4'b1011;
-`else
-localparam  [3:0] OCRAM_FIO_SELS  = 4'b1111;
-`endif
-`else
-localparam  [3:0] OCRAM_FIO_SELS  = 4'b0010;
-`endif
+// The tiers' .qsf macros as localparams (OCRAM_*_EN, the geometry, OCRAM_FIO_SELS), declared once.
+`include "sys/ocram_cfg.vh"
 `ifdef LW_OCRAM_FIO_LINK
 // the download player's side of lw_link
 wire        ocram_fio_own, ocram_fio_hold, ocram_fio_strobe;
 wire  [3:0] ocram_fio_sel;
 wire [15:0] ocram_fio_din;
 `endif
-// The SECTOR tier's declaration (its .qsf macros): the hps_io slot, the frame in 32-bit words (1-4096), the
-// strobe gap (2-15) and BLKSZ; hps_ocram_rx stops the build on an unservable geometry.
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-localparam        OCRAM_SEC_EN    = 1;
-localparam [31:0] OCRAM_SEC_SLOT  = `MISTER_OCRAM_SECTOR_SLOT;
-`else
-localparam        OCRAM_SEC_EN    = 0;
-localparam [31:0] OCRAM_SEC_SLOT  = 32'd1;
-`endif
-`ifdef MISTER_OCRAM_SECTOR_FRAME
-localparam [31:0] OCRAM_SEC_FRAME = `MISTER_OCRAM_SECTOR_FRAME;
-`else
-localparam [31:0] OCRAM_SEC_FRAME = 32'd128;
-`endif
-`ifdef MISTER_OCRAM_SECTOR_GAP
-localparam [31:0] OCRAM_SEC_GAP   = `MISTER_OCRAM_SECTOR_GAP;
-`else
-localparam [31:0] OCRAM_SEC_GAP   = 32'd2;
-`endif
-`ifdef MISTER_OCRAM_BLKSZ
-localparam  [2:0] OCRAM_BLKSZ     = `MISTER_OCRAM_BLKSZ;
-`else
-localparam  [2:0] OCRAM_BLKSZ     = 3'd2;
-`endif
-// The mount slots' declaration (their .qsf macros): each slot's hps_io slot and the frame in 32-bit words (1-1,020);
-// hps_ocram_master stops the build on an unservable one.
-`ifdef MISTER_OCRAM_MOUNT0_SLOT
-localparam        OCRAM_MNT0_EN   = 1;
-localparam [31:0] OCRAM_MNT0_SLOT = `MISTER_OCRAM_MOUNT0_SLOT;
-`else
-localparam        OCRAM_MNT0_EN   = 0;
-localparam [31:0] OCRAM_MNT0_SLOT = 32'd2;
-`endif
-`ifdef MISTER_OCRAM_MOUNT1_SLOT
-localparam        OCRAM_MNT1_EN   = 1;
-localparam [31:0] OCRAM_MNT1_SLOT = `MISTER_OCRAM_MOUNT1_SLOT;
-`else
-localparam        OCRAM_MNT1_EN   = 0;
-localparam [31:0] OCRAM_MNT1_SLOT = 32'd3;
-`endif
-`ifdef MISTER_OCRAM_MOUNT_FRAME
-localparam [31:0] OCRAM_MNT_FRAME = `MISTER_OCRAM_MOUNT_FRAME;
-`else
-localparam [31:0] OCRAM_MNT_FRAME = 32'd128;
-`endif
-localparam  [1:0] OCRAM_MNT_EN    = {OCRAM_MNT1_EN != 0, OCRAM_MNT0_EN != 0};
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 // the feeder's nets to the window's primary-slot bits (lw_sys_window's xsec_*), and to the save-slot bits
 // (xmnt_*) for the mount slots
@@ -2247,22 +2175,12 @@ wire        clk_sys;
 `ifdef OCRAM_RX_PORTS
 // The host-to-core rings' consumer (hps_ocram_rx.sv): ROW records into every osd's osd_buffer, and with the SECTOR
 // tier the FRAME records into one hps_io slot through the window's xsec nets.
-`ifdef MENU_CORE
-localparam integer OCRAM_OSD_ROWS = 20;
-`else
-localparam integer OCRAM_OSD_ROWS = 16;
-`endif
 `ifdef MISTER_OCRAM_OSD
 `ifdef MISTER_DEBUG_NOHDMI
 wire [1:0] ocram_osd_sel = {io_osd_vga, 1'b0};       // no HDMI osd
 `else
 wire [1:0] ocram_osd_sel = {io_osd_vga, io_osd_hdmi};
 `endif
-`endif
-`ifdef MISTER_OCRAM_OSD
-localparam        OCRAM_OSD_EN = 1;
-`else
-localparam        OCRAM_OSD_EN = 0;
 `endif
 hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_EN), .FRAME(OCRAM_SEC_FRAME),
                .GAP(OCRAM_SEC_GAP), .FIO_EN(OCRAM_FIO_EN), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),

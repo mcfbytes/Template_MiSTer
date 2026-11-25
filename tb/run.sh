@@ -259,15 +259,15 @@ lint() {
     m="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_FIO"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_fplay --top lw_link -G FIO_EN=1"
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv $OCMF \
-      sys/hps_ocram_rx.sv $OCRF >> "$1" 2>&1 || st=1
+    slang -q --ignore-unknown-modules -I . -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv \
+      $OCMF sys/hps_ocram_rx.sv $OCRF >> "$1" 2>&1 || st=1
     # the mount slots beside the SECTOR tier: the master, the walker and feeder, the window's save-slot nets, the muxes
     m="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_sfeed --top lw_sys_window --top lw_save_mux"
     t="$t --top lw_blk_mux -G SEC_EN=1 -G MNT_EN=3 -G SEC_EXT=1 -G MNT_EXT=3"
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF \
-      >> "$1" 2>&1 || st=1
+    slang -q --ignore-unknown-modules -I . -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv \
+      $OCRF >> "$1" 2>&1 || st=1
   done
   return $st
 }

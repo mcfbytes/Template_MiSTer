@@ -46,6 +46,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) o
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) ocram_mnt_wr.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) ocram_osd_wr.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) ocram_blk_req.sv ]
+set_global_assignment -name SOURCE_FILE        [file join $::quartus(qip_path) ocram_cfg.vh ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_sys_window.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_pad.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) lw_sector.sv ]

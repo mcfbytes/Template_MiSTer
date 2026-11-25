@@ -99,7 +99,7 @@
 `endif
 
 module hps_ocram_master #(
-	// The SECTOR tier's declaration (sys_top.v maps the MISTER_OCRAM_SECTOR_* macros), for C_K[0..7]
+	// The SECTOR tier's declaration (ocram_cfg.vh maps the MISTER_OCRAM_SECTOR_* macros), for C_K[0..7]
 	parameter [31:0] SEC_SLOT  = 32'd1,
 	parameter [31:0] SEC_FRAME = 32'd128,
 	parameter [31:0] SEC_GAP   = 32'd2,
@@ -107,7 +107,7 @@ module hps_ocram_master #(
 	// The download tier's declaration (MISTER_OCRAM_FIO_RING, MISTER_OCRAM_FIO_GAP), for C_RING[1] and C_K[9]
 	parameter [31:0] FIO_RING  = 32'd10,
 	parameter [31:0] FIO_GAP   = 32'd4,
-	// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: sys_top's OCRAM_FIO_SELS, also the walker's
+	// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: ocram_cfg.vh's OCRAM_FIO_SELS, also the walker's
 	parameter  [3:0] FIO_SELS  = 4'b0010,
 	// The mount slots' declaration (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT, _MOUNT_FRAME), for C_K[10, 11]
 	parameter [31:0] MNT0_SLOT = 32'd2,
@@ -241,6 +241,9 @@ module hps_ocram_master #(
 
 ///////////////////////////////  the map  ///////////////////////////////////
 
+// The tiers' enables, the OSD rows and C_CAPS, from the .qsf macros.
+`include "sys/ocram_cfg.vh"
+
 localparam [15:0] H_HELLO = 16'h0000;      // host: {0x4F43, nonce}, 0 = no session
 localparam [15:0] H_BIND  = 16'h0004;      // host: bit 11 = the OSD bind
 localparam [15:0] H_LINE  = 16'h0008;      // host: bit 3 lets the EVT line rise
@@ -279,42 +282,6 @@ localparam [31:0] C_HELLO_WAIT  = 32'h5754_0000;
 localparam [31:0] C_HELLO_STOP  = 32'h5154_0000;
 localparam [15:0] HELLO_MAGIC   = 16'h4F43;
 localparam [31:0] C_VERSION_1_0 = 32'h0001_0000;
-localparam [31:0] C_CAPS_W      = 32'h0000_0008
-`ifdef MISTER_OCRAM_OSD
-                                  | 32'h0000_0004
-`endif
-`ifdef MISTER_OCRAM_DIAG
-                                  | 32'h0000_0010
-`endif
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-                                  | 32'h0000_0410
-`endif
-`ifdef MISTER_OCRAM_MOUNT0_SLOT
-                                  | 32'h0000_0001
-`endif
-`ifdef MISTER_OCRAM_MOUNT1_SLOT
-                                  | 32'h0000_0001
-`endif
-`ifdef MISTER_OCRAM_FIO
-                                  | 32'h0000_0002
-`endif
-`ifdef MISTER_OCRAM_EVT
-                                  | 32'h0000_0800
-`endif
-`ifdef MISTER_OCRAM_LANE
-                                  | 32'h0000_1000
-`endif
-// the removals declared: 16 the link's block arms, 17 its OSD row writes, 18 its event replies
-`ifdef MISTER_DISABLE_SPI_BLK
-                                  | 32'h0001_0000
-`endif
-`ifdef MISTER_DISABLE_SPI_OSD
-                                  | 32'h0002_0000
-`endif
-`ifdef MISTER_DISABLE_SPI_EVT
-                                  | 32'h0004_0000
-`endif
-                                  ;
 localparam [31:0] C_RING2_OSD   = {5'd3, 5'd0, 4'd11, 4'd0, 14'h0800};    // OSD, no line, 2048 words, 0x2000
 localparam [31:0] C_RING3_EVT   = {5'd4, 5'd4, 4'd11, 4'd0, 14'h1000};    // EVT, line 4, 2048 words, 0x4000
 /* verilator lint_off UNUSEDPARAM */   // a DIAG build's words or a SECTOR build's, never both
@@ -330,47 +297,18 @@ localparam [31:0] C_K4_SEC      = {8'h01, 4'd0, SEC_SLOT[3:0], 3'd0, SEC_FRAME[1
 localparam [31:0] REQ_HEADER    = {8'h21, 8'd0, 16'd1};                  // kind REQUEST, arg 0, len 1
 // the mount ring: SECTOR, no line, 1,024 words at 0x6000
 localparam [31:0] C_RING0_MNT   = {5'd2, 5'd0, 4'd10, 4'd0, 14'h1800};
-`ifdef MENU_CORE
-localparam [15:0] OSD_ROWS      = 16'd20;                                // lw_osd's ROWS with MENU_CORE
-`else
-localparam [15:0] OSD_ROWS      = 16'd16;
-`endif
-localparam [31:0] C_K8_OSD      = {OSD_ROWS, 16'd256};
+localparam [31:0] C_K8_OSD      = {OCRAM_OSD_ROWS[15:0], 16'd256};
 localparam [31:0] MARK_HEADER   = {8'h23, 8'h03, 16'd40};                // kind MARK, arg 3, len 40
 localparam [31:0] VERDICT_HEADER= {8'h25, 8'd4, 16'd8};                  // kind VERDICT, arg 4, len 8
 /* verilator lint_on UNUSEDPARAM */
 localparam integer POLL = `MISTER_OCRAM_POLL;
 
-`ifdef MISTER_OCRAM_OSD
-localparam OSD_EN = 1;
-`else
-localparam OSD_EN = 0;
-`endif
-`ifdef MISTER_OCRAM_DIAG
-localparam TS_EN = 1;
-`else
-localparam TS_EN = 0;
-`endif
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-localparam SEC_EN = 1;
-`else
-localparam SEC_EN = 0;
-`endif
-`ifdef MISTER_OCRAM_FIO
-localparam FIO_EN = 1;
-`else
-localparam FIO_EN = 0;
-`endif
-`ifdef MISTER_OCRAM_MOUNT0_SLOT
-localparam MNT0_EN = 1;
-`else
-localparam MNT0_EN = 0;
-`endif
-`ifdef MISTER_OCRAM_MOUNT1_SLOT
-localparam MNT1_EN = 1;
-`else
-localparam MNT1_EN = 0;
-`endif
+localparam OSD_EN  = OCRAM_OSD_EN;
+localparam TS_EN   = OCRAM_TS_EN;
+localparam SEC_EN  = OCRAM_SEC_EN;
+localparam FIO_EN  = OCRAM_FIO_EN;
+localparam MNT0_EN = OCRAM_MNT0_EN;
+localparam MNT1_EN = OCRAM_MNT1_EN;
 localparam MNT_EN = MNT0_EN != 0 || MNT1_EN != 0;
 localparam [2:0] SEC_MASK = {MNT1_EN != 0, MNT0_EN != 0, 1'b1};    // the H_SECTOR bits this build serves
 // a mount slot's K word {RD, slot, frame words}, 0 if undeclared
@@ -687,7 +625,7 @@ function [31:0] hello_data(input [4:0] k, input [31:0] state, input [31:0] echo,
 	begin
 		case (k)
 		5'd0: hello_data = C_VERSION_1_0;
-		5'd1: hello_data = C_CAPS_W;
+		5'd1: hello_data = OCRAM_C_CAPS;
 		5'd2: hello_data = state;
 		5'd3: hello_data = 32'd0;
 		5'd4: hello_data = 32'd0;
@@ -734,7 +672,7 @@ reg  [2:0] poll_rd_kind;
 
 //////////////////////////////  the consumers  //////////////////////////////
 
-// Port 0 is the OSD walker (hps_ocram_osd, MISTER_OCRAM_OSD); port 1 is the torture sink, built below with DIAG.
+// Port 0 is hps_ocram_rx's walker (ocram_ring_rd); port 1 is the torture sink, built below with DIAG.
 // An unbuilt port's request is the constant 0. A consumer asks for one transaction at a time and holds c_req
 // until c_grant; c_done is the R or B handshake's cycle, with c_ok and c_rdata. Round robin (ocram_arb): the last
 // granted goes last, and only a session grants.

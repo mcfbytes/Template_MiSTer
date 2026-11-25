@@ -339,6 +339,19 @@ lw_tier_needs_MISTER_LW osd_guard();
 ocram_sector_needs_MISTER_LW ocram_sector_guard();
 `endif
 `endif
+// LW_OCRAM_CFG_HPS: the OCRAM floor's macros as localparams (ocram_cfg.vh), for its tiers' checks below.
+`ifdef MISTER_OCRAM
+`define LW_OCRAM_CFG_HPS
+`endif
+`ifdef MISTER_DISABLE_SPI_BLK
+`ifndef LW_OCRAM_CFG_HPS
+`define LW_OCRAM_CFG_HPS
+`endif
+`endif
+`ifdef LW_OCRAM_CFG_HPS
+`include "sys/ocram_cfg.vh"
+`undef LW_OCRAM_CFG_HPS
+`endif
 // The OCRAM mount slots share the SECTOR tier's feeder and EVT writer, and take the LW save-slot bits.
 `ifdef MISTER_OCRAM_MOUNT0_SLOT
 `ifndef MISTER_OCRAM_SECTOR_SLOT
@@ -351,7 +364,7 @@ ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
 `endif
 `endif
 // LW_OCRAM_MNT_HPS: the OCRAM mount slots are built (either mount macro, with MISTER_OCRAM). Their block length is
-// MISTER_OCRAM_BLKSZ's (sys_top.v, default 2), so it must be this instance's BLKSZ, or the build stops here.
+// MISTER_OCRAM_BLKSZ's (ocram_cfg.vh, default 2), so it must be this instance's BLKSZ, or the build stops here.
 `ifdef MISTER_OCRAM
 `ifdef MISTER_OCRAM_MOUNT0_SLOT
 `define LW_OCRAM_MNT_HPS
@@ -363,13 +376,8 @@ ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
 `endif
 `endif
 `ifdef LW_OCRAM_MNT_HPS
-`ifdef MISTER_OCRAM_BLKSZ
-localparam integer MNT_BLKSZ = `MISTER_OCRAM_BLKSZ;
-`else
-localparam integer MNT_BLKSZ = 2;
-`endif
 generate
-	if (MNT_BLKSZ != BLKSZ) begin : ocram_blksz
+	if (OCRAM_BLKSZ != BLKSZ) begin : ocram_blksz
 		ocram_blksz_differs_from_hps_io guard();
 	end
 endgenerate
@@ -408,19 +416,13 @@ localparam [15:0] BLK_UNUSED = `MISTER_DISABLE_SPI_BLK_UNUSED;
 `else
 localparam [15:0] BLK_UNUSED = 16'd0;
 `endif
-localparam [15:0] BLK_TIER = 16'd0
 `ifdef MISTER_OCRAM
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-                             | (16'd1 << `MISTER_OCRAM_SECTOR_SLOT)
+localparam [15:0] BLK_TIER = (OCRAM_SEC_EN ? 16'd1 << OCRAM_SEC_SLOT : 16'd0) |
+                             (OCRAM_MNT0_EN ? 16'd1 << OCRAM_MNT0_SLOT : 16'd0) |
+                             (OCRAM_MNT1_EN ? 16'd1 << OCRAM_MNT1_SLOT : 16'd0);
+`else
+localparam [15:0] BLK_TIER = 16'd0;
 `endif
-`ifdef MISTER_OCRAM_MOUNT0_SLOT
-                             | (16'd1 << `MISTER_OCRAM_MOUNT0_SLOT)
-`endif
-`ifdef MISTER_OCRAM_MOUNT1_SLOT
-                             | (16'd1 << `MISTER_OCRAM_MOUNT1_SLOT)
-`endif
-`endif
-                             ;
 localparam [15:0] BLK_ALL = (16'd1 << VDNUM) - 16'd1;
 generate
 	if (BLK_TIER == 16'd0) begin : spi_blk_tier
@@ -604,26 +606,10 @@ assign HPS_BUS[381] = 1'b1;
 // MISTER_OCRAM_MOUNT_FRAME words. A mount request its mux hides from this module is read off the save mux's core rd
 // and wr bits (HPS_BUS[169:168] for MOUNT0, [204:203] for MOUNT1). Each is reported once a slot.
 // synthesis translate_off
-`ifdef MISTER_OCRAM_SECTOR_SLOT
-localparam integer BLK_SEC = `MISTER_OCRAM_SECTOR_SLOT;
-`else
-localparam integer BLK_SEC = 16;
-`endif
-`ifdef MISTER_OCRAM_MOUNT0_SLOT
-localparam integer BLK_M0 = `MISTER_OCRAM_MOUNT0_SLOT;
-`else
-localparam integer BLK_M0 = 16;
-`endif
-`ifdef MISTER_OCRAM_MOUNT1_SLOT
-localparam integer BLK_M1 = `MISTER_OCRAM_MOUNT1_SLOT;
-`else
-localparam integer BLK_M1 = 16;
-`endif
-`ifdef MISTER_OCRAM_MOUNT_FRAME
-localparam integer BLK_MFRAME = `MISTER_OCRAM_MOUNT_FRAME;
-`else
-localparam integer BLK_MFRAME = 128;
-`endif
+localparam integer BLK_SEC = OCRAM_SEC_EN ? OCRAM_SEC_SLOT : 16;
+localparam integer BLK_M0 = OCRAM_MNT0_EN ? OCRAM_MNT0_SLOT : 16;
+localparam integer BLK_M1 = OCRAM_MNT1_EN ? OCRAM_MNT1_SLOT : 16;
+localparam integer BLK_MFRAME = OCRAM_MNT_FRAME;
 `ifdef MISTER_LW
 wire [1:0] blk_mrq = {HPS_BUS[204] | HPS_BUS[203], HPS_BUS[169] | HPS_BUS[168]};
 `else
@@ -659,16 +645,8 @@ end
 // served as one. Checked in simulation, with or without MISTER_DISABLE_SPI_BLK: a mount slot below VDNUM requests
 // only with sd_blk_cnt 0, on this module's view and on the save mux's core rd and wr bits. Reported once a slot.
 // synthesis translate_off
-`ifdef MISTER_OCRAM_MOUNT0_SLOT
-localparam integer MNT_S0 = `MISTER_OCRAM_MOUNT0_SLOT;
-`else
-localparam integer MNT_S0 = 16;
-`endif
-`ifdef MISTER_OCRAM_MOUNT1_SLOT
-localparam integer MNT_S1 = `MISTER_OCRAM_MOUNT1_SLOT;
-`else
-localparam integer MNT_S1 = 16;
-`endif
+localparam integer MNT_S0 = OCRAM_MNT0_EN ? OCRAM_MNT0_SLOT : 16;
+localparam integer MNT_S1 = OCRAM_MNT1_EN ? OCRAM_MNT1_SLOT : 16;
 `ifdef MISTER_LW
 wire [1:0] mnt_mrq = {HPS_BUS[204] | HPS_BUS[203], HPS_BUS[169] | HPS_BUS[168]};
 `else
