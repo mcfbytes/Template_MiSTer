@@ -241,7 +241,8 @@ end
 `endif
 `endif
 // MISTER_OCRAM_FIO (with MISTER_OCRAM): the same link front, lw_link, with the OCRAM download player's nets on its
-// player side (hps_ocram_rx.sv). hps_io stops a build that names both players (link_on_two_players).
+// player side (hps_ocram_rx.sv). hps_io stops a build that names both players (link_on_two_players). With
+// MISTER_OCRAM_UIO that player also plays frames on the UIO and both OSD selects, into the same decoders.
 `ifdef MISTER_OCRAM
 `ifdef MISTER_OCRAM_FIO
 `define LW_OCRAM_FIO_LINK
@@ -309,6 +310,19 @@ wire [10:0] ocram_m_n;
 wire [31:0] ocram_m_lba, ocram_m_wd;
 wire        ocram_rq_post, ocram_rq_start;
 wire [31:0] ocram_rq_lba;
+`ifdef MISTER_OCRAM_EVT
+// The events tier (MISTER_OCRAM_EVT): the master's ask and hps_ocram_evt's offer.
+wire        ocram_e_ask, ocram_e_v;
+wire [41:0] ocram_e_d;
+`endif
+`ifdef MISTER_OCRAM_LANE
+// The capture lane (MISTER_OCRAM_LANE): the walker's capture frame, its replies, and the master's REPLY record.
+wire [15:0] ocram_e_free;
+wire        ocram_p_post, ocram_p_wv, ocram_p_start, ocram_p_wtake;
+wire  [7:0] ocram_p_arg;
+wire [10:0] ocram_p_n;
+wire [31:0] ocram_p_wd;
+`endif
 // The download tier: the mark line (f2h_irq[12]), the ring's tail and its fault and mid levels; constants without it.
 wire        ocram_mline, ocram_c0_ffault, ocram_c0_fmid;
 wire [15:0] ocram_fio_tail;
@@ -328,6 +342,17 @@ localparam [31:0] OCRAM_FIO_RING  = 32'd10;
 localparam [31:0] OCRAM_FIO_GAP   = `MISTER_OCRAM_FIO_GAP;
 `else
 localparam [31:0] OCRAM_FIO_GAP   = 32'd4;
+`endif
+// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}, declared once for the walker and C_K[9]: the FPGA
+// select alone; with MISTER_OCRAM_UIO also the UIO select and the OSD selects, HDMI only with an HDMI osd
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_DEBUG_NOHDMI
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b1011;
+`else
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b1111;
+`endif
+`else
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b0010;
 `endif
 `ifdef LW_OCRAM_FIO_LINK
 // the download player's side of lw_link
@@ -1030,6 +1055,7 @@ sysmem_lite sysmem
 // The OCRAM mailbox floor: the fpga2hps bridge's AXI3 master (docs/OCRAM_MAILBOX.md).
 hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_GAP(OCRAM_SEC_GAP),
                    .SEC_BLKSZ(OCRAM_BLKSZ), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),
+                   .FIO_SELS(OCRAM_FIO_SELS),
                    .MNT0_SLOT(OCRAM_MNT0_SLOT), .MNT1_SLOT(OCRAM_MNT1_SLOT), .MNT_FRAME(OCRAM_MNT_FRAME)) ocram_master
 (
 	.clk(clk_100m),
@@ -1086,6 +1112,34 @@ hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_
 	.c0_ffault(ocram_c0_ffault),
 	.c0_fmid(ocram_c0_fmid),
 	.mark_line(ocram_mline),
+`ifdef MISTER_OCRAM_EVT
+	.e_ask(ocram_e_ask),
+	.e_v(ocram_e_v),
+	.e_d(ocram_e_d),
+`else
+	.e_ask(),
+	.e_v(1'b0),
+	.e_d(42'd0),
+`endif
+`ifdef MISTER_OCRAM_LANE
+	.e_free(ocram_e_free),
+	.p_post(ocram_p_post),
+	.p_arg(ocram_p_arg),
+	.p_n(ocram_p_n),
+	.p_wv(ocram_p_wv),
+	.p_wd(ocram_p_wd),
+	.p_start(ocram_p_start),
+	.p_wtake(ocram_p_wtake),
+`else
+	.e_free(),
+	.p_post(1'b0),
+	.p_arg(8'd0),
+	.p_n(11'd0),
+	.p_wv(1'b0),
+	.p_wd(32'd0),
+	.p_start(),
+	.p_wtake(),
+`endif
 
 	.awid(ocram_awid),
 	.awaddr(ocram_awaddr),
@@ -2212,7 +2266,7 @@ localparam        OCRAM_OSD_EN = 0;
 `endif
 hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_EN), .FRAME(OCRAM_SEC_FRAME),
                .GAP(OCRAM_SEC_GAP), .FIO_EN(OCRAM_FIO_EN), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),
-               .MNT_EN(OCRAM_MNT_EN), .MFRAME(OCRAM_MNT_FRAME), .BLKSZ(OCRAM_BLKSZ)) ocram_rx
+               .MNT_EN(OCRAM_MNT_EN), .MFRAME(OCRAM_MNT_FRAME), .BLKSZ(OCRAM_BLKSZ), .FIO_SELS(OCRAM_FIO_SELS)) ocram_rx
 (
 	.clk(clk_100m),
 	.clk_sys(clk_sys),
@@ -2252,6 +2306,27 @@ hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_E
 	.m_start(ocram_m_start),
 	.m_wtake(ocram_m_wtake),
 	.m_pub(ocram_m_pub),
+`ifdef MISTER_OCRAM_LANE
+	.p_post(ocram_p_post),
+	.p_arg(ocram_p_arg),
+	.p_n(ocram_p_n),
+	.p_wv(ocram_p_wv),
+	.p_wd(ocram_p_wd),
+	.e_free(ocram_e_free),
+	.p_start(ocram_p_start),
+	.p_wtake(ocram_p_wtake),
+	.l_dout(io_dout | io_dout_sys),           // the link's reply word, as gp_in carries it to the HPS
+`else
+	.p_post(),
+	.p_arg(),
+	.p_n(),
+	.p_wv(),
+	.p_wd(),
+	.e_free(16'd0),
+	.p_start(1'b0),
+	.p_wtake(1'b0),
+	.l_dout(16'd0),
+`endif
 
 	.c_req(ocram_c0_req),
 	.c_we(ocram_c0_we),
@@ -2673,6 +2748,24 @@ lw_sys_window #(
 `endif
 `ifdef LW_OSD_PORTS
 `undef LW_OSD_PORTS
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_EVT
+// The OCRAM events tier's port (MISTER_OCRAM_EVT, which needs MISTER_LW: hps_io stops the build otherwise):
+// hps_io's offer on HPS_BUS[374:333] to the master, and the take on HPS_BUS[382], which nothing else drives.
+`ifdef MISTER_LW
+wire        ocram_e_take;
+hps_ocram_evt ocram_evt
+(
+	.clk(clk_100m), .ask(ocram_e_ask), .e_v(ocram_e_v), .e_d(ocram_e_d),
+	.clk_sys(clk_sys), .o_d(lw_bus[374:333]), .take(ocram_e_take)
+);
+assign lw_bus[382] = ocram_e_take;
+`else
+assign ocram_e_v = 1'b0;
+assign ocram_e_d = 42'd0;
+`endif
 `endif
 `endif
 // The link front (lw_link, sys/lw_lane.sv): the link's own selects, strobe and ack, or the player's while it plays a
