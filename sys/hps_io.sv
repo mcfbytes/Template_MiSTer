@@ -297,6 +297,30 @@ ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount0_guard();
 ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
 `endif
 `endif
+// LW_OCRAM_MNT_HPS: the OCRAM mount slots are built (either mount macro, with MISTER_OCRAM). Their block length is
+// MISTER_OCRAM_BLKSZ's (sys_top.v, default 2), so it must be this instance's BLKSZ, or the build stops here.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_OCRAM_MNT_HPS
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef LW_OCRAM_MNT_HPS
+`define LW_OCRAM_MNT_HPS
+`endif
+`endif
+`endif
+`ifdef LW_OCRAM_MNT_HPS
+`ifdef MISTER_OCRAM_BLKSZ
+localparam integer MNT_BLKSZ = `MISTER_OCRAM_BLKSZ;
+`else
+localparam integer MNT_BLKSZ = 2;
+`endif
+generate
+	if (MNT_BLKSZ != BLKSZ) begin : ocram_blksz
+		ocram_blksz_differs_from_hps_io guard();
+	end
+endgenerate
+`endif
 // MISTER_DISABLE_SPI_PAD compiles out the link's pad arms; without the LW pad tier a core would have no pad path.
 `ifdef MISTER_DISABLE_SPI_PAD
 `ifndef MISTER_LW_PAD
@@ -335,6 +359,10 @@ generate
 	end
 	if ((BLK_TIER & BLK_UNUSED) != 16'd0) begin : spi_blk_unused
 		spi_blk_off_unused_slot_on_a_tier guard();
+	end
+	// a tier slot at or above VDNUM: the core has no such slot, and BLK_ALL would leave it out unseen
+	if ((BLK_TIER & ~BLK_ALL) != 16'd0) begin : spi_blk_vdnum
+		spi_blk_off_tier_slot_outside_vdnum guard();
 	end
 endgenerate
 `endif
@@ -510,6 +538,42 @@ always @(posedge clk_sys) begin : blk_word
 	end
 end
 // synthesis translate_on
+`endif
+
+`ifdef LW_OCRAM_MNT_HPS
+// The mount slots carry no blk_cnt to the mailbox (sys_top.v ties xm_cnt to 0): a request of more than one block is
+// served as one. Checked in simulation, with or without MISTER_DISABLE_SPI_BLK: a mount slot below VDNUM requests
+// only with sd_blk_cnt 0, on this module's view and on the save mux's core rd and wr bits. Reported once a slot.
+// synthesis translate_off
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+localparam integer MNT_S0 = `MISTER_OCRAM_MOUNT0_SLOT;
+`else
+localparam integer MNT_S0 = 16;
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+localparam integer MNT_S1 = `MISTER_OCRAM_MOUNT1_SLOT;
+`else
+localparam integer MNT_S1 = 16;
+`endif
+`ifdef MISTER_LW
+wire [1:0] mnt_mrq = {HPS_BUS[204] | HPS_BUS[203], HPS_BUS[169] | HPS_BUS[168]};
+`else
+wire [1:0] mnt_mrq = 2'b00;
+`endif
+reg [VD:0] mnt_said = 0;
+always @(posedge clk_sys) begin : mnt_word
+	integer i;
+	for (i = 0; i < VDNUM; i = i + 1)
+		if ((i == MNT_S0 || i == MNT_S1) && sd_blk_cnt[i] != 6'd0 && !mnt_said[i] &&
+		    ((sd_rd[i] | sd_wr[i]) === 1'b1 || (i == MNT_S0 && mnt_mrq[0] === 1'b1) ||
+		     (i == MNT_S1 && mnt_mrq[1] === 1'b1))) begin
+			mnt_said[i] <= 1'b1;
+			$display({"FAIL hps_io: MISTER_OCRAM_MOUNT_SLOT: mount slot %0d requests with sd_blk_cnt %0d; a mount ",
+			          "request is one block"}, i, sd_blk_cnt[i]);
+		end
+end
+// synthesis translate_on
+`undef LW_OCRAM_MNT_HPS
 `endif
 
 always@(posedge clk_sys) begin : uio_block

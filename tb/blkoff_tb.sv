@@ -20,10 +20,11 @@
 // I/O bits and the core's requests are the bench's own. Built with MISTER_DISABLE_SPI_BLK (and
 // MISTER_DISABLE_SPI_BLK_UNUSED=1) the link's block arms are dead: GET_SDSTAT (0x16) reads 0 with requests raised,
 // 0x17 and 0x18 raise no ack and no buffer strobe, and the commit mark reads 0 on every cycle, present. Built without
-// them (the control) the same words show the arms alive. BLKOFF_TB_VIOLATE = 1-4 breaks one of the core's
-// obligations under MISTER_DISABLE_SPI_BLK and ends; tb/run.sh expects hps_io's own simulation check to name it:
-// 1 an unused slot requests, 2 the SECTOR slot writes, 3 a mount request over the mount frame, 4 the same request
-// seen only on the save mux's core rd bit (its mux hides it from hps_io).
+// them (the control) the same words show the arms alive. BLKOFF_TB_VIOLATE = 1-6 breaks one of the core's
+// obligations and ends; tb/run.sh expects hps_io's own simulation checks to name it: 1 an unused slot requests,
+// 2 the SECTOR slot writes, 3 a three-block mount request, over the mount frame, 4 the same request seen only on the
+// save mux's core rd bit (its mux hides it from hps_io), 5 a two-block mount request within the frame, 6 the same
+// built without MISTER_DISABLE_SPI_BLK. A mount request is one block (sd_blk_cnt 0) with or without it.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -122,6 +123,7 @@ initial begin
 		2: wr = 4'b0010;                          // the SECTOR slot
 		3: begin cnt2 = 6'd2; rd = 4'b0100; end   // 384 words on a 256-word mount frame
 		4: begin cnt2 = 6'd2; mux_rd = 1'b1; end  // the same, hidden from hps_io by its mux
+		5, 6: begin cnt2 = 6'd1; rd = 4'b0100; end   // 256 words: within the frame, but two blocks
 	endcase
 	repeat (8) @(negedge clk_sys);
 	$display("PASSED: 0 checks, 0 failures (violation %0d raised)", `BLKOFF_TB_VIOLATE);
@@ -168,8 +170,8 @@ initial begin
 	end
 	txn_end;
 
-	$display("-- the mount slots' requests, within the frame: a read of 256 words on slot 2, a write on slot 3");
-	cnt2 = 6'd1; lba2 = 32'h0000_0100; wr = 4'b1000; rd = 4'b0110;
+	$display("-- the mount slots' requests, one block each: a read on slot 2, a write on slot 3");
+	cnt2 = 6'd0; lba2 = 32'h0000_0100; wr = 4'b1000; rd = 4'b0110;
 	repeat (4) @(negedge clk_sys);
 	txn_begin; word(16'h0016, r0); word(16'h0000, r1); word(16'h0000, r2); word(16'h0000, r3); txn_end;
 	if (OFF) check("0x16 with three slots requesting: every reply word 0", {r0 | r1 | r2 | r3}, 0);
