@@ -98,6 +98,18 @@ With `MISTER_OCRAM_OSD`, GPO 25 is a freeze knob that models a stopped `clk_sys`
 latches a word but writes no byte, launches no done and reports not at rest, so a hello waits unechoed until it
 is cleared. Without `MISTER_OCRAM_DIAG` GPO 25 is never read.
 
+The host side of all of this is `tb/hps/ocram_probe.c` (usage in its header; `tb/hps/kmod/ocram_wc.c` is the
+write-combined map's test module). `torture --map <m>` runs the ring full, as fast as the fabric consumes.
+`torture --map <m> --band` holds it part-full: each cycle reads C_IDX[4] once and asserts the fill is below 8,192,
+publishes records back to back, with no read of any mailbox word, until a clock-based estimate of the fill reaches a
+random HI (50-90% of the ring), then waits by the clock, touching no mailbox word, until the estimate falls to a
+random LO (5-45%). The estimate runs at `--rate` words/s (default 6.3 M, re-fitted from the tail's travel while the
+ring never runs empty). Every 2^20 words (`--empty-words`) the ring runs empty and the VERDICT must equal the host's
+records, words and sum, with 0 errors and a deepest fill below 8,192. The last line is PASS or FAIL, with the lowest
+fill read and the fabric's deepest; it fails also if more than 5% of the reads found the ring empty or above 60%
+(it was not part-full). A record that became visible before its payload shows as a payload or seq error in the
+VERDICT. `tb/run.sh` arm H runs the probe's logic against a model fabric, `tb/hps/ocram_probe_fake.h`.
+
 ## How it works
 
 ### The master
@@ -441,7 +453,7 @@ share the master at record granularity, so two running together split one budget
 
 ## What is not verified
 
-- Write-combined ordering with the ring part-full (every torture run kept it full).
+- Write-combined ordering with the ring part-full (every torture run kept it full; `torture --band` is the probe, not yet run on the rig).
 - What this traffic costs the other HPS masters (a loaded run lost 3.5 %, not attributed).
 - Read bursts and a multi-word crossing: designed in prose only.
 - The SECTOR tier and `hps_ocram_rx.sv`: benched only (`tb/ocram_tb.sv`, `tb/sfeed_tb.sv`), not fitted, not run on
