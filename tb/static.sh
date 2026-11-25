@@ -50,6 +50,11 @@
 #      clock (input and inout clocks from PORTDOM) other than through a cell's output, beside the listed reads
 #      (XREAD_ALLOW) and the presence bits' nets (PRESENCE, each a constant select of its port), each of which must
 #      still exist; and no register is assigned on two clocks.
+#      hps_ocram_rx's pieces: ocram_xing holds every cell of the consumer and is its one module on two clocks; every
+#      other module of hps_ocram_rx.sv and sys/ocram_{ring_rd,bind,mnt_wr,osd_wr,blk_req}.sv is on one clock, with
+#      no cell, its pieces on its clock; hps_ocram_rx holds no clocked block, and each input of each piece it
+#      connects reads only nets of that piece's clock (ports of it, outputs of pieces on it, ocram_xing's outputs of
+#      that side, constants), and no net is driven on two clocks.
 # Then, once, the directory's lines, in sys/lw_sys_window.sv with every tier:
 #   8. Every entry is one ent() call whose kind and LINE word are the localparams <B>_KIND and <B>_LINE of one
 #      block B, each localparam in one call. The LINE words name each non-zero ordinal once, a framework kind's
@@ -482,8 +487,10 @@ PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit c_wide
            'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
-           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide l_busy l_wait '
+           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide l_busy l_wait l_dout '
                                        'xm_hps_ack xm_rd xm_wr xm_lba xm_cnt'),
+           'ocram_xing': ('clk_sys', 'o_go o_rest f_go f_code f_dat f_rest p_go p_dat p_rest rc_go rc_d mrc_go mrc_d '
+                                     'q_rest x_en xm_en x_wide'),
            'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide xsec_en '
                                         'xsec_ack xsec_wr xsec_dat xsec_adr xmnt_en xmnt_ack')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
@@ -899,10 +906,79 @@ for n, nets in sorted(PRESENCE.items()):
     for net, sel in sorted(nets.items()):
         got = mods[n]['combrhs'].get(net) if n in mods and len(mods[n]['comb'].get(net, [])) == 1 else None
         check(got == sel, '%s: the presence net %s is %s, not %s' % (n, net, got or 'gone', sel))
+# the consumer's split: ocram_xing holds every cell of hps_ocram_rx and is its one module on two clocks; each other
+# module is on one clock, and hps_ocram_rx, which holds no logic, connects each input of each piece to a net of the
+# piece's own clock (a port of that clock, an output of a piece on it, an ocram_xing output of that side, a constant)
+RXFILES = {'sys/hps_ocram_rx.sv'} | {'sys/ocram_%s.sv' % x for x in ('xing', 'ring_rd', 'bind', 'mnt_wr', 'osd_wr',
+                                                                     'blk_req')}
+XCELL = {'lw_sync', 'lw_xfer', 'lw_fence', 'lw_arst', 'lw_qstat'}
+RXMODS = sorted(n for n, M in mods.items() if M['file'] in RXFILES)
+check(set(f for f in RXFILES if os.path.exists(f)) == RXFILES and 'ocram_xing' in RXMODS and 'hps_ocram_rx' in RXMODS,
+      'hps_ocram_rx: its pieces are not all there: %s' % ' '.join(RXMODS))
+# the clk_sys side of ocram_xing's ports (inputs from PORTDOM) and of hps_ocram_rx's outputs
+XSYS = set(PORTDOM['ocram_xing'][1].split()) | set('hen_s frz bind_s w_d w_wr w_k o_v o_head s_v s_head f_v f_head '
+                                                    'rc_busy mrc_busy'.split())
+RXSYS_OUT = set('we addr dbyte x_en x_ack x_wr x_dat x_adr xm_en xm_ack l_own l_hold l_sel l_strobe l_din'.split())
+def one_clock(n):
+    cs = {c for c, _ in mods[n]['blocks']}
+    return cs.pop() if len(cs) == 1 else None
+for n in RXMODS:
+    M = mods[n]
+    cs = {c for c, _ in M['blocks']}
+    cells = sorted(i_ for m_, i_, _, _ in M['insts'] if m_ in XCELL)
+    if n == 'ocram_xing':
+        check(cs == {'clk', 'clk_sys'} and 'clk' in M['ports'] and 'clk_sys' in M['ports'],
+              'ocram_xing: its blocks are on %s, not clk and clk_sys' % ' '.join(sorted(cs)))
+        check(sorted(m_ for m_, _, _, _ in M['insts'] if m_ in XCELL).count('lw_fence') == 1,
+              'ocram_xing: not one lw_fence')
+        continue
+    check(not cells, '%s: crossing cells outside ocram_xing: %s' % (n, ' '.join(cells)))
+    if n == 'hps_ocram_rx':
+        check(not cs, 'hps_ocram_rx: a clocked block of its own on %s' % ' '.join(sorted(cs)))
+        continue
+    check(len(cs) == 1 and cs <= set(M['ports']), '%s: on clocks %s, not one clock port' % (n, ' '.join(sorted(cs))))
+    for m_, i_, _, con in M['insts']:
+        if m_ in mods and mods[m_]['file'] in RXFILES:
+            c_ = one_clock(m_)
+            check(c_ is not None and con.get(c_) == [one_clock(n)],
+                  '%s: %s %s is clocked by %s, not by %s' % (n, m_, i_, ' '.join(con.get(c_ or '', [])), one_clock(n)))
+W_ = mods.get('hps_ocram_rx')
+if W_ is not None:
+    wsys = set(PORTDOM['hps_ocram_rx'][1].split()) | RXSYS_OUT
+    dom = {p_: ('clk_sys' if p_ in wsys else 'clk') for p_ in W_['ports'] if p_ not in ('clk', 'clk_sys')}
+    drv, pins = {}, []
+    for m_, i_, _, con in W_['insts']:
+        if m_ not in mods: continue
+        if m_ == 'ocram_xing':
+            pd = lambda p_: 'clk_sys' if p_ in XSYS else 'clk'
+            check(con.get('clk') == ['clk'] and con.get('clk_sys') == ['clk_sys'],
+                  'hps_ocram_rx: ocram_xing %s is not on clk and clk_sys' % i_)
+        else:
+            c_ = one_clock(m_)
+            cn = con.get(c_ or '', [])
+            check(cn in (['clk'], ['clk_sys']), 'hps_ocram_rx: %s %s is clocked by %s' % (m_, i_, ' '.join(cn)))
+            pd = (lambda d_: (lambda p_: d_))(cn[0] if cn else None)
+        for p_, ts in con.items():
+            if p_ in ('clk', 'clk_sys') or p_ == one_clock(m_): continue
+            d_ = pd(p_)
+            if mods[m_]['ports'].get(p_) == 'output':
+                for nm in lhs_names(ts)[0]: drv.setdefault(nm, set()).add((d_, '%s.%s' % (i_, p_)))
+            else:
+                pins.append((i_, p_, d_, idents(ts)))
+    for nm, ds in sorted(drv.items()):
+        check(len({d for d, _ in ds}) == 1 and (nm not in dom or dom[nm] == next(iter(ds))[0]),
+              'hps_ocram_rx: %s is driven on %s (%s) and is a port on %s' %
+              (nm, ' '.join(sorted({d for d, _ in ds})), ' '.join(sorted(w for _, w in ds)), dom.get(nm, '-')))
+    for i_, p_, d_, ns in pins:
+        for nm in ns:
+            if nm in W_['consts'] or nm in W_['mems']: continue
+            got = {d for d, _ in drv[nm]} if nm in drv else ({dom[nm]} if nm in dom else
+                  (set() if nm in W_['comb'] and not W_['comb'][nm] else {'?'}))
+            check(got <= {d_}, 'hps_ocram_rx: %s.%s on %s reads %s on %s' % (i_, p_, d_, nm, ' '.join(sorted(got))))
 print('crossing structure: %d lw_sync instances, %d source registers, %d enable links, %d listed reads across '
       'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
 check(nfence == 4, 'enable links: %d lw_fence instances, not one each in lw_sector, lw_osd, lw_lane and '
-      'hps_ocram_rx' % nfence)
+      'ocram_xing' % nfence)
 
 # ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
 print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')
@@ -948,7 +1024,9 @@ print('-- hps_ocram_master.sv, its layers and hps_ocram_rx.sv: the constant uppe
 OCFILES = ['sys/hps_ocram_master.sv', 'sys/ocram_axi.sv', 'sys/ocram_arb.sv', 'sys/ocram_evt_wr.sv']
 OTXT = ' '.join(' '.join(tokens(pp(f_, OCMACS))) for f_ in OCFILES)
 OSTXT = ' '.join(' '.join(tokens(pp(f_, OCMACS_SEC))) for f_ in OCFILES)
-ODTXT = ' '.join(tokens(pp('sys/hps_ocram_rx.sv', OCMACS_SEC)))
+RXTFILES = ['sys/hps_ocram_rx.sv', 'sys/ocram_ring_rd.sv', 'sys/ocram_xing.sv', 'sys/ocram_bind.sv',
+            'sys/ocram_mnt_wr.sv', 'sys/ocram_osd_wr.sv', 'sys/ocram_blk_req.sv']
+ODTXT = ' '.join(' '.join(tokens(pp(f_, OCMACS_SEC))) for f_ in RXTFILES)
 ALLT = OTXT + ' ' + OSTXT + ' ' + ODTXT
 CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX0': 0x10, 'H_IDX1': 0x14,
         'H_IDX2': 0x18, 'H_IDX3': 0x1c, 'H_IDX4': 0x20, 'H_MARK1': 0x34, 'C_HELLO': 0x80, 'C_VERSION': 0x84,
@@ -1011,12 +1089,19 @@ for OT_, OWHO in ((OTXT, 'DIAG'), (OSTXT, 'SECTOR')):
 # The consumers' own offsets: a control localparam or a ring word, hdr_off/pay1_off/pay2_off, each one
 # base + ((index & (words - 1)) << 2) of a localparam base and the ring's size.
 def consumer_offsets(text, who):
-    src = re.findall(r"req_off < = (\w+) ;", text)
-    check(len(src) == len(re.findall(r"req_off < = ", text)), '%s: a req_off assignment that is not one name' % who)
+    # one name, or one entry (16 bits at a ring id) of a table: a 64-bit concatenation of four names
+    asg = re.findall(r"req_off < = (\w+) (\[ \{ \w+ , 4'd0 \} \+ : 16 \] )?;", text)
+    check(len(asg) == len(re.findall(r"req_off < = ", text)),
+          '%s: a req_off assignment that is not one name or one table entry' % who)
     named = set(re.findall(r"wire \[ 15 : 0 \] (\w+) = [A-Za-z_]\w* \+ \( \( \w+ & \( \w+ - 1 \) \) < < 2 \) ;",
                            text))
-    check(src and set(src) <= set(CTRL) | named,
-          '%s: an offset that is not a control localparam or a ring word: %s' % (who, ' '.join(sorted(set(src)))))
+    src = set(n_ for n_, t_ in asg if not t_)
+    for tab in sorted(set(n_ for n_, t_ in asg if t_)):
+        d_ = re.findall(r"(?:localparam|wire) \[ 63 : 0 \] %s = \{ (\w+) , (\w+) , (\w+) , (\w+) \} ;" % tab, text)
+        check(len(d_) == 1, '%s: the offset table %s is not one concatenation of four names' % (who, tab))
+        src |= set(d_[0]) if len(d_) == 1 else {tab}
+    check(src and src <= set(CTRL) | named,
+          '%s: an offset that is not a control localparam or a ring word: %s' % (who, ' '.join(sorted(src))))
     check(len(re.findall(r"assign c_off = req_off ;", text)) == 1, '%s: c_off is not req_off alone' % who)
     return named
 def ring_wires(text, base, words, who):

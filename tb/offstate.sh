@@ -21,7 +21,8 @@
 #      for token as a multiset, and no ps2_key_raw anywhere in the file, under each of those macro sets.
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
-#      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without every one of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
+#      without its tier macro (hps_ocram_rx.sv, its ocram_* pieces and lw_blk_mux.sv: without every one of
+#      theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
 #      with MISTER_LW or MISTER_OCRAM. sys/lw_lane.sv serves a tier of each floor (the LW lane, the OCRAM download
 #      tier): empty without both pairs, under each set, with either floor alone or both; the lane with its own pair,
 #      lw_link with either.
@@ -73,6 +74,18 @@ OTIER = {}
 # without every tier, opened as the floor, then each tier defining the local macro, then the local macro's guard
 EITHER = {'hps_ocram_rx.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT',
                                              'MISTER_OCRAM_FIO'], 'LW_OCRAM_RX_BUILT'),
+          'ocram_xing.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT', 'MISTER_OCRAM_FIO'],
+                          'LW_OCRAM_XING_BUILT'),
+          'ocram_ring_rd.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT', 'MISTER_OCRAM_FIO'],
+                             'LW_OCRAM_RING_RD_BUILT'),
+          'ocram_bind.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT', 'MISTER_OCRAM_FIO'],
+                          'LW_OCRAM_BIND_BUILT'),
+          'ocram_mnt_wr.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT', 'MISTER_OCRAM_FIO'],
+                            'LW_OCRAM_MNT_WR_BUILT'),
+          'ocram_osd_wr.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT', 'MISTER_OCRAM_FIO'],
+                            'LW_OCRAM_OSD_WR_BUILT'),
+          'ocram_blk_req.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT', 'MISTER_OCRAM_FIO'],
+                             'LW_OCRAM_BLK_REQ_BUILT'),
           'lw_blk_mux.sv': ('MISTER_LW', ['MISTER_LW_SECTOR_SLOT', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_BLK_MUX_BUILT')}
 TIER.pop('lw_blk_mux.sv')
 # files built by a tier of either floor: [(floor, tier)], the local macro each pair defines (the first pair's own

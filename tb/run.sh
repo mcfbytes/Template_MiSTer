@@ -165,6 +165,8 @@ ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150
 O=${LW_TB_OUT:-tb/out}
 # the OCRAM master's own layers, beside sys/hps_ocram_master.sv wherever it is built or linted
 OCMF="sys/ocram_axi.sv sys/ocram_arb.sv sys/ocram_evt_wr.sv"
+# the walker, the crossing and the sinks, beside sys/hps_ocram_rx.sv wherever it is built or linted
+OCRF="sys/ocram_xing.sv sys/ocram_ring_rd.sv sys/ocram_bind.sv sys/ocram_mnt_wr.sv sys/ocram_osd_wr.sv sys/ocram_blk_req.sv"
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
 probe() {
@@ -258,13 +260,13 @@ lint() {
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_fplay --top lw_link -G FIO_EN=1"
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
     slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv $OCMF \
-      sys/hps_ocram_rx.sv >> "$1" 2>&1 || st=1
+      sys/hps_ocram_rx.sv $OCRF >> "$1" 2>&1 || st=1
     # the mount slots beside the SECTOR tier: the master, the walker and feeder, the window's save-slot nets, the muxes
     m="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_sfeed --top lw_sys_window --top lw_save_mux"
     t="$t --top lw_blk_mux -G SEC_EN=1 -G MNT_EN=3 -G SEC_EXT=1 -G MNT_EXT=3"
     echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv \
+    slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF \
       >> "$1" 2>&1 || st=1
   done
   return $st
@@ -274,7 +276,7 @@ lint() {
 sfeedc() {
   : > "$1"
   SFD="-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1"
-  SFF="tb/sfeed_tb.sv tb/golden/gold_lw_sector.sv sys/lw_sector.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv"
+  SFF="tb/sfeed_tb.sv tb/golden/gold_lw_sector.sv sys/lw_sector.sv sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv"
   for sh in "g2w1:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1" "g2w0:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=0" \
             "g5w1:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=1" "g5w0:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=0" \
             "f588:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1 -DSFEED_TB_FRAME=588" \
@@ -304,7 +306,7 @@ sfeedc() {
 fioc() {
   : > "$1"
   FID="-DMISTER_LW -DMISTER_LW_LANE -DMISTER_OCRAM -DMISTER_OCRAM_OSD"
-  FIF="tb/fio_tb.sv tb/golden/gold_lw_lane.sv sys/lw_lane.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/hps_io.sv"
+  FIF="tb/fio_tb.sv tb/golden/gold_lw_lane.sv sys/lw_lane.sv sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/hps_io.sv"
   for sh in "g4w1:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=1" "g4w0:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=0" \
             "g7w1:-DFIO_TB_GAP=7 -DFIO_TB_WIDE=1" "g7w0:-DFIO_TB_GAP=7 -DFIO_TB_WIDE=0" \
             "tpl:-DFIO_TB_GAP=4 -DFIO_TB_WIDE=1 -DFIO_TB_SYS_HP_PS=25000"; do
@@ -334,7 +336,7 @@ fioc() {
 # hps_ocram_master.sv and hps_ocram_rx.sv with lw_cdc.sv (each OCRAM macro set), warnings as errors.
 ocram() {
   : > "$1"; n=0; f=0
-  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v"
   OCD="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10"
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10"
   OCS="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
@@ -393,7 +395,7 @@ ocram() {
         [ $t = hps_ocram_fplay ] && { case $vn in fio|fioall) fl=hps_ocram_rx;; *) continue;; esac; }
         [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";;
           fio) G="-GOSD_EN=0 -GFIO_EN=1";; fioall) G="-GSEC_EN=1 -GFIO_EN=1";; mnt) G="-GOSD_EN=0 -GSEC_EN=1 -GMNT_EN=2'b11";; esac
-        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
              > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -464,7 +466,7 @@ rmy() {
     f=$((f + 1)); echo "FAIL lw_tb: does not compile (kbm)" >> "$1"; head -20 "$O/rmY_kbm.err" | sed 's/^/   /' >> "$1"
   fi
   # ocram_tb.sv: the OSD shape with MISTER_DISABLE_SPI_OSD, the mount shape with both removals
-  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v"
   OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DOCRAM_TB_SYS_HP_PS=14762"
   OCM="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_MOUNT0_SLOT=3"
   OCM="$OCM -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
@@ -545,7 +547,7 @@ EOV
 # seed, plain and with the crossing models; then verilator on the three modules with the macro.
 uarm() {
   : > "$1"; n=0; f=0
-  UB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
+  UB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
   UD="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO"
   for m in plain cdc; do
     for c in uio33 uio20 uion33; do
@@ -578,7 +580,7 @@ uarm() {
         G=""; fl=$t
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
         [ $t = hps_ocram_rx ] && case $vn in uioall) G="-GSEC_EN=1 -GFIO_EN=1";; *) G="-GOSD_EN=0 -GFIO_EN=1";; esac
-        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
              > "$O/uioV_${t}_$vn.log" 2>&1 || [ -s "$O/uioV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/uioV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -595,7 +597,7 @@ uarm() {
 
 # aarm LOG: arm A. tb/ocram_tb.sv's capture shape, each shape compiled once, run under every seed, plain and with
 # the crossing models; then verilator on the master, the walker and the player with the macro.
-AB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
+AB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v sys/lw_lane.sv sys/hps_io.sv"
 AD="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
 AD="$AD -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_FIO -DMISTER_OCRAM_UIO -DMISTER_OCRAM_LANE"
 aarm() {
@@ -629,7 +631,7 @@ aarm() {
         G=""; fl=$t
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
         [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=2'b01";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
-        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF sys/lw_cdc.sv \
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" $OCMF $OCRF sys/lw_cdc.sv \
              > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/laneV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
         fi
@@ -646,7 +648,7 @@ aarm() {
 
 # iarm LOG: arm I. tb/ocram_tb.sv's SECTOR shape with the events tier, each shape compiled once, run under every
 # seed, plain and with the crossing models; then verilator on the master and the port with the macro.
-IB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
+IB="tb/ocram_tb.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_cdc.sv sys/osd.v sys/hps_io.sv"
 ID="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DMISTER_OCRAM_SECTOR_SLOT=2"
 ID="$ID -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_EVT"
 iarm() {
@@ -853,7 +855,7 @@ hps_ocram_rx #(.OSD_EN(0), .SEC_EN(0), .FIO_EN(1), .MNT_EN(2'b01)) mr();
 `endif
 endmodule
 EOS
-  XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
+  XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv $OCRF sys/lw_sys_window.sv sys/lw_sector.sv"
   XOF="$XOF sys/osd.v"
   while IFS='|' read -r want guard what d; do
     echo "-- $what" >> "$1"

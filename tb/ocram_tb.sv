@@ -4057,8 +4057,8 @@ always @(posedge clk) begin
 	mk_d <= mark_out;
 	if (mark_out && !mk_d) mk_rises = mk_rises + 1;
 	// a head read of the download ring that finds it empty while the host still has words to send
-	if (fio_streaming && u_osd.wst == 4'd1 && u_osd.ring == 2'd2 && ocram_c0_done && u_osd.c_ok &&
-	    u_osd.new_gap == 16'd0)
+	if (fio_streaming && u_osd.rd.wst == 4'd1 && u_osd.rd.ring == 2'd2 && ocram_c0_done && u_osd.rd.c_ok &&
+	    u_osd.rd.new_gap == 16'd0)
 		dry = dry + 1;
 	if (arvalid && arready && araddr[15:0] == H_HELLO) hello_reads = hello_reads + 1;
 end
@@ -4617,7 +4617,7 @@ task uio_case1;
 		check("U1: TIMESTAMP's toggle, once a 0x24 frame (mailbox)", ts_m - t0, 2);
 		check("U1: the toggles, mailbox and link", {rtc_m[15:0], ts_m[15:0]}, {rtc_t[15:0], ts_t[15:0]});
 		check("U1: mount strobes (mailbox)", mnt_m >= 2, 1);
-		check("U1: the walker took no fault", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
+		check("U1: the walker took no fault", {u_osd.rd.stop[2], mem[C_STATE >> 2][9]}, 2'b00);
 	end
 endtask
 
@@ -4656,7 +4656,7 @@ task uio_case2;
 		tw_txn(4'b0001);
 		u_frame(2'd0, 4'd0, 1'b0, "U2 the frame after them");
 		u_same("U2 the frame after the refused ones");
-		check("U2: the walker took no fault", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
+		check("U2: the walker took no fault", {u_osd.rd.stop[2], mem[C_STATE >> 2][9]}, 2'b00);
 	end
 endtask
 `ifdef MISTER_OCRAM_LANE
@@ -4784,7 +4784,7 @@ task lane_case2;
 		check("A2: the held frame is not consumed (C_IDX[1])", mem[C_IDX1 >> 2], 32'd0);
 		check("A2: nothing played on the UIO select", usn_m, n0);
 		check("A2: no REPLY", rp_n, r0);
-		check("A2: no fault on ring 1", {u_osd.stop_f, mem[C_STATE >> 2][9]}, 2'b00);
+		check("A2: no fault on ring 1", {u_osd.rd.stop[2], mem[C_STATE >> 2][9]}, 2'b00);
 		// ring 2: an OSD row
 		t0 = osd_head;
 		osd_publish_row(3); osd_publish;
