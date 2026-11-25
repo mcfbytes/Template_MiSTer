@@ -53,11 +53,8 @@ if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ] || [ ! -f "$UP/Template.sv
 fi
 command -v iverilog >/dev/null 2>&1 || { echo "FAILED: no iverilog on PATH"; exit 1; }
 exec python3 -I - "$UP" "$O" <<'EOF'
-import difflib, hashlib, os, re, subprocess, sys
+import difflib, os, re, subprocess, sys
 UP, O = sys.argv[1], sys.argv[2]
-# A stock file this branch carries changed for its own sake, not for LW: its sha256 is pinned, so any other edit
-# still fails. sys/ascal.vhd is ascal-hphase-dda 91c0abe (E32, bit-exact against stock in sim/ascal's GHDL bench).
-PINNED = {'sys/ascal.vhd': '835a007dde05d310ffd38801b804d332fe6212337df44c3d9db7ec732d93fdc6'}
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
         'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE', 'lw_osd.sv': 'MISTER_LW_OSD'}
@@ -309,9 +306,6 @@ for p in sorted(theirs - mine):
     check(False, '%s: in upstream, missing here' % p)
 for p in sorted(mine & theirs) + ['files.qip']:
     if p in STOCK or p == 'sys/sys.qip':
-        continue
-    if p in PINNED:
-        check(hashlib.sha256(open(p, 'rb').read()).hexdigest() == PINNED[p], '%s: differs from its pinned text' % p)
         continue
     check(open(p, 'rb').read() == open(os.path.join(UP, p), 'rb').read(), '%s: differs from upstream' % p)
 qip = open('sys/sys.qip').read().splitlines()
