@@ -552,7 +552,7 @@ aarm() {
       for t in hps_ocram_master hps_ocram_rx hps_ocram_fplay; do
         G=""; fl=$t
         [ $t = hps_ocram_fplay ] && fl=hps_ocram_rx
-        [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=1";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
+        [ $t = hps_ocram_rx ] && case $vn in laneall) G="-GSEC_EN=1 -GFIO_EN=1 -GMNT_EN=2'b01";; *) G="-GOSD_EN=0 -GSEC_EN=1 -GFIO_EN=1";; esac
         if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
              > "$O/laneV_${t}_$vn.log" 2>&1 || [ -s "$O/laneV_${t}_$vn.log" ]; then
           vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/laneV_${t}_$vn.log" | sed 's/^/   /' >> "$1"

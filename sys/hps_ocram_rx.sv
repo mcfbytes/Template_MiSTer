@@ -413,7 +413,10 @@ lw_fence fence
 
 localparam [3:0] W_IDLE = 4'd0, W_HEAD = 4'd1, W_HDR = 4'd2, W_LBA = 4'd3, W_HGO = 4'd4, W_ANS = 4'd5,
                  W_PAY = 4'd6, W_XFER = 4'd7, W_TAIL = 4'd8, W_FLUSH = 4'd9, W_FTAIL = 4'd10,
-                 W_MTK = 4'd11, W_MWD = 4'd12, W_MWH = 4'd13, W_MWP = 4'd14, W_CAP = 4'd15;
+                 W_MTK = 4'd11, W_MWD = 4'd12, W_MWH = 4'd13, W_MWP = 4'd14;
+`ifdef MISTER_OCRAM_LANE
+localparam [3:0] W_CAP = 4'd15;           // a capture frame waits for its REPLY's header
+`endif
 
 reg   [3:0] wst = W_IDLE;
 reg         req = 1'b0;

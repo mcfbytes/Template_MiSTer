@@ -3996,6 +3996,10 @@ wire [26:0] io_ad;
 reg [127:0] a_st = 128'd0;
 reg         a_ss = 1'b0;
 reg  [15:0] a_r2 = 16'd0;
+// EXT_BUS[32] low on both, so each hps_io's reply word (HPS_BUS[15:0]) is its own io_dout, not z merged with it
+wire [35:0] a_ext_m, a_ext_t;
+assign a_ext_m[32] = 1'b0;
+assign a_ext_t[32] = 1'b0;
 `define A_IO_PORTS , .status_in(a_st), .status_set(a_ss), .joystick_2_rumble(a_r2)
 `else
 `define A_IO_PORTS
@@ -4003,7 +4007,11 @@ reg  [15:0] a_r2 = 16'd0;
 hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) fio_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(fbus), .ioctl_wait(f_wait), .ioctl_din(16'd0),
-	.sd_rd(1'b0), .sd_wr(1'b0) `A_IO_PORTS,
+	.sd_rd(1'b0), .sd_wr(1'b0) `A_IO_PORTS
+`ifdef MISTER_OCRAM_LANE
+	, .EXT_BUS(a_ext_m)
+`endif
+	,
 	.ioctl_download(io_dl), .ioctl_index(io_ix), .ioctl_wr(io_wr), .ioctl_addr(io_ad), .ioctl_dout(io_do)
 );
 
@@ -4211,14 +4219,15 @@ task fio_case1;
 		fio_mark(1'b0, fio_head[15:0]);
 		fio_fall(b);
 		check("it falls after the unarmed store", mark_out, 0);
-		check("within 4 transactions of the store", b <= 4, 1);
+		check("within 4 transactions of the store (5 beside the SECTOR tier's H_SECTOR read)", b <= (SEC_B ? 5 : 4), 1);
 		fio_mark(1'b1, fio_head[15:0] - 16'd7);           // past: the tail is beyond it
 		ok = 0; t = 0;
 		while (!ok && t < (4 << POLLC)) begin @(posedge clk); t = t + 1; if (mark_out) ok = 1; end
 		check("armed at an index the tail is past: the line rises", ok, 1);
 		fio_mark(1'b1, fio_head[15:0] + 16'd40);          // a new index ahead of the tail
 		fio_fall(b);
-		check("a new index ahead drops it within 4 transactions of the store", (mark_out === 1'b0 && b <= 4), 1);
+		check("a new index ahead drops it within 4 transactions of the store (5 beside the SECTOR tier)",
+		      (mark_out === 1'b0 && b <= (SEC_B ? 5 : 4)), 1);
 
 		$display("-- K1: armed ahead: low until the tail reaches the index, then high with C_IDX[1] at it");
 		fio_window(16'h0004, 4, 20, 40);
@@ -4411,6 +4420,9 @@ hps_io #(.CONF_STR("FIO;;"), .WIDE(1)) tw_io
 (
 	.clk_sys(clk_sys), .HPS_BUS(tbus), .ioctl_wait(1'b0), .ioctl_din(16'd0), .sd_rd(1'b0), .sd_wr(1'b0)
 	`A_IO_PORTS
+`ifdef MISTER_OCRAM_LANE
+	, .EXT_BUS(a_ext_t)
+`endif
 );
 `undef A_IO_PORTS
 `ifdef MISTER_OCRAM_OSD
@@ -4685,7 +4697,7 @@ task a_check(input integer r0, input [3:0] t, input integer us, input string wha
 		bad = 0;
 		for (j = 0; j < len; j = j + 1) begin
 			w = {(2 * j + 1 < un) ? ur[2 * j + 1] : 16'd0, ur[2 * j]};
-			if (rp_w[rp_at[r0] + j] !== w) begin
+			if (rp_w[rp_at[r0] + j] !== w || ^w === 1'bx) begin
 				if (bad < 4) $display("   %s: word %0d got %h, the link's replies %h", what, j, rp_w[rp_at[r0] + j], w);
 				bad = bad + 1;
 			end
@@ -4737,6 +4749,7 @@ task lane_case1;
 		a_txn;
 		a_check(r0, 4'hF, 2000, "A1 one word (0x23F)");
 		check("A1: the level read", rp_w[rp_at[r0]], {16'd0, a_r2});
+		check("A1: the 0x29 frames' replies are driven", ^{ur[0], ur[1], ur[2]} === 1'bx, 0);
 		// a write frame between captures plays as before and posts nothing
 		u_words(8'h1E, 8); r0 = rp_n;
 		tw_txn(4'b0001);
@@ -4920,6 +4933,8 @@ end
 
 `ifdef OCRAM_TB_MNT
 initial begin #250000000 $display("FAILED: timeout"); $finish; end
+`elsif MISTER_OCRAM_LANE
+initial begin #400000000 $display("FAILED: timeout"); $finish; end   // every SECTOR, download and UIO case too
 `else
 initial begin #100000000 $display("FAILED: timeout"); $finish; end
 `endif
