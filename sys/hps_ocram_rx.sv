@@ -414,6 +414,7 @@ reg   [1:0] mfk = 2'd1;                // the slot of the mount FRAME or WRITE b
 reg  [39:0] mr1 = 40'd0, mr2 = 40'd0;  // each slot's last request record {wr, blk_cnt, offered, lba}
 reg         mw_job = 1'b0;             // the walker serves slot mfk's WRITE
 reg         w_acc = 1'b0;              // the feeder accepted it: the ack is up
+reg         w_started = 1'b0;          // the master has begun its WRITE record
 reg   [1:0] w_done = 2'd0;             // that slot's WRITE is over (served, refused or cut): none again for its record
 reg         m_end = 1'b0;              // the next token is the end token
 reg         m_have = 1'b0;             // m_wd holds a WRITE word for the master
@@ -428,10 +429,12 @@ assign osd_deepest = 16'd0;
 
 // each mount slot's request: standing, its direction, blk_cnt and LBA, and its block's words (at most MFRAME, 1,020:
 // a longer request is never offered)
+/* verilator lint_off UNUSEDSIGNAL */   // a block of at most 1,020 words
 function automatic [10:0] mwn(input [5:0] cnt);
 	reg [18:0] w;
 	begin w = ({13'd0, cnt} + 19'd1) << ({1'b0, BLKSZ} + 4'd5); mwn = w[10:0]; end
 endfunction
+/* verilator lint_on UNUSEDSIGNAL */
 wire  [1:0] mst = {mr2[32], mr1[32]} & MNT_EN;
 wire  [1:0] mwr = {mr2[39], mr1[39]};
 wire [10:0] mn1 = mwn(mr1[38:33]), mn2 = mwn(mr2[38:33]);
@@ -440,7 +443,9 @@ wire  [1:0] rd_ok = mst & ~mwr & sbm & ~drop_m & bind_lwx[2:1] & ~m_posted;
 wire  [1:0] wj    = mst & mwr & sbm & ~drop_m & ~w_done;
 wire  [1:0] pk    = mw_job ? mfk : rd_ok[0] ? 2'd1 : 2'd2;
 wire        pk2   = pk == 2'd2;
+/* verilator lint_off UNUSEDSIGNAL */   // its direction and offered bit are the walker's
 wire [39:0] pr    = pk2 ? mr2 : mr1;
+/* verilator lint_on UNUSEDSIGNAL */
 wire [10:0] mn    = (mfk == 2'd2) ? mn2 : mn1;        // the walked slot's block
 
 wire [15:0] tl     = (ring == RG_SEC) ? tail_s : (ring == RG_FIO) ? tail_f : (ring == RG_MNT) ? tail_m : tail_o;
@@ -519,7 +524,7 @@ assign rq_post  = SEC_EN != 0 && sb && !drop_s && bind_lwx[0] && stand && !rq_po
                   avail_s == 14'd0 && !stop_s;
 // a mount read is posted at once; a WRITE once the feeder has raised its ack
 assign m_post   = MNT_EN != 0 && !mq_v &&
-                  (mw_job ? (w_acc && !(pk2 ? m_posted[1] : m_posted[0])) : (rd_ok != 2'd0 && !stop_m));
+                  (mw_job ? (w_acc && !w_started) : (rd_ok != 2'd0 && !stop_m));
 assign m_write  = mw_job;
 assign m_arg    = {pr[38:33], pk};
 assign m_n      = pk2 ? mn2 : mn1;
@@ -584,6 +589,7 @@ always @(posedge clk) begin
 	if (mq_v && mq[41:40] == 2'd1) begin mr1 <= mq[39:0]; m_posted[0] <= 1'b0; w_done[0] <= 1'b0; end
 	if (mq_v && mq[41:40] == 2'd2) begin mr2 <= mq[39:0]; m_posted[1] <= 1'b0; w_done[1] <= 1'b0; end
 	if (m_start) m_posted[pk2] <= 1'b1;
+	if (m_start && mw_job) w_started <= 1'b1;   // once: the slot's next record may land before the ack's fall
 	if (s_tick) begin due_o <= 1'b1; due_s <= 1'b1; due_f <= 1'b1; due_m <= 1'b1; s_wait <= 1'b0; end
 
 	// a ring word read, addressed by the one adder; never while the forward cell is busy
@@ -654,7 +660,8 @@ always @(posedge clk) begin
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid_f <= 1'b1; wst <= W_HDR; end
 			RG_MNT: if (m_wjob) begin
 				// a WRITE: its head crosses with the slot and the LBA; the feeder answers
-				mw_job <= 1'b1; mfk <= wj[0] ? 2'd1 : 2'd2; m_end <= 1'b0; word_out <= 1'b1; wst <= W_HGO;
+				mw_job <= 1'b1; mfk <= wj[0] ? 2'd1 : 2'd2; w_started <= 1'b0; m_end <= 1'b0; word_out <= 1'b1;
+				wst <= W_HGO;
 			end
 			else if (avail_m == 11'd0) begin
 				req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX0; due_m <= 1'b0; wst <= W_HEAD;
