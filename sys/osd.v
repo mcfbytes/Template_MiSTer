@@ -1,6 +1,13 @@
 // A simple OSD implementation. Can be hooked up between a cores
 // VGA output and the physical VGA pins
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_OSD
+// LW_OSD_W: the OSDBUF tier (MISTER_LW_OSD, with MISTER_LW) writes osd_buffer through this block's own write port.
+`define LW_OSD_W
+`endif
+`endif
+
 module osd
 (
 	input         clk_sys,
@@ -19,6 +26,14 @@ module osd
 	output reg    hs_out,
 
 	output reg    osd_status
+`ifdef LW_OSD_W
+	,
+	// OSDBUF (lw_osd.sv), on clk_sys: one byte of osd_buffer, row lw_addr[12:8], column lw_addr[7:0]. It comes only
+	// while io_osd is low, so the one write statement below takes the SPI byte if both come.
+	input         lw_we,
+	input  [12:0] lw_addr,
+	input   [7:0] lw_byte
+`endif
 );
 
 parameter  OSD_COLOR    =  3'd4;
@@ -52,6 +67,11 @@ always@(posedge clk_sys) begin
 	reg        has_cmd;
 	reg        old_strobe;
 	reg        highres = 0;
+`ifdef LW_OSD_W
+	reg        spi_we;
+
+	spi_we = 0;
+`endif
 
 	osd_t <= rot[0] ? OSD_WIDTH : (OSD_HEIGHT<<1);
 	osd_h <= rot[0] ? (info ? infow : OSD_WIDTH) : info ? infoh : (OSD_HEIGHT<<highres);
@@ -91,12 +111,22 @@ always@(posedge clk_sys) begin
 				end
 
 				// command 0x20: OSDCMDWRITE
+`ifdef LW_OSD_W
+				if(cmd[7:5] == 'b001) spi_we = 1;
+`else
 				if(cmd[7:5] == 'b001) osd_buffer[bcnt] <= io_din[7:0];
+`endif
 
 				bcnt <= bcnt + 1'd1;
 			end
 		end
 	end
+`ifdef LW_OSD_W
+
+	// one write port: the SPI byte, else the LW byte; an LW byte in rows 8-15 sets highres as OSDCMDWRITE's bit 3 does
+	if(spi_we | lw_we) osd_buffer[spi_we ? bcnt : lw_addr] <= spi_we ? io_din[7:0] : lw_byte;
+	if(~spi_we & lw_we & lw_addr[11] & ~lw_addr[12]) highres <= 1;
+`endif
 end
 
 (* direct_enable *) reg ce_pix;
@@ -152,7 +182,11 @@ always @(posedge clk_video) if(ce_pix) begin
 	v_info_start_5 <= rot[0] ? (infox + (infox << 2)) : (infoy + (infoy << 2));
 end
 
+`ifdef LW_TB_PROBES
+always @(posedge clk_video) begin : pix   // named for the testbench's probes only (tb/lw_tb.sv)
+`else
 always @(posedge clk_video) begin
+`endif
 	reg        deD;
 	reg  [2:0] osd_div;
 	reg  [2:0] multiscan;
@@ -284,3 +318,7 @@ always @(posedge clk_video) begin
 end
 
 endmodule
+
+`ifdef LW_OSD_W
+`undef LW_OSD_W
+`endif

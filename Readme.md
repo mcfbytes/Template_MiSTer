@@ -5,6 +5,9 @@ This core contains the latest version of framework and will be updated when fram
 
 It's highly recommended to follow the notes to keep it standardized for easier maintenance and collaboration with other developers.
 
+## LW bridge framework (branch `lw-framework`)
+This branch adds an optional second path between the HPS and the core: a memory-mapped window on the HPS lightweight bridge, beside the SPI link that `hps_io` decodes. Pads, an OSD shadow, the status back-channel and (optionally) disk blocks travel as plain 32-bit stores and register reads, with two interrupt lines. `hps_io` keeps every SPI decode, so a host that ignores the window drives the core as before. It is opt-in: without the `MISTER_LW` macro `sys/` builds exactly as upstream. Adoption, register map and contracts: [docs/LW_BRIDGE.md](docs/LW_BRIDGE.md). Testbench: `tb/run.sh`.
+
 ## Source structure
 
 ### Legend:
@@ -42,6 +45,9 @@ MISTER_SMALL_VBUF        | Sets a smaller video buffer for the ASCAL
 MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
 MISTER_FB_PALETTE        | Framebuffer palette
+MISTER_LW                | LW bridge framework: the lightweight-bridge window beside hps_io (docs/LW_BRIDGE.md)
+LW_DIAG                  | LW window diagnostics readable (debug builds only)
+MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot (with MISTER_LW_SECTOR_FRAME, MISTER_LW_BLKSZ, MISTER_LW_CARD*)
 
 
 # Quartus version
