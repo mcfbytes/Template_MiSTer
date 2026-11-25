@@ -3091,9 +3091,21 @@ task fio_send_all;
 	end
 endtask
 
+// The mark line's fall after a store to H_MARK[1], counted as case 9 counts the EVT line's: transactions the master
+// starts after the store (a slow one of the model's latency tail is one transaction, however long).
+task fio_fall(output integer b);
+	integer c0, t;
+	begin
+		@(negedge clk); c0 = txn_starts;
+		b = 0; t = 0;
+		while (mark_out === 1'b1 && b < 200 && t < 1000000) begin @(negedge clk); b = txn_starts - c0; t = t + 1; end
+		if (b > 4) $display("   the mark line fell %0d transactions, %0d cycles after the store", b, t);
+	end
+endtask
+
 // F1/K1. the hello's words; a window over the ring into hps_io; the mark line rises at its index and never unarmed
 task fio_case1;
-	integer w0, r0, t, tl0;
+	integer w0, r0, t, tl0, b;
 	begin
 		$display("-- download: C_CAPS bit 1, C_RING[1], C_K[9]; a window over ring 1 into hps_io");
 		fio_session(16'h0F01);
@@ -3123,16 +3135,16 @@ task fio_case1;
 		while (!ok && t < (4 << POLLC)) begin @(posedge clk); t = t + 1; if (mark_out) ok = 1; end
 		check("the line rises within a poll period", ok, 1);
 		fio_mark(1'b0, fio_head[15:0]);
-		t = 0; while (mark_out && t < 100000) begin @(posedge clk); t = t + 1; end
+		fio_fall(b);
 		check("it falls after the unarmed store", mark_out, 0);
-		check("within a few transactions (under 200 clk_100m cycles)", t < 200, 1);
+		check("within 4 transactions of the store", b <= 4, 1);
 		fio_mark(1'b1, fio_head[15:0] - 16'd7);           // past: the tail is beyond it
 		ok = 0; t = 0;
 		while (!ok && t < (4 << POLLC)) begin @(posedge clk); t = t + 1; if (mark_out) ok = 1; end
 		check("armed at an index the tail is past: the line rises", ok, 1);
 		fio_mark(1'b1, fio_head[15:0] + 16'd40);          // a new index ahead of the tail
-		t = 0; while (mark_out && t < 100000) begin @(posedge clk); t = t + 1; end
-		check("a new index ahead drops it within a few transactions", t < 200, 1);
+		fio_fall(b);
+		check("a new index ahead drops it within 4 transactions of the store", (mark_out === 1'b0 && b <= 4), 1);
 
 		$display("-- K1: armed ahead: low until the tail reaches the index, then high with C_IDX[1] at it");
 		fio_window(16'h0004, 4, 20, 40);
