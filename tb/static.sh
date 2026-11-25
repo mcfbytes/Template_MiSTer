@@ -8,7 +8,8 @@
 #                           MISTER_OCRAM_DIAG, with MISTER_OCRAM_OSD, with both, and beside every LW tier (with
 #                           and without the OSD tier), the SECTOR tier's two, and the download tier's three (alone,
 #                           with the OSD tier and DIAG, beside the SECTOR tier and the LW tiers but the lane),
-#                           each with no upstream macro and with MISTER_DEBUG_NOHDMI (121 configurations)
+#                           the mount slots, the lean disc set, and the events/UIO/lane set, each with no upstream
+#                           macro and with MISTER_DEBUG_NOHDMI (129 configurations)
 #   tb/static.sh --nets FILE MACRO...
 #                           FILE gets one Verilog check call per LW net of that configuration, for tb/top_tb.sv
 # A floor net is a net sys_top.v declares in this configuration whose declaration the off configuration of the
@@ -142,7 +143,11 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                                    'MISTER_OCRAM_SECTOR_GAP=2', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_OCRAM_MOUNT0_SLOT=1',
                                    'MISTER_OCRAM_MOUNT1_SLOT=2', 'MISTER_OCRAM_MOUNT_FRAME=256', 'MISTER_OCRAM_FIO',
                                    'MISTER_DISABLE_SPI_PAD', 'MISTER_DISABLE_SPI_OSD', 'MISTER_DISABLE_SPI_BLK',
-                                   'MISTER_DISABLE_SPI_BLK_UNUSED=1', 'LW_DIAG=0'])]
+                                   'MISTER_DISABLE_SPI_BLK_UNUSED=1', 'LW_DIAG=0']),
+               # the events tier, the UIO player and the capture lane through sys_top: its EVT take and lane nets
+               ('ocram-evt-uio-lane-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
+                                         'MISTER_OCRAM_FIO', 'MISTER_OCRAM_UIO', 'MISTER_OCRAM_LANE',
+                                         'MISTER_OCRAM_EVT', 'MISTER_LW', 'MISTER_LW_PAD'])]
 OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
 CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k

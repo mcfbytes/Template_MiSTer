@@ -178,6 +178,12 @@ localparam TB_EVT = 1;
 `else
 localparam TB_EVT = 0;
 `endif
+// the OCRAM events tier: hps_io's offer on [374:333] and [376], sys_top's take on [382]
+`ifdef MISTER_OCRAM_EVT
+localparam TB_OEVT = 1;
+`else
+localparam TB_OEVT = 0;
+`endif
 `ifdef MISTER_LW_SECTOR_SLOT
 localparam TB_SEC = 1, TB_SLOT = `MISTER_LW_SECTOR_SLOT;
 `else
@@ -212,6 +218,7 @@ function [383:46] bus_driven;
 		m[131:46] = '1;
 		if (TB_PAD) m[375] = 1'b1;
 		if (TB_EVT) begin m[374:237] = '1; m[376] = 1'b1; end
+		if (TB_OEVT) begin m[374:333] = '1; m[376] = 1'b1; m[382] = 1'b1; end
 		if (TB_SEC || TB_XSEC) begin m[381:380] = 2'b11; m[166:132] = '1; m[377] = 1'b1; end
 		bus_driven = m[383:46];
 	end
