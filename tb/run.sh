@@ -34,7 +34,11 @@
 #      the LW SECTOR block, or at an unservable geometry, and MISTER_DISABLE_SPI_PAD without MISTER_LW_PAD, each
 #      fails naming its guard (and its legal neighbour compiles); and the OCRAM download tier's: MISTER_OCRAM_FIO
 #      beside MISTER_LW_LANE (link_on_two_players), a gap outside 4-7 or a ring outside 2-10 and 13
-#      (ocram_fio_unservable_geometry), a ring of 13 beside the SECTOR tier or DIAG (ocram_fio_ring_on_ring4_span)
+#      (ocram_fio_unservable_geometry), a ring of 13 beside the SECTOR tier or DIAG (ocram_fio_ring_on_ring4_span);
+#      and the two removals': MISTER_DISABLE_SPI_OSD without an OSD tier (spi_osd_off_needs_an_osd_tier), and
+#      MISTER_DISABLE_SPI_BLK with no mailbox block tier, with a slot below VDNUM neither on a tier nor named in
+#      MISTER_DISABLE_SPI_BLK_UNUSED, or with a tier slot named in it (spi_blk_off_needs_a_block_tier,
+#      spi_blk_off_slot_without_a_tier, spi_blk_off_unused_slot_on_a_tier), each with its legal neighbours
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -80,6 +84,16 @@
 #      an odd frame, aux words, waits on every write and on every second write; the wait raised GAP - 3 cycles
 #      after ioctl_wr, held 1 cycle to 10^4, with no word lost or doubled, and one cycle later, the overrun shown;
 #      at 33.8688 MHz, and the Template's 20 MHz at GAP 4 wide; every seed, plain and with the crossing models
+#   Y  the removals MISTER_DISABLE_SPI_OSD and MISTER_DISABLE_SPI_BLK (the lean profile's bench arm R1; arm X has
+#      their guards): lw_tb.sv's short tier run with the LW OSD tier and MISTER_DISABLE_SPI_OSD (OSDBUF K2 bit 0
+#      reads 1, rows over LW land and draw, an SPI row write (0x20, 0x28) changes no byte and no box height, the 0x4x
+#      words still enable and disable); tb/ocram_tb.sv's OSD shape with MISTER_DISABLE_SPI_OSD and its mount shape
+#      with both, every seed (C_CAPS bit 17, and 16 with the mount shape, read in the hello's exact C_CAPS; every
+#      SPI row changes nothing in osd A, which then takes the row through its tier port as the reference, so the
+#      OSD rows from the mailbox and the blocks from rings 0 and 4 pass as in arm O); tb/blkoff_tb.sv with
+#      MISTER_DISABLE_SPI_BLK (0x16 reads 0 with requests raised, 0x17 and 0x18 raise no ack and no strobe, the
+#      commit mark reads 0 on every cycle, present) and without it (the same words show the arms alive); and four
+#      runs that each break one of the core's obligations, each named by hps_io's simulation check
 # LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
 # in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
@@ -87,7 +101,7 @@
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y}
 O=${LW_TB_OUT:-tb/out}
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
@@ -332,6 +346,82 @@ ocram() {
   else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
 
+# rmy LOG: arm Y, the two removals. Each shape compiles once and runs under every seed (blkoff_tb once); the
+# violation runs are judged by the one hps_io line each must print, not by their own result.
+rmy() {
+  : > "$1"; n=0; f=0
+  # lw_tb.sv's short tier run, the LW OSD tier with MISTER_DISABLE_SPI_OSD
+  YL="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_OSD"
+  YL="$YL -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_DISABLE_SPI_OSD"
+  echo "-- lw_tb compiles (the tier run with MISTER_DISABLE_SPI_OSD)" >> "$1"
+  if iverilog -g2012 $YL -I sys -o "$O/rmY_lw.vvp" $TBF > "$O/rmY_lw.err" 2>&1; then
+    echo "pass lw_tb: compiles" >> "$1"; n=$((n + 1))
+    vvp -n "$O/rmY_lw.vvp" > "$O/rmY_lw.log" 2>&1
+    echo "== seed 1 lw" >> "$1"; cat "$O/rmY_lw.log" >> "$1"
+    grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_lw.log" || echo "FAIL lw_tb: gave no result" >> "$1"
+  else
+    f=$((f + 1)); echo "FAIL lw_tb: does not compile" >> "$1"; head -20 "$O/rmY_lw.err" | sed 's/^/   /' >> "$1"
+  fi
+  # ocram_tb.sv: the OSD shape with MISTER_DISABLE_SPI_OSD, the mount shape with both removals
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
+  OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10 -DOCRAM_TB_SYS_HP_PS=14762"
+  OCM="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588 -DMISTER_OCRAM_MOUNT0_SLOT=3"
+  OCM="$OCM -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
+  for c in osd mnt; do
+    case $c in osd) D="$OCE -DMISTER_DISABLE_SPI_OSD";;
+      mnt) D="$OCM -DMISTER_DISABLE_SPI_OSD -DMISTER_DISABLE_SPI_BLK";; esac
+    echo "-- ocram_tb compiles ($c)" >> "$1"
+    if iverilog -g2012 $D -I sys -s ocram_tb -o "$O/rmY_$c.vvp" $OCB > "$O/rmY_$c.err" 2>&1; then
+      echo "pass ocram_tb: compiles ($c)" >> "$1"; n=$((n + 1))
+      for s in ${LW_TB_SEEDS:-1 2 3}; do vvp -n "$O/rmY_$c.vvp" +lw_seed=$s > "$O/rmY_$c.$s.log" 2>&1 & done; wait
+      for s in ${LW_TB_SEEDS:-1 2 3}; do
+        echo "== seed $s $c" >> "$1"; cat "$O/rmY_$c.$s.log" >> "$1"
+        grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_$c.$s.log" || echo "FAIL ocram_tb $s $c: gave no result" >> "$1"
+      done
+    else
+      f=$((f + 1)); echo "FAIL ocram_tb: does not compile ($c)" >> "$1"; head -20 "$O/rmY_$c.err" | sed 's/^/   /' >> "$1"
+    fi
+  done
+  # blkoff_tb.sv: hps_io with MISTER_DISABLE_SPI_BLK, and without it (the control)
+  YB="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
+  YB="$YB -DMISTER_OCRAM_MOUNT_FRAME=256"
+  YO="-DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1"
+  for c in off ctl; do
+    D=$YB; [ $c = off ] && D="$YB $YO"
+    echo "-- blkoff_tb compiles ($c)" >> "$1"
+    if iverilog -g2012 $D -I sys -s blkoff_tb -o "$O/rmY_b$c.vvp" tb/blkoff_tb.sv sys/hps_io.sv > "$O/rmY_b$c.err" 2>&1
+    then
+      echo "pass blkoff_tb: compiles ($c)" >> "$1"; n=$((n + 1))
+      vvp -n "$O/rmY_b$c.vvp" > "$O/rmY_b$c.log" 2>&1
+      echo "== seed 1 $c" >> "$1"; cat "$O/rmY_b$c.log" >> "$1"
+      grep -Eq '^(PASSED|FAILED): [0-9]' "$O/rmY_b$c.log" || echo "FAIL blkoff_tb $c: gave no result" >> "$1"
+    else
+      f=$((f + 1)); echo "FAIL blkoff_tb: does not compile ($c)" >> "$1"; head -20 "$O/rmY_b$c.err" | sed 's/^/   /' >> "$1"
+    fi
+  done
+  # the core's obligations: each broken once, each named by hps_io's check (and only that one)
+  while IFS='|' read -r k pat what; do
+    echo "-- the core's word broken: $what" >> "$1"
+    if iverilog -g2012 $YB $YO -DBLKOFF_TB_VIOLATE=$k -I sys -s blkoff_tb -o "$O/rmY_v$k.vvp" tb/blkoff_tb.sv \
+         sys/hps_io.sv > "$O/rmY_v$k.err" 2>&1; then
+      vvp -n "$O/rmY_v$k.vvp" > "$O/rmY_v$k.log" 2>&1; n=$((n + 1))
+      g=$(grep -c "^FAIL hps_io: MISTER_DISABLE_SPI_BLK: .*$pat" "$O/rmY_v$k.log")
+      a=$(grep -c '^FAIL hps_io: ' "$O/rmY_v$k.log")
+      if [ "$g" -eq 1 ] && [ "$a" -eq 1 ]; then echo "pass $what: named once" >> "$1"
+      else f=$((f + 1)); echo "FAIL $what: named $g times, $a hps_io checks in all" >> "$1"; fi
+    else
+      f=$((f + 1)); echo "FAIL $what: does not compile" >> "$1"; head -5 "$O/rmY_v$k.err" | sed 's/^/   /' >> "$1"
+    fi
+  done <<'EOV'
+1|slot 0 is named unused and requests|slot 0, named unused, requests
+2|the SECTOR slot 1 raises sd_wr|the SECTOR slot writes
+3|mount slot 2 asks 384 words, more than 256|a mount read of 384 words on a 256-word frame
+4|mount slot 2 asks 384 words, more than 256|the same read seen only on the save mux's core rd bit
+EOV
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
+}
+
 # elab LOG: arm E, one elaboration and simulation of tb/top_tb.sv per configuration; the log ends with one
 # PASSED/FAILED line for the arm. Files from sys.qip and files.qip, less those sys_stubs.sv stands in for. The
 # configurations run $LW_TB_JOBS (8) at a time, the three off ones first: each LW run's warnings are compared
@@ -409,7 +499,14 @@ xarm() {
   # the new guards: each macro pairing that cannot be built stops naming its guard, and its legal neighbour compiles
   cat > "$O/lw_xo_top.sv" <<'EOS'
 module lw_xo_top;
+`ifdef XO_VD
+hps_io #(.CONF_STR("X;"), .VDNUM(`XO_VD)) hps_io();
+`else
 hps_io #(.CONF_STR("X;")) hps_io();
+`endif
+`ifdef XO_OSD
+osd o();
+`endif
 `ifdef XO_MASTER
 hps_ocram_master m();
 `endif
@@ -431,6 +528,7 @@ hps_ocram_rx #(.OSD_EN(0), .SEC_EN(0), .FIO_EN(1), .MNT_EN(2'b01)) mr();
 endmodule
 EOS
   XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
+  XOF="$XOF sys/osd.v"
   while IFS='|' read -r want guard what d; do
     echo "-- $what" >> "$1"
     iverilog -g2012 $d -I sys -s lw_xo_top -o "$O/lw_xo.vvp" $XOF > "$O/lw_xo.err" 2>&1
@@ -481,6 +579,24 @@ bad|ocram_mount_unservable_geometry|a mount frame of 0 words|-DMISTER_LW -DMISTE
 bad|ocram_mount_unservable_geometry|a mount frame of 1021 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DXO_MMASTER -DXO_M0=2 -DXO_M1=3 -DXO_MF=1021
 ok|-|the mount edges: 1,020 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DXO_MMASTER -DXO_M0=2 -DXO_M1=3 -DXO_MF=1020
 ok|-|the mount edges: 1 word, slot 15|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT1_SLOT=15 -DXO_MMASTER -DXO_M0=2 -DXO_M1=15 -DXO_MF=1
+bad|spi_osd_off_needs_an_osd_tier|MISTER_DISABLE_SPI_OSD alone|-DMISTER_DISABLE_SPI_OSD -DXO_OSD
+bad|spi_osd_off_needs_an_osd_tier|MISTER_DISABLE_SPI_OSD with MISTER_OCRAM_OSD and no MISTER_OCRAM|-DMISTER_OCRAM_OSD -DMISTER_DISABLE_SPI_OSD -DXO_OSD
+bad|spi_osd_off_needs_an_osd_tier|MISTER_DISABLE_SPI_OSD with MISTER_LW_OSD and no MISTER_LW|-DMISTER_LW_OSD -DMISTER_DISABLE_SPI_OSD -DXO_OSD
+bad|spi_osd_off_needs_an_osd_tier|MISTER_DISABLE_SPI_OSD beside MISTER_LW and its other tiers, no OSD tier|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_OCRAM -DMISTER_DISABLE_SPI_OSD -DXO_OSD
+ok|-|MISTER_DISABLE_SPI_OSD with the OCRAM OSD tier|-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_DISABLE_SPI_OSD -DXO_OSD
+ok|-|MISTER_DISABLE_SPI_OSD with the LW OSD tier|-DMISTER_LW -DMISTER_LW_OSD -DMISTER_DISABLE_SPI_OSD -DXO_OSD
+ok|-|MISTER_DISABLE_SPI_OSD with both OSD tiers|-DMISTER_LW -DMISTER_LW_OSD -DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_DISABLE_SPI_OSD -DXO_OSD
+bad|spi_blk_off_needs_a_block_tier|MISTER_DISABLE_SPI_BLK alone|-DMISTER_DISABLE_SPI_BLK
+bad|spi_blk_off_needs_a_block_tier|MISTER_DISABLE_SPI_BLK with the LW SECTOR block only (not counted)|-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=0 -DMISTER_DISABLE_SPI_BLK
+bad|spi_blk_off_needs_a_block_tier|MISTER_DISABLE_SPI_BLK with MISTER_OCRAM_SECTOR_SLOT and no MISTER_OCRAM (not counted)|-DMISTER_LW -DMISTER_OCRAM_SECTOR_SLOT=0 -DMISTER_DISABLE_SPI_BLK
+bad|spi_blk_off_needs_a_block_tier|MISTER_DISABLE_SPI_BLK with every slot named unused, no tier|-DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
+ok|-|MISTER_DISABLE_SPI_BLK with the OCRAM SECTOR tier on the one slot|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=0 -DMISTER_DISABLE_SPI_BLK
+bad|spi_blk_off_slot_without_a_tier|MISTER_DISABLE_SPI_BLK, VDNUM 4, slot 0 neither on a tier nor named unused|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=4 -DMISTER_DISABLE_SPI_BLK
+bad|spi_blk_off_slot_without_a_tier|MISTER_DISABLE_SPI_BLK, VDNUM 4, the mount slots missing, slot 0 named unused|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_VD=4 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
+bad|spi_blk_off_unused_slot_on_a_tier|MISTER_DISABLE_SPI_BLK, VDNUM 4, the SECTOR slot also named unused|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=4 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=3
+ok|-|MISTER_DISABLE_SPI_BLK, VDNUM 4: SECTOR slot 1, mount slots 2 and 3, slot 0 named unused|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=4 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
+ok|-|the same slots without MISTER_DISABLE_SPI_BLK|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=4
+ok|-|MISTER_DISABLE_SPI_BLK, VDNUM 2: SECTOR slot 1, slot 0 named unused, the mount slots above VDNUM|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_VD=2 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
 EOG
   echo "-- no tier macro" >> "$1"
   iverilog -g2012 -I sys -s lw_x_top -o "$O/lw_x.vvp" "$O/lw_x_top.sv" sys/hps_io.sv > "$O/lw_x.err" 2>&1
@@ -721,6 +837,15 @@ for g in $ARMS; do
     elif lint "$O/lw_lintV.log"; then V="arm V: PASSED: slang, 8 runs, no error"
     else grep -E 'error|warning' "$O/lw_lintV.log"; V="arm V: FAILED (slang errors, $O/lw_lintV.log)"; rc=1
     fi
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = Y ]; then
+    echo "== arm Y: the removals MISTER_DISABLE_SPI_OSD and MISTER_DISABLE_SPI_BLK"
+    rmy "$O/rmY.log"
+    grep -v "^pass " "$O/rmY.log" | grep -v '^== seed'
+    V=$(verdict Y "$O/rmY.log") || rc=1
     R="$R$V
 "
     continue

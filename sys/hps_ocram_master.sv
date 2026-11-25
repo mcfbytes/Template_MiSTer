@@ -261,6 +261,13 @@ localparam [31:0] C_CAPS_W      = 32'h0000_0008
 `ifdef MISTER_OCRAM_FIO
                                   | 32'h0000_0002
 `endif
+// the removals declared (bit 18 held for MISTER_DISABLE_SPI_EVT): 16 the link's block arms, 17 its OSD row writes
+`ifdef MISTER_DISABLE_SPI_BLK
+                                  | 32'h0001_0000
+`endif
+`ifdef MISTER_DISABLE_SPI_OSD
+                                  | 32'h0002_0000
+`endif
                                   ;
 localparam [31:0] C_RING2_OSD   = {5'd3, 5'd0, 4'd11, 4'd0, 14'h0800};    // OSD, no line, 2048 words, 0x2000
 localparam [31:0] C_RING3_EVT   = {5'd4, 5'd4, 4'd11, 4'd0, 14'h1000};    // EVT, line 4, 2048 words, 0x4000

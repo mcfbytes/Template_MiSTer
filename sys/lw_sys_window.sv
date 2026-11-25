@@ -446,6 +446,9 @@ function automatic [31:0] osd_kw(input [4:0] k);
 	case (k)
 		5'd0:    osd_kw = {OSD_ROWS, 16'd256};                 // {rows, bytes per row}
 		5'd1:    osd_kw = {16'd1 << OSD_AW, 16'd0};            // FIFO entries
+`ifdef MISTER_DISABLE_SPI_OSD
+		5'd2:    osd_kw = 32'd1;                               // bit 0: the link's row writes are not built (osd.v)
+`endif
 		default: osd_kw = 32'd0;
 	endcase
 endfunction

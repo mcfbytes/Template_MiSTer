@@ -12,6 +12,9 @@
 #   1d. hps_io.sv with MISTER_LW, MISTER_LW_PAD and MISTER_DISABLE_SPI_PAD gives the uio_block of the same build
 #      without it (1c ties that one to upstream's) less exactly the link's eight pad arms (0x02, 0x03, 0x10-0x13,
 #      0x1A, 0x3D), under each of those macro sets.
+#   1e. hps_io.sv with MISTER_LW, the OCRAM SECTOR and mount slots and MISTER_DISABLE_SPI_BLK gives the uio_block of
+#      the same build without it less exactly the link's block arms (0x16, 0x17, 0x18: the command word's and the
+#      data words'), under each of those macro sets.
 #   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
 #      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
 #      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without every one of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
@@ -204,6 +207,31 @@ for label, defs in sets:
           gone.count('begin') == gone.count('end'),
           'sys/hps_io.sv [SPI_PAD, %s]: uio_block is not the LW build\'s less the arms %s: removed %s, other edits %s'
           % (label, ' '.join(PADARMS), ' '.join(labels(['end'] + gone)), other))
+
+print('-- hps_io.sv with MISTER_DISABLE_SPI_BLK: the uio_block without it less exactly the link\'s block arms')
+BLKARMS = ["'h16", "'h16", "'h0X17", "'h0X17", "'h0X18", "'h0X18"]
+def blabels(t):
+    # labels() and the labels a ',' lists before another: 'h0X17, 'h0X18: shares one arm
+    return [t[i] for i in range(1, len(t) - 1) if re.match(r"'h[0-9a-fA-FX]+$", t[i]) and t[i + 1] in (':', ',') and
+            t[i - 1] in (';', 'end', 'begin', 'endcase', ',')]
+for label, defs in sets:
+    bld = ['MISTER_LW', 'MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=1', 'MISTER_OCRAM_MOUNT0_SLOT=2',
+           'MISTER_OCRAM_MOUNT1_SLOT=3']
+    mine, e1 = pp('sys/hps_io.sv', bld + ['MISTER_DISABLE_SPI_BLK', 'MISTER_DISABLE_SPI_BLK_UNUSED=1'] + defs)
+    base, e2 = pp('sys/hps_io.sv', bld + defs)
+    if not check(mine is not None and base is not None, 'sys/hps_io.sv [SPI_BLK, %s]: preprocessor error %s%s' %
+                 (label, e1, e2)):
+        continue
+    a_, b_ = uio_block(mine), uio_block(base)
+    if not check(a_ is not None and b_ is not None, 'sys/hps_io.sv [SPI_BLK, %s]: no uio_block' % label):
+        continue
+    ops = difflib.SequenceMatcher(None, b_, a_, autojunk=False).get_opcodes()
+    gone = sum((b_[i1:i2] for tg, i1, i2, _, _ in ops if tg == 'delete'), [])
+    other = [tg for tg, _, _, _, _ in ops if tg not in ('equal', 'delete')]
+    check(not other and sorted(blabels(['end'] + gone)) == sorted(BLKARMS) and
+          gone.count('begin') == gone.count('end'),
+          'sys/hps_io.sv [SPI_BLK, %s]: uio_block is not the build\'s less the arms %s: removed %s, other edits %s'
+          % (label, ' '.join(BLKARMS), ' '.join(blabels(['end'] + gone)), other))
 
 lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
 OCM = 'hps_ocram_master.sv'
