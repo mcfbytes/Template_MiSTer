@@ -447,9 +447,11 @@ K3, K6 and K7 read 0. The wire items (the kind, the K words, the REQUEST's `arg`
   that head, which discards every queued frame; only after that does the mux return to SPI and C_BIND bit 0 = 0 get
   stored. Every C_BIND store waits for a record in flight to finish, no REQUEST starts once a store is owed, and the
   store's BIND record (C_CAPS bit 10) is the next record posted.
-- **A fault** on ring 4 (a head more than the ring ahead, a length past the head: C_STATE bit 12) or on ring 3 (C_STATE
-  bit 11) drops the bind the same way, without the flush. A session that ends mid-record sets bit 20 at the next
-  hello.
+- **A fault** on ring 4 (a head more than the ring ahead, a length past the head: C_STATE bit 12) drops the bind the
+  same way, without the flush: the head it would flush to is not trusted. A fault on ring 3 (C_STATE bit 11) drops it
+  as a cleared H_SECTOR bit does, the flush included (a flush that reads a bad head sets bit 12 and stores no tail),
+  and its C_BIND store has no BIND record: the EVT ring posts nothing more. Neither bind is taken again before a
+  hello. A session that ends mid-record sets bit 20 at the next hello.
 - **The feeder** (`clk_sys`) re-creates `hps_io`'s strobes as the SECTOR block's primary feeder does, cycle for cycle
   from the ack's rise (the trace-compare bench, arm C of `tb/run.sh`): with `io_wide` two 16-bit strobes a word, else
   four bytes, GAP apart, the first GAP after the ack. Each word is held in the crossing's capture register until its
@@ -486,8 +488,8 @@ PROVISIONAL.
   one block (1,020 words at most).
 - **The record writer** posts every record one at a time: a REQUEST or WRITE starts only while its slot's C_BIND
   bit is stored 1 and no C_BIND store or BIND is owed; a C_BIND store waits for a record in flight.
-- **A fault** on ring 0 (C_STATE bit 8) drops both mount binds; a session that ends mid-record sets bit 16 at the
-  next hello.
+- **A fault** on ring 0 (C_STATE bit 8) or on ring 3 (bit 11) drops both mount binds; a WRITE the ring-3 fault cuts
+  is never published. A session that ends mid-record sets bit 16 at the next hello.
 
 ### The download tier as built
 
