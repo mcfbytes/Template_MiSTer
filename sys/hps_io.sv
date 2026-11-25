@@ -377,7 +377,7 @@ ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
 `endif
 `ifdef LW_OCRAM_MNT_HPS
 generate
-	if (OCRAM_BLKSZ != BLKSZ) begin : ocram_blksz
+	if (OCRAM_BLKSZ_DECL != BLKSZ) begin : ocram_blksz
 		ocram_blksz_differs_from_hps_io guard();
 	end
 endgenerate

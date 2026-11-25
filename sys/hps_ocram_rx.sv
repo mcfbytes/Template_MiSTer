@@ -343,7 +343,8 @@ else begin : nosec
 end
 endgenerate
 
-// the download player
+// the download player, with MISTER_OCRAM_FIO (its sequencer is lw_lane.sv's lw_link_seq, built with that macro)
+`ifdef MISTER_OCRAM_FIO
 generate
 if (FIO_EN != 0) begin : fio
 	hps_ocram_fplay #(.GAP(FIO_GAP[2:0])) player
@@ -360,6 +361,10 @@ else begin : nofio
 	assign l_own = 1'b0, l_hold = 1'b0, l_sel = 4'd0, l_strobe = 1'b0, l_din = 16'd0;
 end
 endgenerate
+`else
+assign p_go = 1'b0, p_rest = 1'b1, p_dat = 32'd0;
+assign l_own = 1'b0, l_hold = 1'b0, l_sel = 4'd0, l_strobe = 1'b0, l_din = 16'd0;
+`endif
 
 // the block slots' request records
 ocram_blk_req #(.SEC_EN(SEC_EN), .MNT_EN(MNT_EN), .MFRAME(MFRAME), .BLKSZ(BLKSZ)) breq
@@ -627,6 +632,18 @@ end
 endmodule
 /* verilator lint_on DECLFILENAME */
 
+// LW_OCRAM_FPLAY_BUILT: lw_link_seq is built, by MISTER_OCRAM_FIO or by the LW lane (the trace bench's pairing)
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_FPLAY_BUILT
+`endif
+`ifdef MISTER_LW
+`ifdef MISTER_LW_LANE
+`ifndef LW_OCRAM_FPLAY_BUILT
+`define LW_OCRAM_FPLAY_BUILT
+`endif
+`endif
+`endif
+`ifdef LW_OCRAM_FPLAY_BUILT
 //============================================================================
 //  hps_ocram_fplay -- the download player of hps_ocram_rx, on clk_sys (MISTER_OCRAM_FIO)
 //
@@ -736,6 +753,8 @@ end
 
 endmodule
 /* verilator lint_on DECLFILENAME */
+`undef LW_OCRAM_FPLAY_BUILT
+`endif
 
 `default_nettype wire
 `endif

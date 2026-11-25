@@ -50,7 +50,7 @@
 #      MISTER_DISABLE_SPI_BLK_UNUSED, or with a tier slot named in it (spi_blk_off_needs_a_block_tier,
 #      spi_blk_off_slot_without_a_tier, spi_blk_off_unused_slot_on_a_tier), or with a tier slot at or above VDNUM
 #      (spi_blk_off_tier_slot_outside_vdnum); and the OCRAM mount slots with MISTER_OCRAM_BLKSZ (default 2) not
-#      hps_io's BLKSZ (ocram_blksz_differs_from_hps_io), each with its legal neighbours; and the
+#      hps_io's BLKSZ, 10 among them (ocram_blksz_differs_from_hps_io), each with its legal neighbours; and the
 #      key tier's: MISTER_LW_KBM without MISTER_LW_PAD (lw_kbm_needs_MISTER_LW_PAD) or on a core with PS2DIV
 #      (lw_kbm_on_a_PS2DIV_core), MISTER_DISABLE_SPI_KBM without MISTER_LW_KBM (spi_kbm_off_needs_MISTER_LW_KBM);
 #      and tier 3's: MISTER_OCRAM_EVT without MISTER_LW, beside MISTER_LW_EVT or without the floor
@@ -305,7 +305,8 @@ sfeedc() {
 }
 
 # fioc LOG: arm D, the download trace compare: each shape compiled once, run under every seed, plain and with the
-# models. hps_io is compiled with MISTER_LW for lw_lane and MISTER_OCRAM_OSD for hps_ocram_rx.sv's player.
+# models. hps_io is compiled with MISTER_LW for lw_lane and MISTER_OCRAM_OSD for hps_ocram_rx.sv, whose player
+# builds beside the LW lane's lw_link_seq (MISTER_OCRAM_FIO would stop hps_io: link_on_two_players).
 fioc() {
   : > "$1"
   FID="-DMISTER_LW -DMISTER_LW_LANE -DMISTER_OCRAM -DMISTER_OCRAM_OSD"
@@ -956,6 +957,8 @@ bad|spi_blk_off_tier_slot_outside_vdnum|MISTER_DISABLE_SPI_BLK, VDNUM 1: the SEC
 bad|ocram_blksz_differs_from_hps_io|the mount slots with MISTER_OCRAM_BLKSZ 3 and hps_io's BLKSZ 2|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DMISTER_OCRAM_BLKSZ=3
 bad|ocram_blksz_differs_from_hps_io|one mount slot with MISTER_OCRAM_BLKSZ left at 2 and hps_io's BLKSZ 3|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DXO_BLKSZ=3
 ok|-|the mount slots with MISTER_OCRAM_BLKSZ 3 and hps_io's BLKSZ 3|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DMISTER_OCRAM_BLKSZ=3 -DXO_BLKSZ=3
+bad|ocram_blksz_differs_from_hps_io|the mount slots with MISTER_OCRAM_BLKSZ 10 (2 in its low three bits) and hps_io's BLKSZ 2|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DMISTER_OCRAM_BLKSZ=10
+ok|-|the mount slots with MISTER_OCRAM_BLKSZ 2 named and hps_io's BLKSZ 2|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DMISTER_OCRAM_BLKSZ=2
 ok|-|the mount slots with MISTER_DISABLE_SPI_BLK at BLKSZ 3, VDNUM 4, slot 0 named unused|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3 -DMISTER_OCRAM_BLKSZ=3 -DXO_BLKSZ=3 -DXO_VD=4 -DMISTER_DISABLE_SPI_BLK -DMISTER_DISABLE_SPI_BLK_UNUSED=1
 ok|-|MISTER_OCRAM_BLKSZ 3 and hps_io's BLKSZ 2 with the SECTOR tier alone (no mount slot)|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_BLKSZ=3
 ok|-|the mount macros and MISTER_OCRAM_BLKSZ 3 without MISTER_OCRAM, hps_io's BLKSZ 2|-DMISTER_LW -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_BLKSZ=3

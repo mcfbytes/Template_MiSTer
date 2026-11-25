@@ -85,8 +85,10 @@ localparam [31:0] OCRAM_SEC_GAP   = 32'd2;
 `endif
 `ifdef MISTER_OCRAM_BLKSZ
 localparam  [2:0] OCRAM_BLKSZ     = `MISTER_OCRAM_BLKSZ;
+localparam integer OCRAM_BLKSZ_DECL = `MISTER_OCRAM_BLKSZ;    // unsized for hps_io's check: [2:0] reads 10 as 2
 `else
 localparam  [2:0] OCRAM_BLKSZ     = 3'd2;
+localparam integer OCRAM_BLKSZ_DECL = 2;
 `endif
 
 // The mount slots' declaration: each slot's hps_io slot and the frame in 32-bit words (1-1,020);
