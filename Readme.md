@@ -76,6 +76,10 @@ An LW or OCRAM tier macro without its floor stops the build, naming a guard modu
 `lw_blksz_differs_from_hps_io`, ...). Geometry, defaults and every guard: the macro tables in docs/LW_BRIDGE.md and
 docs/OCRAM_MAILBOX.md.
 
+Debug and test macros, carried only by this branch (`lw-ocram-framework-debug`): MISTER_LW_DIAG, MISTER_OCRAM_DIAG
+(with its MISTER_OCRAM_MARK period) and the bench hooks LW_TB_CDC and LW_TB_PROBES. The review branch
+`lw-ocram-framework` is generated from this one with all of them stripped; with every macro off, both build as upstream.
+
 
 #### Optional scaler features
 Some macros remove a scaler feature to save FPGA resources. Each one sets a bit in the reply to the `UIO_SET_VIDEO` (0x20) command, so the HPS binary can tell the feature is missing. A clear bit means the feature is present.
