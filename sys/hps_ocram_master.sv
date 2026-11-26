@@ -37,8 +37,8 @@
 //    never in a latch-set or latch-clear cycle. The records, in their own fixed order: BIND, the disc slot's REQUEST,
 //    a mount slot's REQUEST or WRITE, REPLY, the events tier's, MARK, VERDICT.
 //  * The run latch (docs/OCRAM_MAILBOX.md, "The master"): it sets on a rising edge of GPO bit 28 (RUN) seen while
-//    GPO bit 31 is 1 and no HPS reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
-//    and hps_rst_n enters through an lw_arst cell, never raw.
+//    GPO bit 31 is 1 and no HPS reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's
+//    return never sets it. Every GPO bit and hps_rst_n enters through an lw_arst cell, never raw.
 //  * On a stop: the transaction in flight completes, a record being written is abandoned (its head is not
 //    stored), then one terminal store C_HELLO = 0x51540000. An HPS reset ends a run with no terminal store.
 //  * An HPS reset makes the master start nothing; a transaction in flight keeps its valids and readies as AXI
