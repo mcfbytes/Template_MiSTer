@@ -199,8 +199,6 @@ reg  [63:0] rq_xlba = 0;
 (* preserve *) reg       en_lwx   = 0;   // CTRL[0]
 `ifdef MISTER_LW_DIAG
 (* preserve *) reg       test_lwx = 0;   // CTRL[9]
-`else
-wire                     test_lwx = 1'b0;
 `endif
 (* preserve *) reg [1:0] xen_lwx  = 0;   // CTRL[2:1]
 reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the offered request entered the FIFO
@@ -427,7 +425,11 @@ always @(*) begin
 	if (rreg) case (raddr[8:2])
 		7'h00: rdata = {29'd0, cause};                     // CAUSE: one event bit per slot
 		7'h01: rdata = {any, 13'd0, pick, pst};            // REQ
+`ifdef MISTER_LW_DIAG
 		7'h02: rdata = {21'd0, 1'b0, test_lwx, 1'b0, 5'd0, xen_lwx, en_lwx};   // CTRL
+`else
+		7'h02: rdata = {21'd0, 3'd0, 5'd0, xen_lwx, en_lwx};   // CTRL
+`endif
 `ifdef MISTER_LW_DIAG
 		7'h03: rdata = {frames, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
 		                st_s[2:0]};                        // STATUS
@@ -458,12 +460,18 @@ end
 
 /////////////////////////////// clk_sys: feeder ///////////////////////////
 
+`ifdef MISTER_LW_DIAG
 wire [3:0] cs1;
 lw_sync #(.W(4)) ctl_sync (.clk(clk_sys), .d({xen_lwx, test_lwx, en_lwx}), .q(cs1));
-lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(sector_w_lwgray), .q(wg_s));
-
 wire       en_s = cs1[0], test_s = cs1[1];
 wire [1:0] xen_s = cs1[3:2];
+`else
+wire [2:0] cs1;
+lw_sync #(.W(3)) ctl_sync (.clk(clk_sys), .d({xen_lwx, en_lwx}), .q(cs1));
+wire       en_s = cs1[0], test_s = 1'b0;
+wire [1:0] xen_s = cs1[2:1];
+`endif
+lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(sector_w_lwgray), .q(wg_s));
 
 wire       rempty = (sector_r_lwgray == wg_s);
 wire       fidle  = (fs == F_IDLE);
@@ -540,7 +548,7 @@ lw_xfer #(.W(42)) rec_x(.s_clk(clk_sys), .s_go(rc_go), .s_d(rec), .s_busy(rc_bus
 // rest, for the enable link: the level low, every EN and every mux on SPI, the feeder idle with its acks low and an
 // empty pipeline, the FIFO empty and its Gray source current, no record or done word in flight or owed
 wire       dn_idle;
-assign rest = !hen_s && cs1 == 4'd0 && !en_sys && x_en_sys == 2'd0 && fidle && !qv && !em &&
+assign rest = !hen_s && ~|cs1 && !en_sys && x_en_sys == 2'd0 && fidle && !qv && !em &&
               fack == 3'd0 && !o_wr && rempty && sector_r_lwgray == (rptr ^ (rptr >> 1)) && dn_idle &&
               offd == 3'd0 && dirty == 3'd0 && !rc_busy;
 
