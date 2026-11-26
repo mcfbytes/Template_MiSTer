@@ -328,17 +328,18 @@ wire  [1:0] pr_id  = pick[1:0];
 wire        flush  = SEC_EN != 0 && fl_pend;
 wire        mw_take = wst == W_IDLE && !flush && pick[2] && pr_id == RG_MNT && m_wjob;   // the WRITE begins
 
-// idle, the tail is the next record's ring's: a request raised then registers that ring's sum
+// idle, the tail is the next record's ring's (tl_p): a request raised then registers that ring's sum; tl_q holds
+// it from the cycle the walk leaves idle (ring <= ring_p), so out of idle it is the walked ring's tail
 wire  [1:0] ring_p = flush ? RG_SEC : pr_id;
-wire  [1:0] tring  = (wst == W_IDLE) ? ring_p : ring;
-wire [15:0] tl     = tail[{tring, 4'd0} +: 16];
-wire [15:0] widx   = tl + {2'd0, k};
+wire [15:0] tl_p   = tail[{ring_p, 4'd0} +: 16];
+reg  [15:0] tl_q   = 16'd0;
+wire [15:0] widx_i = tl_p + {2'd0, k};      // the idle head read's
+wire [15:0] widx   = tl_q + {2'd0, k};      // every request of the walk
 wire [15:0] osd_off = OSD_BASE + ((widx & (OSD_WORDS - 1)) << 2);
 wire [15:0] sec_off = SEC_BASE + ((widx & (SEC_WORDS - 1)) << 2);
 wire [15:0] fio_off = FIO_BASE + ((widx & (FIO_WORDS - 1)) << 2);
 wire [15:0] mnt_off = MNT_BASE + ((widx & (MNT_WORDS - 1)) << 2);
 wire [63:0] R_TAB   = {mnt_off, fio_off, sec_off, osd_off};    // each ring's word at tail + k
-reg  [15:0] tl_q = 16'd0;                  // tl, a cycle on: the walked ring's tail in W_HEAD and W_FLUSH
 wire [15:0] new_gap = c_rdata[15:0] - tl_q;
 
 assign c_req    = req;
@@ -413,7 +414,7 @@ ocram_mnt_wr mwr_u
 
 always @(posedge clk) begin
 	flt <= 4'b0000;
-	tl_q <= tl;
+	if (wst == W_IDLE) tl_q <= tl_p;
 	if (c_grant) req <= 1'b0;
 
 	// the disc slot's unbind owes a flush of ring 1, unless the ring has stopped
@@ -475,13 +476,13 @@ always @(posedge clk) begin
 `endif
 		mid <= 4'b0000;
 		if (flush) begin
-			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; req_wd <= widx; wst <= W_FLUSH;
+			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; req_wd <= widx_i; wst <= W_FLUSH;
 		end
 		else if (pick[2]) begin
 			ring <= pr_id; turn <= pr_id;
 			if (mw_take) begin mfk <= wj[0] ? 2'd1 : 2'd2; wst <= W_MNT; end   // the WRITE's head crosses
 			else if (avail[{pr_id, 4'd0} +: 16] == 16'd0) begin
-				req <= 1'b1; req_we <= 1'b0; req_off <= H_TAB[{pr_id, 4'd0} +: 16]; req_wd <= widx; due[pr_id] <= 1'b0;
+				req <= 1'b1; req_we <= 1'b0; req_off <= H_TAB[{pr_id, 4'd0} +: 16]; req_wd <= widx_i; due[pr_id] <= 1'b0;
 				wst <= W_HEAD;
 			end
 			else begin k <= 14'd0; rd_pend <= 1'b1; mid[pr_id] <= 1'b1; wst <= W_HDR; end
