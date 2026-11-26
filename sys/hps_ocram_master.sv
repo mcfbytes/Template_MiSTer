@@ -21,8 +21,7 @@
 // The floor of the OCRAM mailbox: the AXI3 master on the fpga2hps bridge (ocram_axi.sv, the bus; ocram_arb.sv, its
 // request ports), its run latch, the poller, the hello, the EVT ring's records (ocram_evt_wr.sv) and interrupt line,
 // its consumer port, and (with MISTER_OCRAM_DIAG) the diagnostic
-// counters and the host-to-fabric torture sink. The design note is the law, spec/ocram-mailbox-design.md (the
-// Template's reader-facing copy is docs/OCRAM_MAILBOX.md); this file is layout 1 only.
+// counters and the host-to-fabric torture sink. The contract is docs/OCRAM_MAILBOX.md; this file is layout 1 only.
 //
 //  * It runs on clk_100m and no fabric reset holds it. It never abandons a transaction it started: a core reset,
 //    a stopped clk_sys or a host that has gone cannot leave one in flight.
@@ -37,8 +36,8 @@
 //    round robin between the two ports (the last granted goes last). A consumer is granted only in P_SESSION and
 //    never in a latch-set or latch-clear cycle. The records, in their own fixed order: BIND, the disc slot's REQUEST,
 //    a mount slot's REQUEST or WRITE, REPLY, the events tier's, MARK, VERDICT.
-//  * The run latch (§2.6): it sets on a rising edge of GPO bit 28 (RUN) seen while GPO bit 31 is 1 and no HPS
-//    reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
+//  * The run latch (docs/OCRAM_MAILBOX.md, "The master"): it sets on a rising edge of GPO bit 28 (RUN) seen while
+//    GPO bit 31 is 1 and no HPS reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
 //    and hps_rst_n enters through an lw_arst cell, never raw.
 //  * On a stop: the transaction in flight completes, a record being written is abandoned (its head is not
 //    stored), then one terminal store C_HELLO = 0x51540000. An HPS reset ends a run with no terminal store.

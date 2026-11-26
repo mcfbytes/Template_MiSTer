@@ -1,4 +1,4 @@
-# LW bridge clock crossings (docs/LW_BRIDGE.md, "Clock-domain contracts"). Inert without MISTER_LW.
+# LW bridge clock crossings (docs/LW_BRIDGE.md, "Clock-domain contracts"). Inert without MISTER_LW and MISTER_OCRAM.
 set lw_s0 [get_keepers -nowarn {*|lws0_*}]
 if {[get_collection_size $lw_s0] > 0} {
 	set lw_x   [get_keepers -nowarn {*_lwx* *_lwgray* *|lwtg_* *|lwa1_*}]

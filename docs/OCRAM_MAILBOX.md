@@ -57,11 +57,11 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | macro (proposed) | builds | needs | cost (ESTIMATED, by analogy with the fitted LW blocks less their FIFOs) |
 |---|---|---|---|
 | `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, the core-to-host ring's writer and its interrupt line, one GPI bit | - | 180-260 ALMs, no block memory |
-| `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor | 60-80 ALMs |
-| `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor and `MISTER_LW` (it drives the LW sector bits of `HPS_BUS`); not `MISTER_OCRAM_DIAG`, not `MISTER_LW_SECTOR_SLOT` | about 130 ALMs beside the OSD tier, about 250 alone |
-| `MISTER_OCRAM_FIO` (PROVISIONAL), `MISTER_OCRAM_FIO_GAP` (4-7, default 4), `MISTER_OCRAM_FIO_RING` (log2 words, 2-10 or 13, default 10) | file downloads: link frames from ring 1 into `hps_io`'s download block through `lw_link`, and ring 1's mark line | the floor; not `MISTER_LW_LANE` (`link_on_two_players`) | 110-150 ALMs (ESTIMATED) |
+| `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor (`ocram_tier_needs_MISTER_OCRAM`) | 60-80 ALMs |
+| `MISTER_OCRAM_SECTOR_SLOT` and its geometry | block read frames for one `hps_io` slot whose blocks the core can ask for again (a disc); its requests as records | the floor (`ocram_tier_needs_MISTER_OCRAM`) and `MISTER_LW` (it drives the LW sector bits of `HPS_BUS`); not `MISTER_OCRAM_DIAG`, not `MISTER_LW_SECTOR_SLOT` | about 130 ALMs beside the OSD tier, about 250 alone |
+| `MISTER_OCRAM_FIO` (PROVISIONAL), `MISTER_OCRAM_FIO_GAP` (4-7, default 4), `MISTER_OCRAM_FIO_RING` (log2 words, 2-10 or 13, default 10) | file downloads: link frames from ring 1 into `hps_io`'s download block through `lw_link`, and ring 1's mark line | the floor (`ocram_tier_needs_MISTER_OCRAM`); not `MISTER_LW_LANE` (`link_on_two_players`) | 110-150 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_UIO` (PROVISIONAL) | write-only link frames on the UIO select (0) and both OSD selects (2 HDMI, 3 VGA) from ring 1, played by the download tier's player into `hps_io`'s, `sys_top`'s and each `osd`'s own decoders; declared by C_K[9]'s select mask, no C_CAPS bit | `MISTER_OCRAM_FIO` (`ocram_uio_needs_MISTER_OCRAM_FIO`) | about 10 ALMs (ESTIMATED) |
-| `MISTER_OCRAM_MOUNT0_SLOT`, `MISTER_OCRAM_MOUNT1_SLOT`, `MISTER_OCRAM_MOUNT_FRAME` (one block, `32 << BLKSZ` words, to 1,020; default 128) (PROVISIONAL) | two mount slots (block slot index 1, 2) through `lw_save_mux`: reads from ring 0, writes as WRITE records; one block a request, `sd_blk_cnt` 0 (checked in simulation, PROVISIONAL) | `MISTER_OCRAM_SECTOR_SLOT` (`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), so `MISTER_LW`; not `MISTER_LW_SECTOR_SLOT`; `MISTER_OCRAM_BLKSZ` (default 2) equal to `hps_io`'s `BLKSZ` (`ocram_blksz_differs_from_hps_io`, PROVISIONAL) | 195-205 ALMs (ESTIMATED) |
+| `MISTER_OCRAM_MOUNT0_SLOT`, `MISTER_OCRAM_MOUNT1_SLOT`, `MISTER_OCRAM_MOUNT_FRAME` (one block, `32 << BLKSZ` words, to 1,020; default 128) (PROVISIONAL) | two mount slots (block slot index 1, 2) through `lw_save_mux`: reads from ring 0, writes as WRITE records; one block a request, `sd_blk_cnt` 0 (checked in simulation, PROVISIONAL) | `MISTER_OCRAM_SECTOR_SLOT` (`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), so `MISTER_LW`; not `MISTER_LW_SECTOR_SLOT`; `MISTER_OCRAM_BLKSZ` (default 2) equal to `hps_io`'s `BLKSZ` (`ocram_blksz_differs_from_hps_io`, PROVISIONAL); the mount slots also take the floor (`ocram_tier_needs_MISTER_OCRAM`) | 195-205 ALMs (ESTIMATED) |
 | `MISTER_DISABLE_SPI_OSD` (PROVISIONAL, test-only) | removes `osd.v`'s SPI row writes (`0x20`); declared by C_CAPS bit 17 | `MISTER_OCRAM_OSD` or `MISTER_LW_OSD` (`spi_osd_off_needs_an_osd_tier`) | -36 ALMs (ESTIMATED) |
 | `MISTER_DISABLE_SPI_BLK` (PROVISIONAL, test-only), `MISTER_DISABLE_SPI_BLK_UNUSED` (a slot mask, default 0) | removes `hps_io`'s block arms (`0x16`-`0x18`) and ties the commit mark to 0; declared by C_CAPS bit 16 | every slot below VDNUM on the SECTOR or a mount slot, or in the mask, never both (`spi_blk_off_needs_a_block_tier`, `spi_blk_off_slot_without_a_tier`, `spi_blk_off_unused_slot_on_a_tier`), and no tier slot at or above VDNUM (`spi_blk_off_tier_slot_outside_vdnum`); the LW SECTOR family is not counted | -60 ALMs (ESTIMATED) |
 | `MISTER_OCRAM_EVT` (PROVISIONAL) | `hps_io`'s core->host flags as STATUS, INFO, UPLOAD and RUMBLE records on the EVT ring, bound by H_BIND bit 8; declared by C_CAPS bit 11 | the floor (`ocram_evt_needs_MISTER_OCRAM`), `MISTER_LW` (`ocram_evt_needs_MISTER_LW`), never `MISTER_LW_EVT` (`evt_on_two_tiers`) | 90-110 ALMs (ESTIMATED) |
@@ -71,7 +71,7 @@ The two floors share the crossing cells of `sys/lw_cdc.sv` and the HPS reset tha
 | `MISTER_OCRAM_CONFSTR` | the configuration string as one record after the hello | `MISTER_OCRAM_EVT` | 30-50 ALMs |
 | `MISTER_OCRAM_BELL` | an LW register whose store starts a poll at once (only if the poll proves too slow) | both floors | 10-20 ALMs |
 | `MISTER_OCRAM_POLL` | the idle poll period, as a power of two of `clk_100m` cycles (default 12: 41 us) | the floor | - |
-| `MISTER_OCRAM_DIAG` | test-core diagnostics: MARK records with the latency counters (below), and the GPO 27/26 knobs | the floor | test cores only |
+| `MISTER_OCRAM_DIAG` | test-core diagnostics: MARK records with the latency counters (below), and the GPO 27/26 knobs | the floor (`ocram_tier_needs_MISTER_OCRAM`) | test cores only |
 
 **The set menu.** Move bulk to the mailbox and pads to the LW window; leave status and events on the link unless a
 measurement says otherwise, because each of them costs more fabric off the link than on it. Every cost is
@@ -149,7 +149,9 @@ drives it.
 
 Consumers run on `clk_sys`. Each fetches one word at a time through one held-data handshake built from the cells of
 `sys/lw_cdc.sv`, so no crossing carries a clock ratio and none reaches a video clock. That is why no FIFO is needed:
-the RAM is the queue, and the consumer's own pace sets the fetch rate.
+the RAM is the queue, and the consumer's own pace sets the fetch rate. The held-data crossing (`lw_xfer`,
+`sys/lw_cdc.sv`) captures two destination cycles after its toggle launches, so `clk_sys` must be below about 220 MHz: two
+`clk_sys` periods must exceed the constraints' 8 ns net delay plus setup (as docs/LW_BRIDGE.md, "Clock-domain contracts").
 
 ### The layers
 
@@ -567,7 +569,7 @@ transaction unfinished, which is the danger the gate exists for.
 
 ## Measured performance
 
-Measured on a DE10-Nano, 2026-11-22..24 (milestones M0-M7). The full records live in the greenfield rewrite's
+Measured on a DE10-Nano, 2026-11-22..24. The full records live in the greenfield rewrite's
 `harness/rig/ocram-m*-measured.md`.
 
 There are four different rates here, and they are easy to mix up. Every consumer rate is per consumer; consumers

@@ -12,8 +12,9 @@ to look. An optional frame lane carries whole link transactions, and their repli
 - **The SPI link is untouched.** `hps_io` keeps every SPI decode, so a host that knows nothing about the window (the
   stock MiSTer Main) drives an LW-enabled bitstream exactly as before. The window is a second carrier, not a
   replacement.
-- **Opt-in, in tiers.** Without `MISTER_LW` the framework is not built: `HPS_BUS` stays 46 bits, `CONF_STR` is the
-  stock string byte for byte, and `sys/` preprocesses to upstream's text. With it, a core builds the floor and
+- **Opt-in, in tiers.** With neither `MISTER_LW` nor `MISTER_OCRAM` (nor a `MISTER_DISABLE_SPI_*` removal) the
+  framework is not built: `HPS_BUS` stays 46 bits, `CONF_STR` is the
+  stock string byte for byte, and `sys/` preprocesses to upstream's text. With `MISTER_LW`, a core builds the floor and
   only the tiers its `.qsf` names. This repository's `Template.qsf` carries the defines commented out, so the
   Template builds stock until they are uncommented.
 
@@ -67,7 +68,7 @@ beyond it then show no presence bit, and their blocks are not listed in the dire
 
 **Reserved names.** In an LW build the module names `lw_*` and `hps_lw_*` and the macro names `MISTER_LW*` and
 `LW_*` belong to the framework; a core uses none of them for its own. Without `MISTER_LW` every LW file
-preprocesses to nothing and leaves no macro defined.
+preprocesses to nothing and leaves no macro defined; `MISTER_OCRAM` alone still changes `sys_top` and `sysmem`.
 
 ### Macros
 
@@ -83,7 +84,7 @@ preprocesses to nothing and leaves no macro defined.
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds, 0-15; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-4096 (128 = one 512-byte block) |
 | `MISTER_LW_SECTOR_GAP` | 2 | `clk_sys` cycles between write strobes, and from the ack to the first, 2-15 |
-| `MISTER_LW_BLKSZ` | 2 | the core's `hps_io` `BLKSZ`, reported in the GET_SDSTAT words |
+| `MISTER_LW_BLKSZ` | 2 | the core's `hps_io` `BLKSZ`, reported in the GET_SDSTAT words; a value other than `hps_io`'s stops the build at `lw_blksz_differs_from_hps_io` |
 | `MISTER_LW_SAVE0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0 (slot index 1): `hps_io` slot (0-15), DDR image base, image bytes |
 | `MISTER_LW_SAVE0_FRAME` | 256 | its 32-bit words per frame, 1-510 (the FIFO's entries - 2; 256 = one 1 KB block) |
 | `MISTER_LW_SAVE0_LBA_BITS` | 32 | its LBA bits kept, crossed and compared, 1-32 |
@@ -788,7 +789,9 @@ lw_blk_mux blk_lw
   host reads it for writes under the rules above. Its frame must fit the FIFO (at most 510 words). Every declared
   slot sits on an `hps_io` slot of its own, 0-15.
 - **Frames are block-sized:** `frame_words` x 4 bytes is what the reader expects per request. 588 words (2,352 bytes)
-  serves a raw CD sector.
+  serves a raw CD sector. A frame that is not a whole `hps_io` block (`BLKSZ`) is served at `frame_words` x 4 bytes,
+  while SPI moves `(sd_blk_cnt+1) << (BLKSZ+7)` bytes (`sys/hps_io.sv`): such a slot's `sd_blk_cnt` requests stay on
+  SPI, and the core must not count the SPI length.
 - **The host decides.** It serves a slot only when it knows what a frame on that slot means. A core gains nothing
   from the block until the host knows it.
 
@@ -874,11 +877,15 @@ and have no presence bit.
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
 | `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT` or `MISTER_OCRAM_SECTOR_SLOT`); presence, constant 1: the mark |
+| `[382]` | to core | the OCRAM events tier's take (`sys_top` drives it, `hps_io` reads it, with `MISTER_OCRAM_EVT`); nothing else drives it |
+| `[383]` | - | reserved: nothing drives it; every reader ignores it |
+
+A core must not drive constants on `[383:382]`.
 
 The primary's bits (`[95]`-`[127:114]` to the core, `[166:132]`, `[377]` and `[380]`-`[381]` from it) are also fed and
 read by the OCRAM mailbox's SECTOR feeder (`MISTER_OCRAM_SECTOR_SLOT`, `docs/OCRAM_MAILBOX.md`) with the same meaning;
 the window stays the one driver of every to-core bit, and lists no SECTOR entry in that build.
-| `[383:382]` | - | reserved: nothing drives them; every reader ignores them |
+
 
 ## What a host must not assume
 

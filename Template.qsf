@@ -124,6 +124,23 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM=1"
 # OSD rows from the OSD ring into every osd's osd_buffer (needs MISTER_OCRAM).
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_OSD=1"
+# OCRAM SECTOR tier for one hps_io slot (needs MISTER_OCRAM and MISTER_LW; not MISTER_OCRAM_DIAG, not
+# MISTER_LW_SECTOR_SLOT): its frame in words, clk_sys cycles between strobes and BLKSZ, which must equal hps_io's.
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_SLOT=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_FRAME=128"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_GAP=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_BLKSZ=2"
+# OCRAM mount slots 0 and 1 (need MISTER_OCRAM_SECTOR_SLOT, so MISTER_LW); the frame is one hps_io block or more.
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT0_SLOT=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT1_SLOT=3"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT_FRAME=128"
+# OCRAM file downloads into hps_io's download block (needs MISTER_OCRAM; not MISTER_LW_LANE), and link frames on
+# the UIO and OSD selects (needs MISTER_OCRAM_FIO).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_FIO=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_UIO=1"
+# OCRAM events tier (needs MISTER_OCRAM and MISTER_LW, not MISTER_LW_EVT) and capture lane (needs MISTER_OCRAM_FIO).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_EVT=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_LANE=1"
 # Test-core diagnostics: MARK records, the latency counters, the GPO 27/26 knobs and the host-to-fabric torture
 # sink (test cores only).
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_DIAG=1"
