@@ -340,7 +340,8 @@ fioc() {
 }
 
 # ocram LOG: arm O. The bench compiles once per shape (with DIAG; the OSD shape, the OSD + SECTOR shape, the download
-# shape and the OSD + SECTOR + mount slots shape, each at two clk_sys rates), each plain and
+# shape and the OSD + SECTOR + mount slots shape, each at two clk_sys rates; the mount shape once more with MISTER_LW,
+# its cores behind lw_save_mux, for M6's stale ack), each plain and
 # with the crossing cells' delay models, runs under every seed of LW_TB_SEEDS, then verilator lints
 # hps_ocram_master.sv and hps_ocram_rx.sv with lw_cdc.sv (each OCRAM macro set), warnings as errors.
 ocram() {
@@ -353,13 +354,14 @@ ocram() {
   OCM="$OCS -DMISTER_OCRAM_MOUNT0_SLOT=3 -DMISTER_OCRAM_MOUNT1_SLOT=4 -DMISTER_OCRAM_MOUNT_FRAME=512"
   # shape:macros; diag at the bench's 50 MHz, the others at 33.8688 MHz and the Template's 20 MHz
   for m in plain cdc; do
-    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20 mntlw33; do
       case $c in diag) D=$OCD;; osd33) D="$OCE -DOCRAM_TB_SYS_HP_PS=14762";; osd20) D="$OCE -DOCRAM_TB_SYS_HP_PS=25000";;
         sec33) D="$OCS -DOCRAM_TB_SYS_HP_PS=14762";; sec20) D="$OCS -DOCRAM_TB_SYS_HP_PS=25000";;
         fio33) D="$OCF -DOCRAM_TB_SYS_HP_PS=14762";; fio20) D="$OCF -DOCRAM_TB_SYS_HP_PS=25000";;
-        mnt33) D="$OCM -DOCRAM_TB_SYS_HP_PS=14762";; mnt20) D="$OCM -DOCRAM_TB_SYS_HP_PS=25000";; esac
+        mnt33) D="$OCM -DOCRAM_TB_SYS_HP_PS=14762";; mnt20) D="$OCM -DOCRAM_TB_SYS_HP_PS=25000";;
+        mntlw33) D="$OCM -DMISTER_LW -DOCRAM_TB_SYS_HP_PS=14762";; esac
       d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
-      F=$OCB; case $c in fio*) F="$OCB sys/lw_lane.sv sys/hps_io.sv";; esac
+      F=$OCB; case $c in fio*) F="$OCB sys/lw_lane.sv sys/hps_io.sv";; mntlw*) F="$OCB sys/lw_blk_mux.sv";; esac
       echo "-- the bench compiles ($c, $m)" >> "$1"
       if iverilog -g2012 $D $d -I sys -s ocram_tb -o "$O/ocramO_${c}_$m.vvp" $F > "$O/ocramO_${c}_$m.err" 2>&1; then
         echo "pass bench: compiles ($c, $m)" >> "$1"; n=$((n + 1))
@@ -370,7 +372,7 @@ ocram() {
     done
   done
   for m in plain cdc; do
-    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20 mntlw33; do
       [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
       for s in ${LW_TB_SEEDS:-1 2 3}; do
         vvp -n "$O/ocramO_${c}_$m.vvp" +lw_seed=$s > "$O/ocramO_${c}_$m.$s.log" 2>&1 &
@@ -379,7 +381,7 @@ ocram() {
     done
   done
   for s in ${LW_TB_SEEDS:-1 2 3}; do
-    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20; do
+    for c in diag osd33 osd20 sec33 sec20 fio33 fio20 mnt33 mnt20 mntlw33; do
       for m in plain cdc; do
         [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
         echo "== seed $s $c $m" >> "$1"
@@ -744,7 +746,8 @@ twinj() {
       yosd) D="$JE $H33 -DMISTER_DISABLE_SPI_OSD";; ymnt) D="$JM $H33 -DMISTER_DISABLE_SPI_OSD -DMISTER_DISABLE_SPI_BLK";;
       yevt) D="$ID -DMISTER_DISABLE_SPI_EVT $H33";; lean33) D="$JP $H33";;
     esac
-    X=""; case $c in fio*|uio*|lane*|lean*) X="sys/lw_lane.sv sys/hps_io.sv";; evt*|yevt) X="sys/hps_io.sv";; esac
+    X=""; case $c in fio*|uio*|lane*) X="sys/lw_lane.sv sys/hps_io.sv";; lean*) X="sys/lw_lane.sv sys/hps_io.sv sys/lw_blk_mux.sv";;
+      evt*|yevt) X="sys/hps_io.sv";; esac
     echo "-- the twin bench compiles ($c)" >> "$1"; rm -f "$O/twinJ_$c.vvp"
     if iverilog -g2012 $D -DOCRAM_TB_TWIN -I sys -s ocram_tb -o "$O/twinJ_$c.vvp" tb/ocram_tb.sv $JG $JL sys/lw_cdc.sv \
          sys/osd.v $X > "$O/twinJ_$c.err" 2>&1; then

@@ -135,15 +135,23 @@ wire ack = HPS_BUS[129 + 2 * SAVE];
 
 `ifdef LW_SAVE_MUX_DIN
 assign HPS_BUS[U + 34:U]     = {(en & ack) ? {16'd0, core_din} : core_lba, core_rd, core_wr, hps_ack};
+// The ack answers only the request that was up when it rose. One raised again under it (the core reset and
+// restarted mid-block) sees no ack and no strobe until the ack falls, then crosses as a fresh request. The
+// raw ack still drives the LBA field above and the request record. The request must be low across at least
+// one clk_sys edge (HPS_BUS[36]) between instances, as hps_io assumes.
+reg  fell = 1'b0;
+always @(posedge HPS_BUS[36]) fell <= en & ack & (fell | ~(core_rd | core_wr));
+wire cack = ack & ~(fell & (core_rd | core_wr));
 `else
 assign HPS_BUS[U + 34:U]     = {core_lba, core_rd, core_wr, hps_ack};
+wire cack = ack;
 `endif
 assign HPS_BUS[378 + SAVE]   = 1'b1;
 
 assign hps_rd     = core_rd & ~en;
 assign hps_wr     = core_wr & ~en;
-assign core_ack   = en ? ack                  : hps_ack;
-assign core_write = en ? HPS_BUS[97] & ack    : hps_write;
+assign core_ack   = en ? cack                 : hps_ack;
+assign core_write = en ? HPS_BUS[97] & cack   : hps_write;
 assign core_addr  = en ? HPS_BUS[127:114]     : hps_addr;
 assign core_data  = en ? HPS_BUS[113:98]      : hps_data;
 
