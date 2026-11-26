@@ -6,7 +6,7 @@ This core contains the latest version of framework and will be updated when fram
 It's highly recommended to follow the notes to keep it standardized for easier maintenance and collaboration with other developers.
 
 ## LW bridge framework
-This branch adds an optional second path between the HPS and the core: a memory-mapped window on the HPS lightweight bridge, beside the SPI link that `hps_io` decodes. Pads, an OSD shadow, the status back-channel and (optionally) disk blocks travel as plain 32-bit stores and register reads, with two interrupt lines. `hps_io` keeps every SPI decode, so a host that ignores the window drives the core as before. Adoption, register map and contracts: [docs/LW_BRIDGE.md](docs/LW_BRIDGE.md).
+This branch adds an optional second path between the HPS and the core: a memory-mapped window on the HPS lightweight bridge, beside the SPI link that `hps_io` decodes. Pads, an OSD shadow, the status back-channel and (optionally) disk blocks travel as plain 32-bit stores and register reads, with two interrupt lines. `hps_io` keeps every SPI decode, so a host that ignores the window drives the core as before. It is opt-in: with none of `MISTER_LW`, `MISTER_OCRAM` and `MISTER_DISABLE_SPI_*` defined, `sys/` builds exactly as upstream. Adoption, register map and contracts: [docs/LW_BRIDGE.md](docs/LW_BRIDGE.md).
 
 ## Source structure
 
@@ -54,6 +54,9 @@ MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot; with _FRAME, _GA
 MISTER_LW_SAVE0_SLOT     | LW save slot 0 (likewise SAVE1); needs _WSRC, _EXTENT, the SECTOR slot
 MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)
 MISTER_DISABLE_SPI_KBM   | Removes the SPI key, mouse and trigger commands; needs MISTER_LW_KBM
+MISTER_OCRAM             | OCRAM mailbox floor, test cores only (docs/OCRAM_MAILBOX.md); needs no other macro
+MISTER_OCRAM_OSD         | OCRAM OSD tier; needs MISTER_OCRAM
+MISTER_OCRAM_POLL        | OCRAM idle poll period, a power of two of clk_100m cycles (default 12)
 MISTER_DISABLE_SPI_OSD   | Removes osd.v's SPI row writes; needs MISTER_OCRAM_OSD or MISTER_LW_OSD
 
 An LW or OCRAM tier macro without its floor stops the build, naming a guard module (`ocram_tier_needs_MISTER_OCRAM`,

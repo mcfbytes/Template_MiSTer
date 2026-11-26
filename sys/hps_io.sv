@@ -287,6 +287,12 @@ lw_tier_needs_MISTER_LW osd_guard();
 `endif
 // The OCRAM SECTOR tier drives the LW sector bits of HPS_BUS, which only MISTER_LW builds.
 `endif
+// An OCRAM tier macro without the floor, MISTER_OCRAM: the build stops here, naming the guard.
+`ifndef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+ocram_tier_needs_MISTER_OCRAM ocram_osd_floor_guard();
+`endif
+`endif
 // The LW SECTOR block reports MISTER_LW_BLKSZ (default 2) as the slot's block size, so it must be this instance's
 // BLKSZ, or the build stops here.
 `ifdef MISTER_LW
@@ -304,6 +310,14 @@ endgenerate
 `endif
 `endif
 // LW_OCRAM_CFG_HPS: the OCRAM floor's macros as localparams (ocram_cfg.vh), for its tiers' checks below.
+`ifdef MISTER_OCRAM
+`define LW_OCRAM_CFG_HPS
+`endif
+`ifdef LW_OCRAM_CFG_HPS
+`include "sys/ocram_cfg.vh"
+`undef LW_OCRAM_CFG_HPS
+`endif
+// The OCRAM mount slots share the SECTOR tier's feeder and EVT writer, and take the LW save-slot bits.
 `ifdef MISTER_DISABLE_SPI_PAD
 `ifndef MISTER_LW_PAD
 spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();

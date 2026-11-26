@@ -39,6 +39,19 @@ A core pays only for what its `.qsf` names. Every figure is **ESTIMATED**: regis
 | L3 SECTOR | `MISTER_LW_SECTOR_SLOT` and its geometry | the SECTOR block and its enable link, line 1, the core-side muxes, `hps_io`'s commit mark | 325-400 ALMs and about 12 per mux, 3 M10K |
 | L3 OSD | `MISTER_LW_OSD` | the OSDBUF block and its enable link, a second write source in each `osd` | 75-100 ALMs, 2 M10K |
 
+### Beside the window: the OCRAM mailbox (proposed)
+
+`docs/OCRAM_MAILBOX.md` proposes a third carrier for bulk data, beside SPI and this window. The HPS writes records into its own 64 KB on-chip RAM, and the core fetches them as a master on the FPGA-to-HPS bridge, which `sys/` already instantiates with no port connected. The payload waits in the HPS's RAM, so its tiers cost logic and no block memory, and the HPS never issues an access the fabric must answer. **Its floor, OSD tier and SECTOR tier are built, for test cores only; its other tiers are a design.**
+
+| function | carrier proposed | why |
+|---|---|---|
+| pads | the PAD block here | one store per change, proven on hardware; a mailbox pad arrives one poll period late |
+| status and `hps_io`'s flags | the EVT block here | no block memory already; the mailbox version exists for a core with no LW bridge |
+| the OSD image | the mailbox | OSDBUF's FIFO is two block memories; a mailbox row is 65 memory stores and publishes whole |
+| block reads | the mailbox | SECTOR's FIFO is block memory; a mailbox frame is whole by construction, and blocks may be queued ahead of the core's requests |
+| save slots | the SECTOR block here, or SPI | a save block must reach the core whole or not at all, which needs the block's FIFO; the mailbox has none |
+| link frames | either | the LANE block's FIFOs are block memory; the mailbox keeps the same player |
+
 ## Discovery and safety
 
 An LW access the fabric does not answer **hangs the SoC**. Nothing here is probed, so the HPS must know the window exists before it touches it:

@@ -60,6 +60,8 @@ endmodule
 `ifdef MISTER_LW_SECTOR_SLOT
 `define LW_SAVE_MUX_BUILT
 `endif
+// LW_SAVE_MUX_DIN: the OCRAM mount slots are built (a mount macro with MISTER_OCRAM and its SECTOR tier), so the
+// LBA field carries core_din under the ack; a mount macro left in a build without them changes nothing here.
 `ifdef LW_SAVE_MUX_BUILT
 // While the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's ack/write/addr/data come from the
 // feeder, the write gated by the slot's own ack.

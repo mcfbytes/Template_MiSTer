@@ -20,6 +20,9 @@
 `ifdef MISTER_LW
 `define LW_CDC_BUILT
 `endif
+`ifdef MISTER_OCRAM
+`define LW_CDC_BUILT
+`endif
 
 `ifdef LW_CDC_BUILT
 `default_nettype none

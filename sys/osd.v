@@ -1,8 +1,17 @@
 // A simple OSD implementation. Can be hooked up between a cores
 // VGA output and the physical VGA pins
+// LW_OSD_W: an OSDBUF tier (MISTER_LW_OSD with MISTER_LW, or MISTER_OCRAM_OSD with MISTER_OCRAM) writes
+// osd_buffer through this block's own write port.
 `ifdef MISTER_LW
 `ifdef MISTER_LW_OSD
 `define LW_OSD_W
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`ifndef LW_OSD_W
+`define LW_OSD_W
+`endif
 `endif
 `endif
 
@@ -37,6 +46,8 @@ module osd
 parameter  OSD_COLOR    =  3'd4;
 `ifdef MISTER_DISABLE_SPI_OSD
 `ifndef LW_OSD_W
+// MISTER_DISABLE_SPI_OSD compiles out the link's row writes (OSDCMDWRITE, 0x20); without an OSDBUF tier
+// (MISTER_OCRAM_OSD or MISTER_LW_OSD) the image would have no path, so the build stops here, naming the guard.
 spi_osd_off_needs_an_osd_tier spi_osd_guard();
 `endif
 `endif
