@@ -80,7 +80,7 @@ preprocesses to nothing and leaves no macro defined; `MISTER_OCRAM` alone still 
 | `MISTER_DISABLE_SPI_KBM` | absent | PROVISIONAL; area-critical and test-only, never a default. With `MISTER_LW_KBM`: `hps_io` builds no link arm for `0x04`, `0x05` or `0x46`, and no `ps2_key_raw` |
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the EVT block (`lw_evt.sv`): `hps_io`'s status, block-request, info and upload flags as causes, `hps_io`'s exports and its line |
 | `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
-| `LW_DIAG` | 0 | 1 = debug build: SCRATCH and the SECTOR counters/timestamps read back |
+| `MISTER_LW_DIAG` | undefined | defined = debug build: SCRATCH and the SECTOR counters/timestamps read back |
 | `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds, 0-15; its presence builds the block |
 | `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-4096 (128 = one 512-byte block) |
 | `MISTER_LW_SECTOR_GAP` | 2 | `clk_sys` cycles between write strobes, and from the ack to the first, 2-15 |
@@ -112,7 +112,7 @@ analogy with a fit of an earlier revision. None of this revision has been fitted
 | L3 SECTOR | `MISTER_LW_SECTOR_SLOT` and its geometry | the SECTOR block and its enable link, line 1, the core-side muxes, `hps_io`'s commit mark | 325-400 ALMs and about 12 per mux, 3 M10K |
 | L3 lane | `MISTER_LW_LANE` | the LANE block and its enable link, `lw_link`, line 3 | 225-255 ALMs, 3 M10K |
 | L3 OSD | `MISTER_LW_OSD` | the OSDBUF block and its enable link, a second write source in each `osd` | 75-100 ALMs, 2 M10K |
-| debug | `LW_DIAG=1` | SCRATCH, the SECTOR counters and timestamps | not estimated |
+| debug | `MISTER_LW_DIAG` | SCRATCH, the SECTOR counters and timestamps | not estimated |
 
 `MISTER_LW` alone is legal: a safe, discoverable window with COUNT = 0 and a host enable.
 
@@ -289,7 +289,7 @@ AND-OR of the block words and the `0xDEADBEEF` default. A block added later keep
 | `0x1C` | - | 0, reserved |
 | `0x20` | PENDING | bit *i* = entry *i*'s CAUSE word is non-zero, enabled or not |
 | `0x24` | OWNED | bit *i* = entry *i*'s block has not yet returned to SPI: its core-clock half has not acknowledged rest since the enable last fell (or since configuration), or the enable fell before the half answered its rise; only blocks with an enable link (SECTOR, OSDBUF, LANE) ever set it |
-| `0x28` | SCRATCH | read/write with `LW_DIAG=1` (while enabled, like every store); 0 otherwise |
+| `0x28` | SCRATCH | read/write with `MISTER_LW_DIAG` (while enabled, like every store); 0 otherwise |
 | `0x2C` | OPEN | bit *i* = entry *i*'s block takes stores now: the enable for a block without an enable link, and for SECTOR, OSDBUF and LANE the enable and the block's core-clock half having answered its rise; a store to a linked block before its bit is set is dropped and sets `stale` |
 | `0x30` | LINE_EN | read/write while enabled: bit *i* = entry *i*'s cause may raise its line; reads 0 whenever the enable does, and after every ENABLE taken |
 | `0x34` | RESETS | `{freed[15:8], hrst[7:0]}`: the firewall's state machines freed at a reset's release, and the HPS resets the fabric saw; each counts from configuration and stops at 255 |
@@ -617,11 +617,11 @@ An undeclared save slot's words are 0.
 |---|---|---|
 | `0x000` | CAUSE | bit *k*: slot *k*'s request opened or re-opened while its EN is set (a refused or withdrawn answer re-opens it); a store clears each bit written as 1 |
 | `0x004` | REQ | `{pending[31], 0, k[17:16], GET_SDSTAT word[15:0]}` of the highest-priority open request (*k* = 0, 1, 2); 0 when none |
-| `0x008` | CTRL | `[2:0]` EN by *k* (settable only for a wired slot), `[8]` ABORT (zero-fills the open primary frame, withdraws a save-slot frame not stored in full; one that finds the FIFO full is held and enters first, every store behind it refused until then; reads 0), `[9]` TEST, `[10]` CLR (TEST/CLR: `LW_DIAG=1`) |
-| `0x00C` | STATUS | `[2:0]` `en_sys` by *k*, `[6:4]` the feeder's ack by *k*, `[8]` feeder busy, `[9]` ABORT held, `[10]` `hps_io`'s commit mark; with `LW_DIAG=1` also `frames[31:16]`. Independent samples: no decision may rest on a combination of them |
+| `0x008` | CTRL | `[2:0]` EN by *k* (settable only for a wired slot), `[8]` ABORT (zero-fills the open primary frame, withdraws a save-slot frame not stored in full; one that finds the FIFO full is held and enters first, every store behind it refused until then; reads 0), `[9]` TEST, `[10]` CLR (TEST/CLR: `MISTER_LW_DIAG`) |
+| `0x00C` | STATUS | `[2:0]` `en_sys` by *k*, `[6:4]` the feeder's ack by *k*, `[8]` feeder busy, `[9]` ABORT held, `[10]` `hps_io`'s commit mark; with `MISTER_LW_DIAG` also `frames[31:16]`. Independent samples: no decision may rest on a combination of them |
 | `0x010` | ACCEPT | `{ok[31], closed[30], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `ok`: every word taken (the primary), the frame committed (a save slot); `closed`: no frame is open, because the last BEGIN_S or WACK_S was refused (a full FIFO or a held ABORT) or its frame was withdrawn, and DATA is ignored until the next one; `drops` counts stores refused by a full FIFO |
 | `0x014` | ID | `0x33434553` ("SEC3") |
-| `0x018`-`0x030` | DROPS `{0, high-water[23:16], drops[15:0]}`, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM | `LW_DIAG=1` only; read 0 otherwise |
+| `0x018`-`0x030` | DROPS `{0, high-water[23:16], drops[15:0]}`, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM | `MISTER_LW_DIAG` only; read 0 otherwise |
 | `0x100 + 0x20k` | RSTAT_S[k] | `{offered[31], answered[30], 0, GET_SDSTAT word[15:0]}` from slot *k*'s latest request record |
 | `0x104 + 0x20k` | LBA_S[k] | slot *k*'s LBA, from its latest request record |
 | `0x108 + 0x20k` | BEGIN_S[k] | write the LBA: opens a READ frame of slot *k*'s frame_words |
@@ -813,7 +813,7 @@ clock.
 | SECTOR | each slot's request (offered, new, rejected with the rejected entry's tag, direction, LBA) | one record per slot in a held-data handshake, round robin; a change during a launch sends the slot again | none |
 | SECTOR | the FIFO | dual-clock, Gray pointers | none |
 | SECTOR | EN, TEST, the status bits | two-flop synchronisers | none; independent samples |
-| SECTOR | FRAMES, TSTAMP_DONE and SUM (`LW_DIAG=1`) | one held-data handshake word, so they change on the same `clk_100m` edge; frames that complete while a word is in flight are all counted by the next, and SUM then shows the latest data frame's | none |
+| SECTOR | FRAMES, TSTAMP_DONE and SUM (`MISTER_LW_DIAG`) | one held-data handshake word, so they change on the same `clk_100m` edge; frames that complete while a word is in flight are all counted by the next, and SUM then shows the latest data frame's | none |
 | OSDBUF | image stores | a dual-clock FIFO, Gray pointers stepping one entry per update, into the writer on `clk_sys`, which writes `osd_buffer` on `clk_sys` as the SPI path does | none |
 | LANE | frames and replies | dual-clock FIFOs, Gray pointers stepping one entry per update | none |
 | LANE | PLAYED and the reply-drop count | toggles, at most one per `strobe_gap + 5` and per `strobe_gap + 2` `clk_sys` cycles; each must outlast two `clk_100m` periods | below about 250 MHz |
@@ -913,14 +913,14 @@ the window stays the one driver of every to-core bit, and lists no SECTOR entry 
 static checks on the preprocessed top level (the GPI terms with both LW instances or neither, the lines, every
 crossing built from the cells of `sys/lw_cdc.sv` with every source register named, `sys/lw_bridge.sdc` covering
 every crossing source, and the wording of the framework's files and of this guide); `sys_top.v` elaborated against
-stand-ins for off and each of the 32 tier sets in three upstream variants; `LW_DIAG=1` and `LW_DIAG=0`;
+stand-ins for off and each of the 32 tier sets in three upstream variants; with and without `MISTER_LW_DIAG`;
 `MENU_CORE`; the floor alone; the Template's own configuration; the SECTOR block at its default geometry and on an
 `hps_io` with `WIDE = 0`; the frame lane; each tier macro without `MISTER_LW` and each unservable geometry, which
 must stop the compile naming its guard module; a short run in each of the 32 tier sets and with a core side that
 leaves a piece out; the lane arm at eight `clk_sys` rates from 12 to 150 MHz, three seeds each, with delay and
 aperture models in every crossing cell; a front-end lint; and the HPS-side probe compiled with warnings as errors.
 Among what they cover:
-- `LW_DIAG=1`; `LW_DIAG=0`; `MENU_CORE`, which checks the header rows;
+- with and without `MISTER_LW_DIAG`; `MENU_CORE`, which checks the header rows;
 - no SECTOR block, the Template's own configuration;
 - the SECTOR block at the default geometry (128-word primary, 256-word save slots): a save-slot frame longer
   than the primary's completes, and the primary is served after it;

@@ -63,8 +63,8 @@
 // (lw_osd.sv, osd.v). EVT raises hps_io's core->host flags (status, block request, info, upload) as causes on its
 // own line. LANE replays ordered link frames onto sys_top's link nets and can capture their replies; its CAUSE
 // (played, reply, drop) is on its own line.
-// LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored) and lw_sector's diagnostics; LW_DIAG=1
-// (debug builds) keeps them.
+// MISTER_LW_DIAG (debug builds) adds SCRATCH and lw_sector's diagnostics; without it SCRATCH reads 0 and its
+// writes are ignored.
 // See docs/LW_BRIDGE.md for the register map and the adoption recipe.
 
 module lw_sys_window #(
@@ -157,12 +157,6 @@ module lw_sys_window #(
 	output wire  [1:0] xmnt_wr,      // [203], [168], likewise
 	output wire [63:0] xmnt_lba      // [236:205], [201:170]
 );
-
-`ifdef LW_DIAG
-localparam        DIAG     = `LW_DIAG;
-`else
-localparam        DIAG     = 0;
-`endif
 
 // The window (absolute LW offset and size: the `SYS_LW_CAPS token's two numbers) and its blocks, window-relative.
 // Every block is aligned to its size.
@@ -303,7 +297,9 @@ reg      [7:0] n_hrst  = 0, n_freed = 0;
 reg            hrst_d  = 1'b1;        // lw_hrst is high from configuration: configuration is no rise
 wire           quiet;                 // every enable link lets an ENABLE through
 
+`ifdef MISTER_LW_DIAG
 reg [31:0] scratch = 0;
+`endif
 
 // Selects: high address bits against a constant, read and write side alike, for listed blocks only.
 wire        r_dir  = lw_raddr[20:12] == DIR_A[20:12];
@@ -508,7 +504,9 @@ always @(*) begin
 		4'd6:    dir_rdata = ena_rd;                         // ENABLE
 		4'd8:    dir_rdata = pending;
 		4'd9:    dir_rdata = owned_w;                        // OWNED
-		4'd10:   dir_rdata = DIAG ? scratch : 32'd0;
+`ifdef MISTER_LW_DIAG
+		4'd10:   dir_rdata = scratch;
+`endif
 		4'd11:   dir_rdata = open_w;                         // OPEN: each listed block takes stores now
 		4'd12:   dir_rdata = line_en;                        // LINE_EN
 		4'd13:   dir_rdata = {16'd0, n_freed, n_hrst};       // RESETS
@@ -522,14 +520,16 @@ assign lw_rdata = ({32{r_dir}}  & dir_rdata)  | ({32{r_sec}} & sec_rdata) | ({32
                   ({32{r_osd}}  & osd_rdata)  | ({32{r_lane}} & lane_rdata) | ({32{r_pad}} & pad_rdata) |
                   ({32{r_none}} & 32'hDEADBEEF);
 
+`ifdef MISTER_LW_DIAG
 always @(posedge clk) begin
-	if (DIAG && wr && w_dir && lw_waddr[11:0] == 12'h028) begin
+	if (wr && w_dir && lw_waddr[11:0] == 12'h028) begin
 		if (lw_be[0]) scratch[ 7: 0] <= lw_wdata[ 7: 0];
 		if (lw_be[1]) scratch[15: 8] <= lw_wdata[15: 8];
 		if (lw_be[2]) scratch[23:16] <= lw_wdata[23:16];
 		if (lw_be[3]) scratch[31:24] <= lw_wdata[31:24];
 	end
 end
+`endif
 
 // HPS_BUS's to-core bits not driven by a block below: the PAD store [94:46], SECTOR's [131:95].
 wire [48:0] pad_q;
@@ -611,7 +611,7 @@ if (SEC_EN) begin : sec
 		$finish;
 	end
 	// synthesis translate_on
-	lw_sector #(.SLOT(SEC_SLOT[7:0]), .FRAME(SEC_FRAME[12:0]), .BLKSZ(BLKSZ), .AW(SEC_AW), .DIAG(DIAG),
+	lw_sector #(.SLOT(SEC_SLOT[7:0]), .FRAME(SEC_FRAME[12:0]), .BLKSZ(BLKSZ), .AW(SEC_AW),
 	            .XSLOT0(SAVE0_SLOT[3:0]), .XSLOT1(SAVE1_SLOT[3:0]), .XFRAME0(SAVE0_FRAME[12:0]),
 	            .XFRAME1(SAVE1_FRAME[12:0]), .XLB0(SAVE0_LBA_BITS[5:0]), .XLB1(SAVE1_LBA_BITS[5:0]),
 	            .GAP(SEC_GAP[3:0])) sector

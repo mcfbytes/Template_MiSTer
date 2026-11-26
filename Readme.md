@@ -54,7 +54,7 @@ MISTER_LW_KBM            | LW keys, mouse and triggers as PAD stores; needs MIST
 MISTER_LW_EVT            | LW EVT block (status, block-request, info, upload flags); needs MISTER_LW
 MISTER_LW_OSD            | LW OSDBUF block, a write port into each osd's osd_buffer; needs MISTER_LW
 MISTER_LW_LANE           | LW frame lane with reply capture; needs MISTER_LW
-LW_DIAG=0/1              | LW window diagnostics: 0 or absent shipping, 1 debug; needs a value (bare = error)
+MISTER_LW_DIAG           | LW window diagnostics (debug builds only); needs MISTER_LW
 MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot; with _FRAME, _GAP, MISTER_LW_BLKSZ (= hps_io's BLKSZ)
 MISTER_LW_SAVE0_SLOT     | LW save slot 0 (likewise SAVE1); needs _WSRC, _EXTENT, the SECTOR slot
 MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)
@@ -76,6 +76,10 @@ MISTER_DISABLE_SPI_EVT   | Removes hps_io's SPI event replies; needs MISTER_OCRA
 An LW or OCRAM tier macro without its floor stops the build, naming a guard module (`ocram_tier_needs_MISTER_OCRAM`,
 `lw_blksz_differs_from_hps_io`, ...). Geometry, defaults and every guard: the macro tables in docs/LW_BRIDGE.md and
 docs/OCRAM_MAILBOX.md.
+
+Debug and test macros, carried only by this branch (`lw-ocram-framework-debug`): MISTER_LW_DIAG, MISTER_OCRAM_DIAG
+(with its MISTER_OCRAM_MARK period) and the bench hooks LW_TB_CDC and LW_TB_PROBES. The review branch
+`lw-ocram-framework` is generated from this one with all of them stripped; with every macro off, both build as upstream.
 
 
 #### Optional scaler features

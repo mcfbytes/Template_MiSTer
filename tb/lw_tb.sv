@@ -145,10 +145,19 @@ endmodule
 
 module tb;
 
-`ifdef LW_DIAG
-localparam DIAG = `LW_DIAG;
+`ifdef MISTER_LW_DIAG
+localparam DIAG = 1;
+`define TB_SCRATCH win.scratch
+`define TB_SEC_RINGS win.sec.sector.rings
+`define TB_SEC_DIAG win.sec.sector.test_lwx, win.sec.sector.frames, win.sec.sector.drops, \
+                    win.sec.sector.hw, win.sec.sector.n_rej, win.sec.sector.n_skip, win.sec.sector.n_abort, \
+                    win.sec.sector.n_rfill, win.sec.sector.sum, win.sec.sector.tsreq, win.sec.sector.tsdone, \
+                    win.sec.sector.dseen
 `else
 localparam DIAG = 0;
+`define TB_SCRATCH 32'd0
+`define TB_SEC_RINGS 32'd0
+`define TB_SEC_DIAG 1'b0, 188'd0
 `endif
 function [31:0] dg(input [31:0] v); dg = DIAG ? v : 32'd0; endfunction
 
@@ -823,22 +832,19 @@ function [511:0] pure_win;
 `ifdef MISTER_LW_EVT
 		e = {win.evt.evt.seq, win.evt.evt.cause, win.evt.evt.s_q, win.evt.evt.e_q};
 `endif
-		pure_win = {180'd0, win.scratch, o, doorbell, sys_irq, p, e};
+		pure_win = {180'd0, `TB_SCRATCH, o, doorbell, sys_irq, p, e};
 	end
 endfunction
 function [511:0] pure_sec;
 `ifdef MISTER_LW_SECTOR_SLOT
-	pure_sec = {169'd0, win.sec.sector.cause, win.sec.sector.rings, win.sec.sector.ans, win.sec.sector.btag,
+	pure_sec = {169'd0, win.sec.sector.cause, `TB_SEC_RINGS, win.sec.sector.ans, win.sec.sector.btag,
 	           win.sec.sector.rq_off0, win.sec.sector.rq_rd0, win.sec.sector.rq_lba, win.sec.sector.rq_xoff,
 	           win.sec.sector.rq_xrd,
 	           win.sec.sector.rq_xwr, win.sec.sector.rq_xlba, win.sec.sector.abort_pend, win.sec.sector.wspec,
 	           win.sec.sector.wcom, win.sec.sector.wvis, win.sec.sector.wsl,
 	           win.sec.sector.exp_w,
 	           win.sec.sector.flen_w, win.sec.sector.fdrops, win.sec.sector.bfail, win.sec.sector.en_lwx,
-	           win.sec.sector.xen_lwx, win.sec.sector.test_lwx, win.sec.sector.frames, win.sec.sector.drops,
-	           win.sec.sector.hw, win.sec.sector.n_rej, win.sec.sector.n_skip, win.sec.sector.n_abort,
-	           win.sec.sector.n_rfill, win.sec.sector.sum, win.sec.sector.tsreq, win.sec.sector.tsdone,
-	           win.sec.sector.dseen, win.sec.sector.sb2};
+	           win.sec.sector.xen_lwx, `TB_SEC_DIAG, win.sec.sector.sb2};
 `else
 	pure_sec = 0;
 `endif
@@ -894,6 +900,7 @@ always @(posedge clk) if (win.sec.sector.fire) t_fire = $realtime;
 // a host that sees a frame counted reads that frame's sum.
 integer sum_moves = 0, sum_alone = 0;
 `ifdef MISTER_LW_SECTOR_SLOT
+`ifdef MISTER_LW_DIAG
 reg [19:0] sum_p = 0;
 reg [15:0] frames_p = 0;
 always @(posedge clk) begin
@@ -904,6 +911,7 @@ always @(posedge clk) begin
 	sum_p    <= win.sec.sector.sum;
 	frames_p <= win.sec.sector.frames;
 end
+`endif
 `endif
 
 integer fails = 0, checks = 0, lchecks = 0;
@@ -3671,7 +3679,7 @@ task ena_cases;
 		rd("OWNED: nothing owned", OWNEDA, 32'd0);
 		check("GPI[22] reads 0", tb_gpi[22], 0);
 		nw0 = n_lwwr;
-		v0 = win.scratch;   // what earlier cases left (0 without LW_DIAG)
+		v0 = `TB_SCRATCH;   // what earlier cases left (0 without MISTER_LW_DIAG)
 		axi_write(SCR, 32'h12345678, 4'hF);
 		rd("no enable: SCRATCH unchanged", SCR, v0);
 		axi_write(LINEN, 32'hFFFFFFFF, 4'hF);
@@ -4967,6 +4975,7 @@ endtask
 // before every half is at rest (the ENABLE monitor), a stock SPI transfer before the ENABLE, and a frame of each
 // block correct under the new enable. Pass 2 during the return: the links converge and a later enable works.
 task scramble;
+	reg [31:0] v0;   // the draws a build without MISTER_LW_DIAG has no register for
 	begin
 		@(negedge clk_sys);
 		ap_scr = 1;
@@ -4995,10 +5004,20 @@ task scramble;
 		win.sec.sector.q = {$random, $random}; win.sec.sector.rptr = $random; win.sec.sector.sector_r_lwgray = $random;
 		win.sec.sector.fs = $random; win.sec.sector.fexp = $random; win.sec.sector.em = $random;
 		win.sec.sector.qv = $random; win.sec.sector.tmode = $random; win.sec.sector.sn = $random;
-		win.sec.sector.ackc = $random; win.sec.sector.wv = $random; win.sec.sector.fsum = $random;
+		win.sec.sector.ackc = $random; win.sec.sector.wv = $random;
+`ifdef MISTER_LW_DIAG
+		win.sec.sector.fsum = $random;
+`else
+		v0 = $random;   // the same draws
+`endif
 		win.sec.sector.gc = win.sec.sector.wv[31:28];   // one draw for both: the later blocks' draws stay as they were
+`ifdef MISTER_LW_DIAG
 		win.sec.sector.evt = $random; win.sec.sector.dcnt = $random; win.sec.sector.dsent = $random;
-		win.sec.sector.dsum = $random; win.sec.sector.fsel = $random; win.sec.sector.fwack = $random;
+		win.sec.sector.dsum = $random;
+`else
+		v0 = $random; v0 = $random; v0 = $random; v0 = $random;
+`endif
+		win.sec.sector.fsel = $random; win.sec.sector.fwack = $random;
 		win.sec.sector.offd = $random; win.sec.sector.opn = $random; win.sec.sector.rej = $random;
 		win.sec.sector.rtag = $random; win.sec.sector.dirty = $random; win.sec.sector.rearm = $random;
 		win.sec.sector.rlast = $random; win.sec.sector.rec_x.lwsrc_d = {$random, $random};
@@ -6769,7 +6788,7 @@ initial begin
 	wait_frame(n0);
 	check_buf("next frame after the reset", 32'h0000123C, 588);
 
-	$display("-- TEST mode: SUM only, consumer untouched (LW_DIAG=0: TEST ignored, the BEGIN is rejected)");
+	$display("-- TEST mode: SUM only, consumer untouched (no MISTER_LW_DIAG: TEST ignored, the BEGIN is rejected)");
 	settle;                                     // the last frame's done event has crossed before FRAMES is read
 	n0 = cd_frames; s0 = cd_strobes;
 	axi_read(SEC + S_STATUS, 0, d0, dl, beats);
@@ -7971,7 +7990,7 @@ initial begin
 	ena_up;
 
 	if (!DIAG) begin
-		$display("-- LW_DIAG=0: the removed registers read 0");
+		$display("-- without MISTER_LW_DIAG: the removed registers read 0");
 		rd("lean SCRATCH", SCR, 32'd0);
 		if (TB_SEC) begin
 			axi_read(SEC + S_STATUS, 0, d, dl, beats);

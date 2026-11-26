@@ -97,8 +97,8 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
 
-# LW window diagnostics (SCRATCH, SECTOR counters/timestamps): 0 or absent = shipping, 1 = debug builds
-#set_global_assignment -name VERILOG_MACRO "LW_DIAG=1"
+# LW window diagnostics (SCRATCH, SECTOR counters/timestamps): debug builds only
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_DIAG=1"
 
 # LW SECTOR block, for a core that reads blocks through hps_io (see docs/LW_BRIDGE.md, "Hooking the SECTOR block"):
 # its hps_io slot (0-15), frame in 32-bit words (1-4096), clk_sys cycles between strobes (2-15) and BLKSZ. An

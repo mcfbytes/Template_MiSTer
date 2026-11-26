@@ -29,7 +29,7 @@
 #   3. Every framework-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro), or
 #      `ifdef MISTER_OCRAM, first (sys/lw_lane.sv: each pair defining its local macros, then their guard); `default_nettype none first inside it, `default_nettype wire last. Each macro
 #      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
-#      file ends; it undefines no macro it did not define; it defines no LW_DIAG (a build sets that one).
+#      file ends; it undefines no macro it did not define; it defines no MISTER_LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream, except that sys/ascal.vhd, with
 #      its OHRESC declaration (4096) dropped and OHRESC read as OHRESH, is: upstream's OHRESH is 4096 at the default
 #      OHRES 2304, so only an OHRES 1024 or 2048 build changes; sys.qip adds only
@@ -434,7 +434,7 @@ for x in lw:
             if k == '`define':
                 okname = m.startswith('LW_') or (x in OCM and m.startswith('MISTER_OCRAM_'))
                 check(okname, '%s: defines %s, a name outside LW_' % (f, m))
-                check(m != 'LW_DIAG', '%s: defines LW_DIAG, which only a build sets' % f)
+                check(m != 'MISTER_LW_DIAG', '%s: defines MISTER_LW_DIAG, which only a build sets' % f)
                 live[m] = True
             else:
                 check(m in live, '%s: undefines %s, a macro it did not define' % (f, m))

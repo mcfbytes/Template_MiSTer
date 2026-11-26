@@ -27,7 +27,7 @@
 // Registers (block-relative): CAUSE 0x000, REQ 0x004 {any, 0, k[17:16], GET_SDSTAT word}, CTRL 0x008 (EN [2:0] by
 // k, ABORT [8], TEST [9], CLR [10]), STATUS 0x00C ({frames[31:16]}, sd_commit [10], ABORT held [9], busy [8], ack
 // [6:4] and en_sys [2:0] by k: independent samples), ACCEPT 0x010 {ok, closed, 0, drops, 0, next_index}, ID
-// 0x014, DIAG 0x018-0x030 (DROPS, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM); per slot k at 0x100 +
+// 0x014, with MISTER_LW_DIAG 0x018-0x030 (DROPS, COUNTS, RINGS, TSTAMP_REQ, TSTAMP_DONE, CYCLES, SUM); per slot k at 0x100 +
 // 0x20k: RSTAT_S {offered, answered, 0, GET_SDSTAT word}, LBA_S, BEGIN_S, WACK_S (k = 1, 2); DATA at 0x4000 + 4i.
 // Every slot field is indexed by k.
 // Requests cross as records. On clk_sys a slot's request is offered while its mux is on this block (en_sys), the
@@ -79,19 +79,19 @@
 // An ABORT store that finds the FIFO full is held and enters in the first cycle with room; until then every other
 // store is refused as by a full FIFO. The enable's fall drops it.
 // Crossings: the FIFO's Gray pointers (wvis's and the read pointer's), the control bits (en, test, xen), the
-// feeder's status levels and DIAG toggles (sys_lwx), each through lw_sync; the records through lw_xfer (lw_cdc.sv).
-// DIAG: each done event and the SUM of the last data frame cross together in one lw_xfer word, {done count, SUM},
+// feeder's status levels and event toggles (sys_lwx), each through lw_sync; the records through lw_xfer (lw_cdc.sv).
+// MISTER_LW_DIAG: each done event and the SUM of the last data frame cross together in one lw_xfer word, {done count, SUM},
 // so FRAMES, TSTAMP_DONE and SUM move on the same clk_100m edge. Events that come while a word is in flight
 // coalesce into the next word: FRAMES adds them all, SUM shows the latest data frame's.
 // Bridge side has no reset and answers in fixed cycles (no back-pressure); a full FIFO drops the store and
 // counts it. A BEGIN or WACK it refuses (or a held ABORT does) opens no frame: ACCEPT's closed bit reads 1 (as for a
 // withdrawn frame) and every DATA store is ignored until the next BEGIN or WACK; and its slot's CAUSE bit rises
 // again while its EN is set, its record shows it offered and no answer of that slot stands.
-// DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:16], DROPS, COUNTS, RINGS, TSTAMP_*, CYCLES, SUM and TEST:
+// Without MISTER_LW_DIAG (shipping) the build has no STATUS[31:16], DROPS, COUNTS, RINGS, TSTAMP_*, CYCLES, SUM and TEST:
 // they read 0 and CTRL.TEST/CLR are ignored. Every other register stays.
 
 module lw_sector #(parameter [7:0] SLOT = 1, parameter [12:0] FRAME = 588, parameter [2:0] BLKSZ = 3,
-                   parameter AW = 9, parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3,
+                   parameter AW = 9, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3,
                    parameter [12:0] XFRAME0 = 256, parameter [12:0] XFRAME1 = 256, parameter [5:0] XLB0 = 7,
                    parameter [5:0] XLB1 = 7, parameter [3:0] GAP = 2)
 (
@@ -181,19 +181,25 @@ reg   [1:0] sn = 0, ackc = 0;   // sn: that word's strobe last issued
 reg   [3:0] gc = 4'd15;         // clk_sys cycles since the last strobe or ack rise, saturating at 15
 reg  [31:0] wv = 0;             // the word being strobed
 reg  [45:0] q;
+`ifdef MISTER_LW_DIAG
 reg  [19:0] fsum = 0;
-reg   [3:0] evt = 0;                // {reset_fill, abort, 0, reject} toggles (DIAG); bit 1 is never toggled
-reg   [3:0] dcnt = 0, dsent = 0;    // DIAG: done events counted, and the count last launched to clk_100m
-reg  [19:0] dsum = 0;               // DIAG: the last data frame's SUM
+reg   [3:0] evt = 0;                // {reset_fill, abort, 0, reject} toggles; bit 1 is never toggled
+reg   [3:0] dcnt = 0, dsent = 0;    // done events counted, and the count last launched to clk_100m
+reg  [19:0] dsum = 0;               // the last data frame's SUM
+`endif
 
 reg   [2:0] cause = 0;              // CAUSE: bit k = slot k's request opened or re-opened
+`ifdef MISTER_LW_DIAG
 reg  [31:0] rings = 0, tsreq = 0, tsdone = 0, cycles = 0;
+`endif
 reg         rq_off0 = 0, rq_rd0 = 0;   // the primary's last record: offered, rd, LBA
 reg  [31:0] rq_lba = 0;
 reg   [1:0] rq_xoff = 0, rq_xrd = 0, rq_xwr = 0;   // the save slots' last records: offered, rd, wr, LBA
 reg  [63:0] rq_xlba = 0;
 (* preserve *) reg       en_lwx   = 0;   // CTRL[0]
+`ifdef MISTER_LW_DIAG
 (* preserve *) reg       test_lwx = 0;   // CTRL[9]
+`endif
 (* preserve *) reg [1:0] xen_lwx  = 0;   // CTRL[2:1]
 reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the offered request entered the FIFO
 reg   [8:0] btag = 0;               // per slot, 3 bits: the count of its BEGIN/WACK entries, carried in each entry
@@ -202,20 +208,24 @@ reg  [12:0] flen_w = FRAME;
 reg  [12:0] exp_w = 0;
 reg  [11:0] fdrops = 0;
 reg         bfail = 0;
+`ifdef MISTER_LW_DIAG
 reg  [15:0] drops = 0, frames = 0;
 reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
 reg  [19:0] sum = 0;
 reg   [3:0] dseen = 0;              // the done count of the last word taken
+`endif
 wire        f_lvl, f_fall, hen_s, rest;   // the enable link's level and its fall; on clk_sys, the level and rest
 
-// clk_sys -> clk_100m: the feeder's status levels and its DIAG event toggles
+// clk_sys -> clk_100m: the feeder's status levels and, with MISTER_LW_DIAG, its event toggles
 (* preserve *) reg [11:0] sys_lwx = 0;
 wire [11:0] sb1;
 reg  [11:0] sb2 = 0;
-wire [23:0] dn_q;                   // DIAG: {done count, SUM} from the feeder
+`ifdef MISTER_LW_DIAG
+wire [23:0] dn_q;                   // {done count, SUM} from the feeder
 wire        dn_v, dn_busy;
 wire  [3:0] dn_add = dn_v ? dn_q[23:20] - dseen : 4'd0;
+`endif
 
 lw_sync #(.W(AW + 1), .GRAY(1)) rg_sync (.clk(clk), .d(sector_r_lwgray), .q(rg_s));
 lw_sync #(.W(12)) sys_sync (.clk(clk), .d(sys_lwx), .q(sb1));
@@ -304,7 +314,9 @@ function automatic [7:0] sat8(input [7:0] v, input inc);
 endfunction
 
 always @(posedge clk) begin
-	if (DIAG) cycles <= cycles + 32'd1;
+`ifdef MISTER_LW_DIAG
+	cycles <= cycles + 32'd1;
+`endif
 	sb2 <= sb1;
 
 	// the request records, the cycle after each lands; an ENABLE finds every link at rest and nothing offered
@@ -314,30 +326,38 @@ always @(posedge clk) begin
 	if (take) begin rq_off0 <= 0; rq_xoff <= 0; end
 
 	// CAUSE: a raise beats a concurrent clear; an ENABLE clears the word
+`ifdef MISTER_LW_DIAG
 	rings <= rings + fire;
+`endif
 	cause <= raise | (cause & ~clr_c & ~{3{take}});
 	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends with a record that shows the request new or
 	// withdrawn, or rejects that latest answer, with the slot's uncommitted frame, and at an ENABLE (one discarded
 	// without the enable leaves its request standing)
 	ans  <= bent | (ans & ~unans & ~wks & ~{3{take}});
 	btag <= {bent[2] ? btag1[8:6] : btag[8:6], bent[1] ? btag1[5:3] : btag[5:3], bent[0] ? btag1[2:0] : btag[2:0]};
-	if (DIAG && fire) tsreq <= cycles;
+`ifdef MISTER_LW_DIAG
+	if (fire) tsreq <= cycles;
 
-	if (DIAG && dn_v) begin
+	if (dn_v) begin
 		dseen <= dn_q[23:20];
 		sum   <= dn_q[19:0];
 		if (|dn_add) tsdone <= cycles;
 	end
+`endif
 
 	if (f_fall || !f_lvl) begin
 		en_lwx   <= 0;
 		xen_lwx  <= 0;
+`ifdef MISTER_LW_DIAG
 		test_lwx <= 0;
+`endif
 	end
 	else if (w_ctrl) begin
 		en_lwx   <= w_en;
 		xen_lwx  <= w_xen;
-		test_lwx <= DIAG ? wdata[9] : 1'b0;
+`ifdef MISTER_LW_DIAG
+		test_lwx <= wdata[9];
+`endif
 	end
 
 	// a full FIFO holds an ABORT (until the enable falls) and drops and counts any other store
@@ -346,7 +366,9 @@ always @(posedge clk) begin
 
 	// store path: never back-pressured
 	if (p_bad) begin
-		if (DIAG && ~&drops) drops <= drops + 16'd1;
+`ifdef MISTER_LW_DIAG
+		if (~&drops) drops <= drops + 16'd1;
+`endif
 		if (~&fdrops) fdrops <= fdrops + 12'd1;
 	end
 	if (fwe) begin
@@ -371,21 +393,21 @@ always @(posedge clk) begin
 	end
 	else if (wnext && p_ok) exp_w <= exp_w + 13'd1;
 
-	if (DIAG) begin
-		frames <= (clr ? 16'd0 : frames) + {12'd0, dn_add};   // a done arriving with CLR counts after it
-		if (clr) begin
-			drops   <= 0;
-			hw      <= 0;
-			{n_rej, n_skip, n_abort, n_rfill} <= 0;
-		end
-		else begin
-			if (used > hw) hw <= (used > 255) ? 8'd255 : used[7:0];
-			n_rej   <= sat8(n_rej,   ev[0]);
-			n_skip  <= sat8(n_skip,  ev[1]);
-			n_abort <= sat8(n_abort, ev[2]);
-			n_rfill <= sat8(n_rfill, ev[3]);
-		end
+`ifdef MISTER_LW_DIAG
+	frames <= (clr ? 16'd0 : frames) + {12'd0, dn_add};   // a done arriving with CLR counts after it
+	if (clr) begin
+		drops   <= 0;
+		hw      <= 0;
+		{n_rej, n_skip, n_abort, n_rfill} <= 0;
 	end
+	else begin
+		if (used > hw) hw <= (used > 255) ? 8'd255 : used[7:0];
+		n_rej   <= sat8(n_rej,   ev[0]);
+		n_skip  <= sat8(n_skip,  ev[1]);
+		n_abort <= sat8(n_abort, ev[2]);
+		n_rfill <= sat8(n_rfill, ev[3]);
+	end
+`endif
 end
 
 assign doorbell = |cause;
@@ -403,18 +425,29 @@ always @(*) begin
 	if (rreg) case (raddr[8:2])
 		7'h00: rdata = {29'd0, cause};                     // CAUSE: one event bit per slot
 		7'h01: rdata = {any, 13'd0, pick, pst};            // REQ
+`ifdef MISTER_LW_DIAG
 		7'h02: rdata = {21'd0, 1'b0, test_lwx, 1'b0, 5'd0, xen_lwx, en_lwx};   // CTRL
-		7'h03: rdata = {DIAG ? frames : 16'd0, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
+`else
+		7'h02: rdata = {21'd0, 3'd0, 5'd0, xen_lwx, en_lwx};   // CTRL
+`endif
+`ifdef MISTER_LW_DIAG
+		7'h03: rdata = {frames, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
 		                st_s[2:0]};                        // STATUS
+`else
+		7'h03: rdata = {16'd0, 5'd0, st_s[7], abort_pend, st_s[6], 1'b0, st_s[5:3], 1'b0,
+		                st_s[2:0]};                        // STATUS
+`endif
 		7'h04: rdata = {ok, bfail, 2'd0, fdrops, 3'd0, exp_w};   // ACCEPT: {ok, closed, 0, drops, 0, next_index}
 		7'h05: rdata = 32'h33434553;     // "SEC3"
-		7'h06: rdata = DIAG ? {8'd0, hw, drops} : 32'd0;
-		7'h07: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
-		7'h08: rdata = DIAG ? rings : 32'd0;
-		7'h09: rdata = DIAG ? tsreq : 32'd0;
-		7'h0A: rdata = DIAG ? tsdone : 32'd0;
-		7'h0B: rdata = DIAG ? cycles : 32'd0;
-		7'h0C: rdata = DIAG ? {12'd0, sum} : 32'd0;
+`ifdef MISTER_LW_DIAG
+		7'h06: rdata = {8'd0, hw, drops};
+		7'h07: rdata = {n_rej, n_skip, n_abort, n_rfill};
+		7'h08: rdata = rings;
+		7'h09: rdata = tsreq;
+		7'h0A: rdata = tsdone;
+		7'h0B: rdata = cycles;
+		7'h0C: rdata = {12'd0, sum};
+`endif
 		7'h40: rdata = {rq_off0,    ans[0], 14'd0, pst0};   // RSTAT_S[0]
 		7'h41: rdata = rq_lba;                              // LBA_S[0]
 		7'h48: rdata = {rq_xoff[0], ans[1], 14'd0, xst0};
@@ -427,12 +460,18 @@ end
 
 /////////////////////////////// clk_sys: feeder ///////////////////////////
 
+`ifdef MISTER_LW_DIAG
 wire [3:0] cs1;
 lw_sync #(.W(4)) ctl_sync (.clk(clk_sys), .d({xen_lwx, test_lwx, en_lwx}), .q(cs1));
-lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(sector_w_lwgray), .q(wg_s));
-
 wire       en_s = cs1[0], test_s = cs1[1];
 wire [1:0] xen_s = cs1[3:2];
+`else
+wire [2:0] cs1;
+lw_sync #(.W(3)) ctl_sync (.clk(clk_sys), .d({xen_lwx, en_lwx}), .q(cs1));
+wire       en_s = cs1[0], test_s = 1'b0;
+wire [1:0] xen_s = cs1[2:1];
+`endif
+lw_sync #(.W(AW + 1), .GRAY(1)) wg_sync (.clk(clk_sys), .d(sector_w_lwgray), .q(wg_s));
 
 wire       rempty = (sector_r_lwgray == wg_s);
 wire       fidle  = (fs == F_IDLE);
@@ -509,30 +548,30 @@ lw_xfer #(.W(42)) rec_x(.s_clk(clk_sys), .s_go(rc_go), .s_d(rec), .s_busy(rc_bus
 // rest, for the enable link: the level low, every EN and every mux on SPI, the feeder idle with its acks low and an
 // empty pipeline, the FIFO empty and its Gray source current, no record or done word in flight or owed
 wire       dn_idle;
-assign rest = !hen_s && cs1 == 4'd0 && !en_sys && x_en_sys == 2'd0 && fidle && !qv && !em &&
+assign rest = !hen_s && ~|cs1 && !en_sys && x_en_sys == 2'd0 && fidle && !qv && !em &&
               fack == 3'd0 && !o_wr && rempty && sector_r_lwgray == (rptr ^ (rptr >> 1)) && dn_idle &&
               offd == 3'd0 && dirty == 3'd0 && !rc_busy;
 
-// DIAG builds only: {done count, the last data frame's SUM} to clk_100m, launched whenever the count moved
+`ifdef MISTER_LW_DIAG
+// {done count, the last data frame's SUM} to clk_100m, launched whenever the count moved
 wire dn_go = dcnt != dsent;
-generate
-if (DIAG) begin : donex
-	wire [23:0] dn_word = {dcnt, dsum};
-	lw_xfer #(.W(24)) done_x(.s_clk(clk_sys), .s_go(dn_go), .s_d(dn_word), .s_busy(dn_busy),
-	                         .d_clk(clk), .d_q(dn_q), .d_v(dn_v));
-end
-else begin : nodone
-	assign dn_q = 24'd0, dn_v = 1'b0, dn_busy = 1'b1;
-end
-endgenerate
-assign dn_idle = !DIAG || (!dn_go && !dn_busy);
+wire [23:0] dn_word = {dcnt, dsum};
+lw_xfer #(.W(24)) done_x(.s_clk(clk_sys), .s_go(dn_go), .s_d(dn_word), .s_busy(dn_busy),
+                         .d_clk(clk), .d_q(dn_q), .d_v(dn_v));
+assign dn_idle = !dn_go && !dn_busy;
+`else
+assign dn_idle = 1'b1;
+`endif
 assign o_ack = fack[0];
 assign x_ack = fack[2:1];
 
 always @(posedge clk_sys) begin
-	sys_lwx <= {DIAG ? evt : 4'd0, c_commit, !fidle, fack, x_en_sys, en_sys};
-
-	if (DIAG && dn_go && !dn_busy) dsent <= dcnt;
+`ifdef MISTER_LW_DIAG
+	sys_lwx <= {evt, c_commit, !fidle, fack, x_en_sys, en_sys};
+	if (dn_go && !dn_busy) dsent <= dcnt;
+`else
+	sys_lwx <= {4'd0, c_commit, !fidle, fack, x_en_sys, en_sys};
+`endif
 
 	// the records: a change in a launch cycle keeps the slot dirty, its new state for the next record
 	offd  <= off_d;
@@ -553,7 +592,9 @@ always @(posedge clk_sys) begin
 	sector_r_lwgray <= rptr ^ (rptr >> 1);
 
 	o_wr <= 0;
+`ifdef MISTER_LW_DIAG
 	if (rj) evt[0] <= ~evt[0];
+`endif
 
 	// each slot's mux follows its EN only while the feeder is off that slot and its SPI ack is low, and moves to
 	// this block only while hps_io's commit mark reads 0
@@ -567,7 +608,9 @@ always @(posedge clk_sys) begin
 			if (fwack) begin
 				fack[fsel] <= 1'b0;
 				fs     <= F_IDLE;
-				if (DIAG) dcnt <= dcnt + 4'd1;
+`ifdef MISTER_LW_DIAG
+				dcnt <= dcnt + 4'd1;
+`endif
 			end
 			else fs <= F_STREAM;
 		end
@@ -591,7 +634,9 @@ always @(posedge clk_sys) begin
 		F_IDLE:
 			if (hen_s && qt == T_BEGIN) begin
 				fexp <= 0;
-				if (DIAG) fsum <= 0;
+`ifdef MISTER_LW_DIAG
+				fsum <= 0;
+`endif
 				if (test_s && !bwk) begin
 					tmode <= 1;
 					fsel  <= bs;
@@ -612,7 +657,9 @@ always @(posedge clk_sys) begin
 		F_STREAM:
 			if (qt != T_DATA) begin
 				fs     <= F_FILL;
+`ifdef MISTER_LW_DIAG
 				evt[2] <= ~evt[2];
+`endif
 			end
 			else begin                           // in order: the pop waited for the gap
 				o_wr  <= ~tmode;
@@ -622,7 +669,9 @@ always @(posedge clk_sys) begin
 				em    <= 1;
 				sn    <= 0;
 				gc    <= 4'd1;
-				if (DIAG) fsum <= fsum + qd[31:24] + qd[23:16] + qd[15:8] + qd[7:0];
+`ifdef MISTER_LW_DIAG
+				fsum <= fsum + qd[31:24] + qd[23:16] + qd[15:8] + qd[7:0];
+`endif
 			end
 
 		default: ;
@@ -646,10 +695,10 @@ always @(posedge clk_sys) begin
 				fexp   <= 0;
 				fack[fsel] <= 1'b0;
 				fs     <= F_IDLE;
-				if (DIAG) begin
-					dcnt <= dcnt + 4'd1;
-					dsum <= fsum;
-				end
+`ifdef MISTER_LW_DIAG
+				dcnt <= dcnt + 4'd1;
+				dsum <= fsum;
+`endif
 			end
 			else fexp <= fexp + 1'd1;
 		end
@@ -660,7 +709,9 @@ always @(posedge clk_sys) begin
 	// the primary consumer's reset zero-fills the primary's frame; a save slot's frame plays out whole
 	if (c_reset && fs == F_STREAM && fsel == 2'd0) begin
 		fs     <= F_FILL;
+`ifdef MISTER_LW_DIAG
 		evt[3] <= ~evt[3];
+`endif
 	end
 end
 
