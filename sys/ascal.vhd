@@ -320,6 +320,7 @@ ARCHITECTURE rtl OF ascal IS
 	CONSTANT OHRESH : natural := ohres_h(OHRES);
 	CONSTANT OHRESL : natural := ohres_l(OHRES);
 	CONSTANT OHRESM : natural := ohres_m(OHRES);
+	CONSTANT OHRESC : natural := 4096; -- Output counters, beyond the line buffers
 
 	----------------------------------------------------------
 	CONSTANT NB_BURST : natural :=ilog2(N_BURST);
@@ -505,7 +506,7 @@ ARCHITECTURE rtl OF ascal IS
 	ATTRIBUTE ramstyle OF o_linf1 : SIGNAL IS "no_rw_check";
 	ATTRIBUTE ramstyle OF o_linf2 : SIGNAL IS "no_rw_check";
 	ATTRIBUTE ramstyle OF o_linf3 : SIGNAL IS "no_rw_check";	
-	SIGNAL o_wadl,o_radl0,o_radl1,o_radl2,o_radl3 : natural RANGE 0 TO OHRESH-1;
+	SIGNAL o_wadl,o_radl0,o_radl1,o_radl2,o_radl3 : natural RANGE 0 TO OHRESC-1;
 	SIGNAL o_ldr0,o_ldr1,o_ldr2,o_ldr3,o_ldw : type_pix;
 	SIGNAL o_ler0,o_ler1,o_ler2,o_ler3       : type_pix;
 	SIGNAL o_lex0,o_lex1,o_lex2,o_lex3       : std_logic;
@@ -518,7 +519,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_hfrac : arr_frac(0 TO 9);
 	ATTRIBUTE ramstyle OF o_hfrac : SIGNAL IS "logic"; -- avoid blockram shift register
 
-	SIGNAL o_hacc,o_hacc_ini,o_hacc_next,o_vacc,o_vacc_next,o_vacc_ini : natural RANGE 0 TO 4*OHRESH-1;
+	SIGNAL o_hacc,o_hacc_ini,o_hacc_next,o_vacc,o_vacc_next,o_vacc_ini : natural RANGE 0 TO 4*OHRESC-1;
 	SIGNAL o_hsv,o_vsv,o_dev,o_pev,o_end : unsigned(0 TO 11);
 	SIGNAL o_hsp,o_vss : std_logic;
 	SIGNAL o_vcarrym,o_prim : boolean;
@@ -1867,7 +1868,7 @@ BEGIN
 		VARIABLE shift_v : unsigned(0 TO N_DW+15);
 		VARIABLE hpix_v : type_pix;
 		VARIABLE hcarry_v,vcarry_v : boolean;
-		VARIABLE dif_v : natural RANGE 0 TO 8*OHRESH-1;
+		VARIABLE dif_v : natural RANGE 0 TO 8*OHRESC-1;
 		VARIABLE off_v : natural RANGE 0 TO 15;
 	BEGIN
 		IF o_reset_na='0' THEN
@@ -2237,14 +2238,14 @@ BEGIN
 				WHEN sCOPY =>
 					-- dshi : Force shift first two or three pixels of each line
 					IF o_dshi=0 THEN
-						dif_v:=(o_hacc_next - 2*o_hsize + (8*OHRESH)) MOD (8*OHRESH);
-						IF dif_v>=4*OHRESH THEN
+						dif_v:=(o_hacc_next - 2*o_hsize + (8*OHRESC)) MOD (8*OHRESC);
+						IF dif_v>=4*OHRESC THEN
 							o_hacc<=o_hacc_next;
 							o_hacc_next<=o_hacc_next + 2*o_ihsize;
 							hcarry_v:=false;
 						ELSE
 							o_hacc<=dif_v;
-							o_hacc_next<=(dif_v + 2*o_ihsize + (4*OHRESH)) MOD (4*OHRESH);
+							o_hacc_next<=(dif_v + 2*o_ihsize + (4*OHRESC)) MOD (4*OHRESC);
 							hcarry_v:=true;
 						END IF;
 						o_dcpt_inc <= '1';
@@ -2633,7 +2634,7 @@ BEGIN
 			IF o_dcptv_clr(12)='1' THEN
 				o_dcptv(13) <= 0;
 			ELSIF o_dcptv_inc(12)='1' THEN
-				o_dcptv(13) <= (o_dcptv(13) + 1) MOD OHRESH;
+				o_dcptv(13) <= (o_dcptv(13) + 1) MOD OHRESC;
 			END IF;
 			o_dcptv(14)<=o_dcptv(13);
 
