@@ -230,8 +230,17 @@ end
 /////////////////////////  HPS I/O  /////////////////////////////////////
 
 // Without it the link front is the stock one.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_OSD
+`define LW_OSD_PORTS
+`endif
+`endif
+// hps_io stops a build that names both players (link_on_two_players).
 // The host binds one writer, so the two never meet in a legal session; a build with neither keeps the port out of
 // osd.v.
+`ifdef LW_OSD_PORTS
+`define OSD_WPORTS
+`endif
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
 `ifdef MISTER_LW
@@ -586,6 +595,12 @@ cyclonev_hps_interface_peripheral_uart uart
 // LW lines and OSDBUF stores (lw_sys_window.sv).
 // f2h_irq[7+k] = LW line ordinal k (GIC SPI 47+k), level-high: the entry whose LINE word is k (the LW directory).
 wire  [2:0] lw_lines;
+`ifdef LW_OSD_PORTS
+// The OSDBUF writer's bytes (lw_sys_window, on clk_sys) to every osd's osd_buffer.
+wire        lw_osd_we;
+wire [12:0] lw_osd_addr;
+wire  [7:0] lw_osd_byte;
+`endif
 wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
 `else
 wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
@@ -596,6 +611,14 @@ cyclonev_hps_interface_interrupts interrupts
 );
 // The osd write port's bytes (osd.v's lw_we/lw_addr/lw_byte): the OCRAM writer's when it writes, else the LW
 // writer's.
+`ifdef OSD_WPORTS
+wire        osd_we;
+wire [12:0] osd_addr;
+wire  [7:0] osd_byte;
+assign osd_we   = lw_osd_we;
+assign osd_addr = lw_osd_addr;
+assign osd_byte = lw_osd_byte;
+`endif
 
 ///////////////////////////  RESET  ///////////////////////////////////
 
@@ -1227,6 +1250,12 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
 		.de_out(hdmi_de_osd)
+`ifdef OSD_WPORTS
+		,
+		.lw_we(osd_we),
+		.lw_addr(osd_addr),
+		.lw_byte(osd_byte)
+`endif
 	);
 
 	wire hdmi_cs_osd;
@@ -1448,6 +1477,12 @@ osd vga_osd
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
 	.de_out(vga_de_osd)
+`ifdef OSD_WPORTS
+	,
+	.lw_we(osd_we),
+	.lw_addr(osd_addr),
+	.lw_byte(osd_byte)
+`endif
 );
 
 wire vga_cs_osd;
@@ -1819,7 +1854,11 @@ localparam        LW_EVT_EN    = 1;
 `else
 localparam        LW_EVT_EN    = 0;
 `endif
+`ifdef LW_OSD_PORTS
+localparam        LW_OSD_EN    = 1;
+`else
 localparam        LW_OSD_EN    = 0;
+`endif
 localparam        LW_SEC_EXT   = 0;
 localparam  [1:0] LW_MNT_EXT   = 2'd0;
 // The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
@@ -1886,11 +1925,23 @@ lw_sys_window #(
 	.clk_sys(clk_sys),
 	.hps_lw(lw_bus),
 	.io_wide(io_wide),
+`ifdef LW_OSD_PORTS
+`ifdef MISTER_DEBUG_NOHDMI
+	.osd_sel({io_osd_vga, 1'b0}),            // no HDMI osd
+`else
+	.osd_sel({io_osd_vga, io_osd_hdmi}),
+`endif
+	.osd_view(gp_outr[31]),
+	.osd_we(lw_osd_we),
+	.osd_addr(lw_osd_addr),
+	.osd_byte(lw_osd_byte),
+`else
 	.osd_sel(2'b00),
 	.osd_view(1'b0),
 	.osd_we(),
 	.osd_addr(),
 	.osd_byte(),
+`endif
 	.lane_busy(1'b0),
 	.lane_wait(1'b0),
 	.lane_dout(16'd0),
@@ -1916,6 +1967,12 @@ lw_sys_window #(
 	.xmnt_wr(),
 	.xmnt_lba()
 );
+`ifdef LW_OSD_PORTS
+`undef LW_OSD_PORTS
+`endif
+`endif
+`ifdef OSD_WPORTS
+`undef OSD_WPORTS
 `endif
 emu emu
 (

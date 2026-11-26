@@ -279,6 +279,9 @@ lw_tier_needs_MISTER_LW pad_guard();
 `ifdef MISTER_LW_EVT
 lw_tier_needs_MISTER_LW evt_guard();
 `endif
+`ifdef MISTER_LW_OSD
+lw_tier_needs_MISTER_LW osd_guard();
+`endif
 // The OCRAM SECTOR tier drives the LW sector bits of HPS_BUS, which only MISTER_LW builds.
 `endif
 // LW_OCRAM_CFG_HPS: the OCRAM floor's macros as localparams (ocram_cfg.vh), for its tiers' checks below.

@@ -15,6 +15,7 @@ An optional extension of `sys/` that gives the HPS a second, memory-mapped path 
 | `MISTER_LW` | off | the floor: the bridge, the window, its directory, the host enable and GPI bits 25, 24 and 22 |
 | `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the EVT block (`lw_evt.sv`): `hps_io`'s status, block-request, info and upload flags as causes, `hps_io`'s exports and its line |
+| `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
 
 **An unservable geometry stops the build** (in synthesis too), naming the undefined module `lw_sector_unservable_geometry`: a primary frame outside 1-4096 words, a save slot's outside 1-510, an LBA width outside 1-32, a gap outside 2-15, an `hps_io` slot above 15, two slots on one `hps_io` slot, or a save slot without an image base. Frames are one fixed length per slot; a slot whose requests vary in length or use `sd_blk_cnt` stays on SPI by not being declared.
 
@@ -27,6 +28,7 @@ A core pays only for what its `.qsf` names. Every figure is **ESTIMATED**: regis
 | L0 floor | `MISTER_LW` | the firewall, the decode, the directory and its header words, the host enable, GPI bits 25, 24 and 22, the 384-bit `HPS_BUS` | 150-200 ALMs, no block memory |
 | L1 pads | `MISTER_LW_PAD` | the PAD block, `hps_io`'s LW write arm | 150-185 ALMs, 1 M10K |
 | L2 events | `MISTER_LW_EVT` | the EVT block, `hps_io`'s event exports, line 2 | 85-120 ALMs, 132 of its registers being the status hold on `clk_sys`; no block memory |
+| L3 OSD | `MISTER_LW_OSD` | the OSDBUF block and its enable link, a second write source in each `osd` | 75-100 ALMs, 2 M10K |
 
 ## Discovery and safety
 
@@ -48,6 +50,7 @@ Offsets are from the window start; absolute LW offset = `0x40000` + offset. An a
 |---|---|---|---|
 | `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
 | `0x03000` | `0x43000` | `0x1000` | EVT (with `MISTER_LW_EVT`) |
+| `0x04000` | `0x44000` | `0x2000` | OSDBUF (with `MISTER_LW_OSD`) |
 | `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
 | `0x40000` | `0x80000` | `0x40000` | PAD (with `MISTER_LW_PAD`) |
 
@@ -137,6 +140,18 @@ One store **is** one SPI set-command: a full 32-bit word (all four byte enables)
 | `0x46` (`MISTER_LW_KBM`) | 0-5 | `{joystick_rt_analog_<index>, joystick_lt_analog_<index>}` ← `data[15:0]` |
 
 - **Every level is latest-wins:** each of the 24 levels (the six digital pads, both sticks and the paddle of each player) keeps one slot, so a burst of stores delivers the last and nothing absolute is ever dropped, even while `clk_sys` is stopped.
+
+### OSDBUF block (kind 3)
+
+Image stores written into `osd_buffer` itself, in each `osd` instance (HDMI and VGA), through one write port beside the SPI one.
+
+| offset | register | |
+|---|---|---|
+| `0x0000`-`0x13FF` | IMAGE | W: byte *a* = `osd_buffer[a]`, row `a[12:8]`, column `a[7:0]`: one byte = 8 vertical pixels. Rows 16-19 (the `MENU_CORE` header rows) only with `MENU_CORE`. Byte enables honoured; reads 0 |
+| `0x1800` | STATUS | R: `{7'd0, level[24:16], drops[15:0]}`: entries waiting (0-256); stores dropped on a full FIFO, free-running |
+| `0x1804` | ID | `0x3244534F` ("OSD2") |
+
+- **The FIFO:** each store takes one entry `{byte enables, word, data}` of a 256-entry FIFO; a store that finds it full is dropped and counted. The address rides each entry, so a dropped store loses only its own word and storing it again repairs it.
 
 ### EVT block (kind 4, "EVT2"): the core's flags
 

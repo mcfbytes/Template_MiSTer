@@ -49,8 +49,10 @@ MISTER_LW                | LW bridge framework: the lightweight-bridge window be
 MISTER_LW_PAD            | LW PAD block and hps_io's LW write arm; needs MISTER_LW
 MISTER_LW_KBM            | LW keys, mouse and triggers as PAD stores; needs MISTER_LW_PAD
 MISTER_LW_EVT            | LW EVT block (status, block-request, info, upload flags); needs MISTER_LW
+MISTER_LW_OSD            | LW OSDBUF block, a write port into each osd's osd_buffer; needs MISTER_LW
 MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)
 MISTER_DISABLE_SPI_KBM   | Removes the SPI key, mouse and trigger commands; needs MISTER_LW_KBM
+MISTER_DISABLE_SPI_OSD   | Removes osd.v's SPI row writes; needs MISTER_OCRAM_OSD or MISTER_LW_OSD
 
 An LW or OCRAM tier macro without its floor stops the build, naming a guard module (`ocram_tier_needs_MISTER_OCRAM`,
 `lw_blksz_differs_from_hps_io`, ...). Geometry, defaults and every guard: the macro tables in docs/LW_BRIDGE.md and

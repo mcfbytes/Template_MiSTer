@@ -25,7 +25,7 @@ module lw_sys_window #(
 	// The tiers (sys_top.v sets each from its macro): 1 = build the block and list it while its piece is present.
 	parameter        PAD_EN    = 0,          // L1, MISTER_LW_PAD
 	parameter        EVT_EN    = 0,          // L2, MISTER_LW_EVT
-	parameter        OSD_EN    = 0,
+	parameter        OSD_EN    = 0,          // MISTER_LW_OSD
 	// SECTOR block, as the core declares it (sys_top.v maps the MISTER_LW_SECTOR_* / MISTER_LW_SAVE* macros).
 	// The geometry is checked here (an unservable one stops the build, naming lw_sector_unservable_geometry).
 	parameter        SEC_EN    = 0,          // 1 = build the SECTOR block
@@ -397,6 +397,9 @@ function automatic [31:0] osd_kw(input [4:0] k);
 	case (k)
 		5'd0:    osd_kw = {OSD_ROWS, 16'd256};                 // {rows, bytes per row}
 		5'd1:    osd_kw = {16'd1 << OSD_AW, 16'd0};            // FIFO entries
+`ifdef MISTER_DISABLE_SPI_OSD
+		5'd2:    osd_kw = 32'd1;                               // bit 0: the link's row writes are not built (osd.v)
+`endif
 		default: osd_kw = 32'd0;
 	endcase
 endfunction
@@ -583,10 +586,24 @@ end
 endgenerate
 
 generate
+`ifdef MISTER_LW_OSD
+if (OSD_EN) begin : osd
+	lw_osd #(.ROWS(OSD_ROWS), .AW(OSD_AW)) osd
+	(
+		.clk(clk),
+		.raddr(rosd), .rdata(osd_rdata),
+		.waddr(wosd), .wsel(w_osd), .write(wr_osd), .wdata(lw_wdata), .be(lw_be), .hen(en_q),
+		.take(e_take), .f_open(osd_open), .f_owned(osd_owned), .f_idle(osd_idle),
+		.clk_sys(clk_sys), .sel(osd_sel), .view(osd_view),
+		.we(osd_we), .addr(osd_addr), .dbyte(osd_byte)
+	);
+end
+`else
 // OSD_EN without the tier macro: lw_osd.sv is empty, so the build stops here, naming the macro
 if (OSD_EN) begin : osd
 	lw_osd_needs_MISTER_LW_OSD guard();
 end
+`endif
 else begin : noosd
 	assign osd_rdata = 32'd0;
 	assign osd_open  = 1'b0;
