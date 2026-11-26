@@ -16,17 +16,17 @@
 #      implicit net or a port width that the off run of the same upstream variant does not, or if a check of
 #      top_tb fails (an LW net that reads z, an HPS_BUS bit driven other than as the bit map says, among them)
 #   Z  MISTER_LW alone (the floor): no block listed, the enable and the firewall whole
-#   1  LW_DIAG=1 (debug build: diagnostics compiled in), every tier but the lane
-#   0  LW_DIAG=0 (shipping build), every tier but the lane
-#   M  LW_DIAG=0 with MENU_CORE (the OSD's header rows only: stored over LW, drawn as over SPI)
-#   F  LW_DIAG=0 with the floor, PAD and EVT (the Template's own configuration): no SECTOR files, no muxes, no OSD
-#   G  LW_DIAG=0 with the SECTOR block at the default geometry (128-word primary, 256-word save slots, 32-bit LBAs)
-#   W  LW_DIAG=0 with hps_io at WIDE=0 (byte strobes), a 4096-word primary on hps_io slot 9, save slots of 510 and
+#   1  MISTER_LW_DIAG (debug build: diagnostics compiled in), every tier but the lane
+#   0  without MISTER_LW_DIAG (shipping build), every tier but the lane
+#   M  shipping, with MENU_CORE (the OSD's header rows only: stored over LW, drawn as over SPI)
+#   F  shipping, with the floor, PAD and EVT (the Template's own configuration): no SECTOR files, no muxes, no OSD
+#   G  shipping, with the SECTOR block at the default geometry (128-word primary, 256-word save slots, 32-bit LBAs)
+#   W  shipping, with hps_io at WIDE=0 (byte strobes), a 4096-word primary on hps_io slot 9, save slots of 510 and
 #      256 words with 32-bit LBAs on slots 12 and 15, strobes 5 cycles apart (LW_TB_GEOMW): T-SEC6
-#   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
-#   P  LW_DIAG=0 with MISTER_DISABLE_SPI_PAD: the link's eight pad opcodes (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D) are
+#   L  shipping, with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
+#   P  shipping, with MISTER_DISABLE_SPI_PAD: the link's eight pad opcodes (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D) are
 #      ignored and the LW PAD block's are taken; PAD K9 bit 0 reads 1 (the other arms prove the link's are taken)
-#   K  LW_DIAG=0 with every tier but the lane and MISTER_LW_KBM (keys, mouse and analog triggers as PAD stores), seed
+#   K  shipping, with every tier but the lane and MISTER_LW_KBM (keys, mouse and analog triggers as PAD stores), seed
 #      1: K1, PAD K0 0x040F003C, K2 0x40 and K8 0x00100018; every key frame (make, break, extended make and break,
 #      print screen made and broken, pause) on the link (0x05) and as a store at 0x05 index 0, ps2_key the same and
 #      toggled once each; two mouse packets on the link (0x04) and as stores (the extension at index 1 toggling
@@ -67,7 +67,7 @@
 #      plus 50 ppm. Each runs
 #      with the crossing cells' delay models (LW_TB_CDC, sys/lw_cdc.sv) under each seed of LW_TB_SEEDS (1 2 3)
 #   V  front-end lint: slang elaborates every LW module at its defaults (the vendor atom left unknown), and
-#      the window with every block, at both LW_DIAG values, with every tier macro; and the floor modules with
+#      the window with every block, with and without MISTER_LW_DIAG, with every tier macro; and the floor modules with
 #      MISTER_LW alone; and the OCRAM master, hps_ocram_rx with its download player and lw_link with
 #      MISTER_OCRAM_FIO and no LW macro. Any error fails (a name used before its declaration is one, which the Icarus arms
 #      accept). Without slang on PATH the arm reports SKIPPED and does not fail.
@@ -171,6 +171,8 @@ cd "$(dirname "$0")/.." || exit 2
 [ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
 ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C D P Q Y K U A I J}
 O=${LW_TB_OUT:-tb/out}
+# LW_TB_DIAG=1 builds every LW arm with MISTER_LW_DIAG (arm 1 always has it, arm 0 never)
+DG=${LW_TB_DIAG:+-DMISTER_LW_DIAG}
 # the OCRAM master's own layers, beside sys/hps_ocram_master.sv wherever it is built or linted
 OCMF="sys/ocram_axi.sv sys/ocram_arb.sv sys/ocram_evt_wr.sv"
 # the walker, the crossing and the sinks, beside sys/hps_ocram_rx.sv wherever it is built or linted
@@ -234,7 +236,7 @@ fi
 if [ -z "$LW_TB_INNER" ] && ! iverilog -V 2>/dev/null | grep -q 'version 1[2-9]'; then
   if [ -n "$LW_TB_IMAGE" ]; then
     sh tb/offstate.sh --extract   # arm S's upstream tree: the container has no git
-    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_SEEDS -e LW_TB_JOBS -e LW_TB_HRUN -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
+    exec docker run --rm -u "$(id -u):$(id -g)" -e LW_TB_OUT -e LW_TB_ARMS -e LW_TB_QUICK -e LW_TB_SEEDS -e LW_TB_DIAG -e LW_TB_JOBS -e LW_TB_HRUN -e LW_TB_INNER=1 -v "$PWD:/w" -w /w \
       "$LW_TB_IMAGE" sh tb/run.sh
   fi
   echo "tb/run.sh: needs Icarus Verilog >= 12 on PATH, or LW_TB_IMAGE set to an image with it" >&2; exit 2
@@ -254,27 +256,27 @@ LW0="lw_sync lw_arst lw_qstat lw_xfer lw_fence hps_lw_bridge lw_axi_regbus lw_sy
 LWD="-DMISTER_LW -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_LW_LANE -DMISTER_LW_OSD"
 lint() {
   : > "$1"; st=0
-  for d in 0 1; do
+  for d in "" -DMISTER_LW_DIAG; do
     T=""; for m in $LWM; do T="$T --top $m"; done
     T0=""; for m in $LW0; do T0="$T0 --top $m"; done
     for run in "$LWD|$T" "$LWD|--top lw_sys_window -G PAD_EN=1 -G EVT_EN=1 -G OSD_EN=1 -G SEC_EN=1 -G LANE_EN=1" \
                "-DMISTER_LW|$T0"; do
       m=${run%%|*}; t=${run#*|}
-      echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-      slang -q --ignore-unknown-modules -DLW_DIAG=$d $m $t $LWF >> "$1" 2>&1 || st=1
+      echo "slang $d $m $t" >> "$1"
+      slang -q --ignore-unknown-modules $d $m $t $LWF >> "$1" 2>&1 || st=1
     done
     # the download tier without the LW floor: lw_lane.sv gives lw_link alone
     m="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_FIO"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_fplay --top lw_link -G FIO_EN=1"
-    echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -I . -DLW_DIAG=$d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv \
+    echo "slang $d $m $t" >> "$1"
+    slang -q --ignore-unknown-modules -I . $d $m $t sys/lw_cdc.sv sys/lw_lane.sv sys/hps_ocram_master.sv \
       $OCMF sys/hps_ocram_rx.sv $OCRF >> "$1" 2>&1 || st=1
     # the mount slots beside the SECTOR tier: the master, the walker and feeder, the window's save-slot nets, the muxes
     m="-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_OCRAM_MOUNT0_SLOT=2 -DMISTER_OCRAM_MOUNT1_SLOT=3"
     t="--top hps_ocram_master --top hps_ocram_rx --top hps_ocram_sfeed --top lw_sys_window --top lw_save_mux"
     t="$t --top lw_blk_mux -G SEC_EN=1 -G MNT_EN=3 -G SEC_EXT=1 -G MNT_EXT=3"
-    echo "slang -DLW_DIAG=$d $m $t" >> "$1"
-    slang -q --ignore-unknown-modules -I . -DLW_DIAG=$d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv \
+    echo "slang $d $m $t" >> "$1"
+    slang -q --ignore-unknown-modules -I . $d $m $t $LWF sys/hps_ocram_master.sv $OCMF sys/hps_ocram_rx.sv \
       $OCRF >> "$1" 2>&1 || st=1
   done
   return $st
@@ -424,7 +426,7 @@ ocram() {
 # kbmk LOG: arm K, lw_tb.sv's full run with MISTER_LW_KBM (seed 1), then verilator on lw_pad.sv with it.
 kbmk() {
   : > "$1"; n=0; f=0
-  D="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_OSD -DMISTER_LW_SECTOR_SLOT=1"
+  D="-DMISTER_LW -DLW_TB_PROBES $DG -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_OSD -DMISTER_LW_SECTOR_SLOT=1"
   D="$D -DMISTER_LW_KBM"
   echo "-- lw_tb compiles (MISTER_LW_KBM)" >> "$1"
   if iverilog -g2012 $D -I sys -o "$O/kbmK.vvp" $TBF > "$O/kbmK.err" 2>&1; then
@@ -453,7 +455,7 @@ kbmk() {
 rmy() {
   : > "$1"; n=0; f=0
   # lw_tb.sv's short tier run, the LW OSD tier with MISTER_DISABLE_SPI_OSD
-  YL="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_OSD"
+  YL="-DMISTER_LW -DLW_TB_PROBES $DG -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_OSD"
   YL="$YL -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_DISABLE_SPI_OSD"
   echo "-- lw_tb compiles (the tier run with MISTER_DISABLE_SPI_OSD)" >> "$1"
   if iverilog -g2012 $YL -I sys -o "$O/rmY_lw.vvp" $TBF > "$O/rmY_lw.err" 2>&1; then
@@ -465,7 +467,7 @@ rmy() {
     f=$((f + 1)); echo "FAIL lw_tb: does not compile" >> "$1"; head -20 "$O/rmY_lw.err" | sed 's/^/   /' >> "$1"
   fi
   # lw_tb.sv's short tier run, the key tier with MISTER_DISABLE_SPI_KBM
-  YK="-DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_KBM"
+  YK="-DMISTER_LW -DLW_TB_PROBES $DG -DLW_TB_TIER -DMISTER_LW_PAD -DMISTER_LW_EVT -DMISTER_LW_KBM"
   YK="$YK -DMISTER_DISABLE_SPI_KBM"
   echo "-- lw_tb compiles (the tier run with MISTER_DISABLE_SPI_KBM)" >> "$1"
   if iverilog -g2012 $YK -I sys -o "$O/rmY_kbm.vvp" $TBF > "$O/rmY_kbm.err" 2>&1; then
@@ -1144,7 +1146,7 @@ sets() {
   fi
   cat > "$Q/one.sh" <<EOS
 n=\$1; shift
-if iverilog -g2012 -DMISTER_LW -DLW_TB_PROBES -DLW_DIAG=0 -DLW_TB_TIER \$* -I sys -o "$Q/\$n.vvp" $TBF > "$Q/\$n.err" 2>&1
+if iverilog -g2012 -DMISTER_LW -DLW_TB_PROBES $DG -DLW_TB_TIER \$* -I sys -o "$Q/\$n.vvp" $TBF > "$Q/\$n.err" 2>&1
 then vvp -n "$Q/\$n.vvp" > "$Q/\$n.log" 2>&1
 else { echo "-- \$n: compile"; echo "FAIL \$n: does not compile"; head -20 "$Q/\$n.err"; } > "$Q/\$n.log"
 fi
@@ -1345,17 +1347,18 @@ for g in $ARMS; do
     continue
   fi
   B="-DMISTER_LW -DLW_TB_PROBES"; S="-DMISTER_LW_SECTOR_SLOT=1"; P="-DMISTER_LW_PAD -DMISTER_LW_EVT"
-  A="$P -DMISTER_LW_OSD $S"; L="$A -DLW_DIAG=0 -DMISTER_LW_LANE"
+  A="$P -DMISTER_LW_OSD $S"; L="$A $DG -DMISTER_LW_LANE"
   C="$L -DLW_TB_CDC"; SEEDS=1
   case $g in
-    Z) D="$B -DLW_DIAG=0";;
-    1|0) D="$B $A -DLW_DIAG=$g";;
-    M) D="$B $A -DLW_DIAG=0 -DMENU_CORE";;
-    F) D="$B $P -DLW_DIAG=0";;
-    G) D="$B $A -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
-    W) D="$B $A -DLW_DIAG=0 -DLW_TB_GEOMW";;
+    Z) D="$B $DG";;
+    1) D="$B $A -DMISTER_LW_DIAG";;
+    0) D="$B $A";;
+    M) D="$B $A $DG -DMENU_CORE";;
+    F) D="$B $P $DG";;
+    G) D="$B $A $DG -DLW_TB_DEFGEOM";;
+    W) D="$B $A $DG -DLW_TB_GEOMW";;
     L) D="$B $L";;
-    P) D="$B $A -DLW_DIAG=0 -DMISTER_DISABLE_SPI_PAD";;
+    P) D="$B $A $DG -DMISTER_DISABLE_SPI_PAD";;
     R12) D="$B $C -DLW_TB_SYS_HP_PS=41667";;
     R20) D="$B $C -DLW_TB_SYS_HP_PS=25000";;
     R21) D="$B $C -DLW_TB_SYS_HP_PS=23281";;

@@ -15,7 +15,7 @@
 //  with this program.  If not, see <https://www.gnu.org/licenses/>.
 //============================================================================
 //
-// lw_sector (the LW build's primary slot, DIAG 0) and hps_ocram_sfeed (hps_ocram_rx's SECTOR feeder) serve one
+// lw_sector (the LW build's primary slot, shipping) and hps_ocram_sfeed (hps_ocram_rx's SECTOR feeder) serve one
 // consumer model each, side by side, and their {ack, wr, adr, dat} are compared on every clk_sys edge from the
 // first ack rise of a frame to 8 cycles after the later ack's fall. Both feeders see the same enable and bind
 // levels (lw_sector's own synchronised hen_s and en_s), the same consumer request, reset and io_wide.
@@ -92,7 +92,7 @@ reg         x_rd0 = 0;              // the save / mount slot's read request and 
 reg  [31:0] x_lba0 = 0;
 localparam integer MFR = 128;       // its block: blk_cnt 0 at BLKSZ 2
 
-lw_sector #(.SLOT(1), .FRAME(FR[12:0]), .BLKSZ(3'd2), .DIAG(0), .GAP(GAP), .XFRAME0(MFR[12:0]),
+lw_sector #(.SLOT(1), .FRAME(FR[12:0]), .BLKSZ(3'd2), .GAP(GAP), .XFRAME0(MFR[12:0]),
             .XLB0(6'd32)) u_sec
 (
 	.clk(clk), .raddr(15'd0), .rsel(1'b0), .rdata(rdata),

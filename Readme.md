@@ -53,7 +53,7 @@ MISTER_LW_KBM            | LW keys, mouse and triggers as PAD stores; needs MIST
 MISTER_LW_EVT            | LW EVT block (status, block-request, info, upload flags); needs MISTER_LW
 MISTER_LW_OSD            | LW OSDBUF block, a write port into each osd's osd_buffer; needs MISTER_LW
 MISTER_LW_LANE           | LW frame lane with reply capture; needs MISTER_LW
-LW_DIAG=0/1              | LW window diagnostics: 0 or absent shipping, 1 debug; needs a value (bare = error)
+MISTER_LW_DIAG           | LW window diagnostics (debug builds only); needs MISTER_LW
 MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot; with _FRAME, _GAP, MISTER_LW_BLKSZ (= hps_io's BLKSZ)
 MISTER_LW_SAVE0_SLOT     | LW save slot 0 (likewise SAVE1); needs _WSRC, _EXTENT, the SECTOR slot
 MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)

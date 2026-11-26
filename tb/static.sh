@@ -73,7 +73,7 @@
 #      rule or step id, a section sign) and no IPv4 address. Its drain rules end on a level a drain brings to 0:
 #      the lane's on RSTAT's replies field, never on RSTAT whole (its reply_drops field is never cleared). Its
 #      enable-fall contract promises no queued frame, committed or not: only a frame already playing completes.
-# Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
+# Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and MISTER_LW_DIAG:
 #  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
 #      get_keepers or get_registers name pattern (the Gray loop's expanded per bus, its sources get_registers:
 #      17.0.2 ignores the keeper form there) matches a register of an LW module, as a keeper name <hierarchy>|<register>; the collection lw_x is exactly the registers that feed an lw_sync, and
@@ -143,7 +143,7 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                                    'MISTER_OCRAM_SECTOR_GAP=2', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_OCRAM_MOUNT0_SLOT=1',
                                    'MISTER_OCRAM_MOUNT1_SLOT=2', 'MISTER_OCRAM_MOUNT_FRAME=256', 'MISTER_OCRAM_FIO',
                                    'MISTER_DISABLE_SPI_PAD', 'MISTER_DISABLE_SPI_OSD', 'MISTER_DISABLE_SPI_BLK',
-                                   'MISTER_DISABLE_SPI_BLK_UNUSED=1', 'LW_DIAG=0']),
+                                   'MISTER_DISABLE_SPI_BLK_UNUSED=1']),
                # the events tier, the UIO player and the capture lane through sys_top: its EVT take and lane nets
                ('ocram-evt-uio-lane-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
                                          'MISTER_OCRAM_FIO', 'MISTER_OCRAM_UIO', 'MISTER_OCRAM_LANE',
@@ -479,7 +479,7 @@ for name, defs in CONFIGS:
 
 # ---- The crossing structure: every crossing register in sys/lw_cdc.sv's cells, every source named ----
 LWALL = ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE', 'MISTER_LW_OSD',
-         'LW_DIAG=1', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1',
+         'MISTER_LW_DIAG', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1',
          'MISTER_OCRAM_FIO']
 CDC = 'sys/lw_cdc.sv'
 CELLREG = ('lws0_', 'lws1_', 'lwa0_', 'lwa1_', 'lwq_', 'lwsrc_', 'lwtg_')
