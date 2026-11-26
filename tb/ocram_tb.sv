@@ -3526,16 +3526,37 @@ reg  [15:0] mbuf1 [0:2047];
 reg  [15:0] mbuf2 [0:2047];
 reg   [1:0] mack_d = 2'd0;
 integer     mc_strobes1 = 0, mc_strobes2 = 0, mc_frames1 = 0, mc_frames2 = 0;
+// The core's view of each slot's ack and strobe. With MISTER_LW (OCRAM_TB_SMUX) the core sits behind lw_save_mux,
+// as a core does; without it, on the feeder's nets directly.
+wire  [1:0] cack, cwr;
+`ifdef MISTER_LW
+`define OCRAM_TB_SMUX
+wire [383:0] smb;
+assign smb[36] = clk_sys;
+assign smb[97] = x_wr;
+assign smb[113:98] = x_dat;
+assign smb[127:114] = x_adr;
+assign smb[131:128] = {xm_ack[1], xm_en[1], xm_ack[0], xm_en[0]};
+lw_save_mux #(.SAVE(0)) u_smux0 (.HPS_BUS(smb), .core_rd(mc_rd[0]), .core_wr(mc_wr[0]), .core_lba(mc_lba1),
+	.core_din(mc_din1), .core_ack(cack[0]), .core_write(cwr[0]), .core_addr(), .core_data(), .hps_rd(), .hps_wr(),
+	.hps_ack(1'b0), .hps_write(1'b0), .hps_addr(14'd0), .hps_data(16'd0));
+lw_save_mux #(.SAVE(1)) u_smux1 (.HPS_BUS(smb), .core_rd(mc_rd[1]), .core_wr(mc_wr[1]), .core_lba(mc_lba2),
+	.core_din(mc_din2), .core_ack(cack[1]), .core_write(cwr[1]), .core_addr(), .core_data(), .hps_rd(), .hps_wr(),
+	.hps_ack(1'b0), .hps_write(1'b0), .hps_addr(14'd0), .hps_data(16'd0));
+`else
+assign cack = xm_ack;
+assign cwr  = {x_wr & xm_ack[1], x_wr & xm_ack[0]};
+`endif
 always @(posedge clk_sys) begin
-	mack_d <= xm_ack;
-	if (xm_ack[0] && !mack_d[0]) begin mc_rd[0] <= 1'b0; mc_wr[0] <= 1'b0; end
-	if (xm_ack[1] && !mack_d[1]) begin mc_rd[1] <= 1'b0; mc_wr[1] <= 1'b0; end
-	if (x_wr && xm_ack[0]) begin mbuf1[x_adr[10:0]] <= x_dat; mc_strobes1 = mc_strobes1 + 1; end
-	if (x_wr && xm_ack[1]) begin mbuf2[x_adr[10:0]] <= x_dat; mc_strobes2 = mc_strobes2 + 1; end
+	mack_d <= cack;
+	if (cack[0] && !mack_d[0]) begin mc_rd[0] <= 1'b0; mc_wr[0] <= 1'b0; end
+	if (cack[1] && !mack_d[1]) begin mc_rd[1] <= 1'b0; mc_wr[1] <= 1'b0; end
+	if (cwr[0]) begin mbuf1[x_adr[10:0]] <= x_dat; mc_strobes1 = mc_strobes1 + 1; end
+	if (cwr[1]) begin mbuf2[x_adr[10:0]] <= x_dat; mc_strobes2 = mc_strobes2 + 1; end
 	mc_din1 <= mbuf1[x_adr[10:0]];
 	mc_din2 <= mbuf2[x_adr[10:0]];
-	if (!xm_ack[0] && mack_d[0]) mc_frames1 = mc_frames1 + 1;
-	if (!xm_ack[1] && mack_d[1]) mc_frames2 = mc_frames2 + 1;
+	if (!cack[0] && mack_d[0]) mc_frames1 = mc_frames1 + 1;
+	if (!cack[1] && mack_d[1]) mc_frames2 = mc_frames2 + 1;
 end
 function integer mwords(input integer cnt);
 	mwords = (cnt + 1) << (MBLKSZ + 5);
@@ -3871,6 +3892,65 @@ task mnt_case4;
 			mc_wait(MK2, h0, 2000, ok);
 			check("its ack falls", ok, 1);
 		end
+	end
+endtask
+
+// M6. E48: the core resets mid-block and asks again (a read of LBA 0, then a WRITE) while the old block's ack is
+// still up. Behind lw_save_mux it sees neither that ack nor its strobes; the new request crosses after the ack
+// falls and is served by its own LBA. Without the mux (no MISTER_LW) the case is skipped.
+task mnt_case6;
+	integer n, n0, f0, f1, s0, wr0, k, ph;
+	reg [31:0] lba;
+	begin
+`ifdef OCRAM_TB_SMUX
+		k = MK; n = mwords(0);
+		for (ph = 0; ph < 2; ph = ph + 1) begin
+			$display("-- mount M6: a request raised again under a stale ack (%s) waits for the ack's fall",
+			         ph ? "a WRITE" : "a read of LBA 0");
+			mnt_session(16'h0D60 + ph[15:0], 2'b11);
+			mc_clear(k);
+			lba = 32'd90 + ph;
+			n0 = mrq_n; f0 = mc_frames(k);
+			mc_ask(k, 0, lba, 0);
+			mrq_wait(n0, 3000, ok);
+			check("the old block's REQUEST is posted", ok && mrq_lba[n0] == lba, 1);
+			mnt_room(n + 4, 3000, ok);
+			mnt_frame(k, 0, lba, 2);
+			mnt_publish;
+			ok = 0;
+			while (!ok) begin @(posedge clk_sys); if (xm_ack[k - 1]) ok = 1; end
+			// the core's reset: its request falls for one clk_sys edge, then the restart raises another
+			@(negedge clk_sys); mc_rd[k - 1] = 1'b0;
+			@(negedge clk_sys);
+			if (k == 1) mc_lba1 = ph ? 32'd7 : 32'd0; else mc_lba2 = ph ? 32'd7 : 32'd0;
+			if (ph) begin mc_pattern(k); mc_wr[k - 1] = 1'b1; end else mc_rd[k - 1] = 1'b1;
+			s0 = mc_strobes(k); wr0 = wr_n; n0 = mrq_n; ok = 1;
+			while (xm_ack[k - 1]) begin @(posedge clk_sys); if (cack[k - 1]) ok = 0; end
+			check("the core sees no ack while the old block plays", ok, 1);
+			check("and no strobe", mc_strobes(k) - s0, 0);
+			f1 = mc_frames(k);
+			check("the old block is the one frame the core took before its reset", f1 - f0, 1);
+			if (!ph) begin
+				mrq_wait(n0, 3000, ok);
+				check("after the fall the new read crosses: a REQUEST for LBA 0", ok && mrq_lba[n0] == 32'd0, 1);
+				mnt_room(n + 4, 3000, ok);
+				mnt_frame(k, 0, 32'd0, 3);
+				mnt_publish;
+				mc_wait(k, f1, 20000, ok);
+				check("block 0 plays", ok, 1);
+				mc_check("the core holds block 0, not the old block", k, 32'd0, 3, n, n);
+			end else begin
+				wr_wait(wr0, 5000, ok);
+				check("after the fall the WRITE crosses, LBA 7", ok && wr_lba == 32'd7, 1);
+				bad = 0;
+				for (n0 = 0; n0 < n; n0 = n0 + 1) if (wr_w[n0] !== mc_word(k, n0)) bad = bad + 1;
+				check("its words are the buffer's", bad, 0);
+				mc_wait(k, f1, 2000, ok);
+				check("then its ack falls", ok, 1);
+			end
+			check("two frames in all", mc_frames(k) - f0, 2);
+		end
+`endif
 	end
 endtask
 
@@ -5016,6 +5096,7 @@ initial begin
 	mnt_case3;
 	mnt_case4;
 	mnt_case5;
+	mnt_case6;
 `endif
 `ifdef MISTER_OCRAM_FIO
 	fio_case1;
