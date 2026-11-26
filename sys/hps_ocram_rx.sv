@@ -22,6 +22,9 @@
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 `define LW_OCRAM_RX_BUILT
 `endif
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_RX_BUILT
+`endif
 `ifdef LW_OCRAM_RX_BUILT
 `default_nettype none
 
@@ -79,12 +82,13 @@ module hps_ocram_rx #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_E
 	input  wire        m_wtake,      // one cycle: the master takes m_wd
 	input  wire        m_pub,        // one cycle: the WRITE's head store is done
 	/* verilator lint_on UNUSEDSIGNAL */
+	// the capture lane's REPLY (MISTER_OCRAM_LANE), for the master's EVT writer
 	output wire        p_post,       // a capture frame is held, with room, for its REPLY
 	output wire  [7:0] p_arg,        // its arg
 	output wire [10:0] p_n,          // its len
 	output wire        p_wv,         // a reply word is in p_wd
 	output wire [31:0] p_wd,
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_LANE the master's answers are not read
 	input  wire [15:0] e_free,       // the EVT ring's free words
 	input  wire        p_start,      // one cycle: the REPLY's header is written
 	input  wire        p_wtake,      // one cycle: the master takes p_wd
@@ -187,7 +191,7 @@ wire  [2:0] bind_s;
 wire        o_go, o_rest, f_go, f_rest, p_go, p_rest, rc_go, rc_busy, mrc_go, mrc_busy, q_rest;
 wire  [1:0] f_code;
 wire [31:0] f_dat;
-/* verilator lint_off UNUSEDSIGNAL */
+/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_LANE the replies are not read
 wire [31:0] p_dat;
 /* verilator lint_on UNUSEDSIGNAL */
 wire [32:0] rc_d;
@@ -251,8 +255,28 @@ else begin : nosec
 end
 endgenerate
 
+// the download player, with MISTER_OCRAM_FIO (its sequencer is lw_lane.sv's lw_link_seq, built with that macro)
+`ifdef MISTER_OCRAM_FIO
+generate
+if (FIO_EN != 0) begin : fio
+	hps_ocram_fplay #(.GAP(FIO_GAP[2:0])) player
+	(
+		.clk_sys(clk_sys), .hen_s(hen_s),
+		.w_v(f_v), .w_head(f_head), .w_d(w_d),
+		.a_go(p_go), .a_d(p_dat), .rest(p_rest), .l_dout(l_dout),
+		.l_busy(l_busy), .l_wait(l_wait),
+		.own(l_own), .hold(l_hold), .sel(l_sel), .strobe(l_strobe), .din(l_din)
+	);
+end
+else begin : nofio
+	assign p_go = 1'b0, p_rest = 1'b1, p_dat = 32'd0;
+	assign l_own = 1'b0, l_hold = 1'b0, l_sel = 4'd0, l_strobe = 1'b0, l_din = 16'd0;
+end
+endgenerate
+`else
 assign p_go = 1'b0, p_rest = 1'b1, p_dat = 32'd0;
 assign l_own = 1'b0, l_hold = 1'b0, l_sel = 4'd0, l_strobe = 1'b0, l_din = 16'd0;
+`endif
 
 // the block slots' request records
 ocram_blk_req #(.SEC_EN(SEC_EN), .MNT_EN(MNT_EN), .MFRAME(MFRAME), .BLKSZ(BLKSZ)) breq
@@ -508,6 +532,120 @@ end
 
 endmodule
 /* verilator lint_on DECLFILENAME */
+
+// LW_OCRAM_FPLAY_BUILT: lw_link_seq is built, by MISTER_OCRAM_FIO or by the LW lane (the trace bench's pairing)
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_FPLAY_BUILT
+`endif
+`ifdef MISTER_LW
+`ifdef MISTER_LW_LANE
+`ifndef LW_OCRAM_FPLAY_BUILT
+`define LW_OCRAM_FPLAY_BUILT
+`endif
+`endif
+`endif
+`ifdef LW_OCRAM_FPLAY_BUILT
+//============================================================================
+// hps_ocram_fplay -- the download player of hps_ocram_rx, on clk_sys (MISTER_OCRAM_FIO) lw_lane's player with the
+// forward crossing's capture register as its one-entry queue: w_v marks an entry (an LFRAME header, or a ring word
+// of two link words, low half first) held in w_d until it is answered.
+
+/* verilator lint_off DECLFILENAME */   // the player shares hps_ocram_rx's file, as the feeder does
+module hps_ocram_fplay #(parameter [2:0] GAP = 3'd4)   // 4..7
+(
+	input  wire        clk_sys,
+	input  wire        hen_s,        // the session's enable level
+	input  wire        w_v,          // one cycle: an entry is in w_d
+	input  wire        w_head,       // it is an LFRAME header
+	input  wire [31:0] w_d,          // held until the entry is answered
+	output reg         a_go = 1'b0,  // one cycle: the entry's answer
+	output reg  [31:0] a_d = 32'd0,  // with a ring word's answer, its two link replies, low half first (LANE)
+	output wire        rest,         // idle: no frame, no entry, idle outputs
+
+	/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_LANE no reply is sampled
+	input  wire [15:0] l_dout,       // the link's reply word, sampled at each link word's acknowledge
+	/* verilator lint_on UNUSEDSIGNAL */
+	input  wire        l_busy,       // any of the link's own selects, or its ID view
+	input  wire        l_wait,       // io_wait | vs_wait: the term that withholds the link's ack
+	output wire        own,          // the player drives the link nets
+	output wire        hold,         // own, plus one cycle: the link's ack path stays frozen
+	output wire  [3:0] sel,          // {osd_vga, osd_hdmi, fpga, uio}
+	output wire        strobe,
+	output wire [15:0] din           // the link word in hand: held from the cycle before its strobe
+);
+
+reg   [1:0] ml    = 2'd0;              // cycles with the enable low and no word in hand, saturating at 2
+reg         fpend = 1'b0;              // a header is taken and its frame not started
+reg   [1:0] fsel  = 2'd0;
+reg  [14:0] n     = 15'd0;             // the frame's link words still to strobe, the one in hand included
+reg         have  = 1'b0;              // a ring word is in w_d
+reg         half  = 1'b0;              // the link word in hand is the ring word's high half
+
+wire        wpres = have || (w_v && !w_head);
+wire        s_idle, s_beg, s_stb, s_ack, s_rel;
+
+// the link words: a frame begins with its first word in hand and ends after its count, or at a word that does not
+// come with the enable low for two cycles
+/* verilator lint_off PINCONNECTEMPTY */   // the player reads no nxt
+lw_link_seq #(.GAP(GAP)) seq
+(
+	.clk_sys(clk_sys), .l_busy(l_busy), .l_wait(l_wait),
+	.start(fpend && wpres && hen_s), .fsel(fsel), .more(n != 15'd0 && wpres), .stop(n == 15'd0 || ml == 2'd2),
+	.own(own), .hold(hold), .sel(sel), .strobe(strobe),
+	.idle(s_idle), .beg(s_beg), .stb(s_stb), .ack(s_ack), .nxt(), .rel(s_rel)
+);
+/* verilator lint_on PINCONNECTEMPTY */
+
+assign din  = half ? w_d[31:16] : w_d[15:0];
+assign rest = s_idle && !own && !hold && !strobe && sel == 4'd0 && !fpend && !have && !a_go;
+
+always @(posedge clk_sys) begin
+	a_go  <= 1'b0;
+	ml    <= (hen_s || wpres) ? 2'd0 : (ml == 2'd2) ? 2'd2 : ml + 2'd1;
+
+	// an entry: a header opens a frame (with the enable up) and is answered at once; a word waits in w_d
+	if (w_v && w_head) begin
+		a_go  <= 1'b1;
+		fpend <= hen_s;
+		fsel  <= w_d[17:16];
+		n     <= {w_d[13:0], 1'b0} - {14'd0, w_d[23]};
+	end
+	else if (w_v) have <= 1'b1;
+
+	// the sequencer's states, after the entry: a state's write wins
+	if (s_beg) begin
+		half  <= 1'b0;
+		fpend <= 1'b0;
+	end
+	else if (s_idle) begin
+		if (fpend && !hen_s) fpend <= 1'b0;          // the session ended before the frame began
+		if (have && !fpend) begin                    // a word with no frame: answered unplayed
+			have <= 1'b0;
+			a_go <= 1'b1;
+		end
+	end
+	if (s_stb) n <= n - 15'd1;
+	if (s_ack) begin
+`ifdef MISTER_OCRAM_LANE
+		// the reply as the HPS reads it at this word's acknowledge: a low half alone, or both halves
+		a_d <= half ? {l_dout, a_d[15:0]} : {16'd0, l_dout};
+`endif
+		if (n != 15'd0) begin
+			// the ring word's second half is acknowledged: answer it; the frame's last waits for its end
+			if (half) begin have <= 1'b0; a_go <= 1'b1; end
+			half <= ~half;
+		end
+	end
+	if (s_rel) begin
+		half <= 1'b0;
+		if (have) begin have <= 1'b0; a_go <= 1'b1; end
+	end
+end
+
+endmodule
+/* verilator lint_on DECLFILENAME */
+`undef LW_OCRAM_FPLAY_BUILT
+`endif
 
 `default_nettype wire
 `endif

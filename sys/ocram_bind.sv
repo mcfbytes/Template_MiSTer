@@ -22,6 +22,9 @@
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 `define LW_OCRAM_BIND_BUILT
 `endif
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_BIND_BUILT
+`endif
 `ifdef LW_OCRAM_BIND_BUILT
 `default_nettype none
 

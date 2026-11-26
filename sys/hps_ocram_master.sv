@@ -30,6 +30,7 @@ module hps_ocram_master #(
 	parameter [31:0] SEC_FRAME = 32'd128,
 	parameter [31:0] SEC_GAP   = 32'd2,
 	parameter  [2:0] SEC_BLKSZ = 3'd2,
+	// The download tier's declaration (MISTER_OCRAM_FIO_RING, MISTER_OCRAM_FIO_GAP), for C_RING[1] and C_K[9]
 	parameter [31:0] FIO_RING  = 32'd10,
 	parameter [31:0] FIO_GAP   = 32'd4,
 	// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: ocram_cfg.vh's OCRAM_FIO_SELS, also the walker's
@@ -93,19 +94,21 @@ module hps_ocram_master #(
 	output wire        m_start,      // one cycle: that record's header store is launched
 	output wire        m_wtake,      // one cycle: a WRITE word's store is launched
 	output wire        m_pub,        // one cycle: the WRITE's head store is done
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // the download tier's (MISTER_OCRAM_FIO)
 	input  wire [15:0] f_tail,       // the download ring's tail, as last stored in C_IDX[1]
 	input  wire        c0_ffault,    // one cycle: the download ring stopped on a fault
 	input  wire        c0_fmid,      // level: a download record is part-consumed
 	/* verilator lint_on UNUSEDSIGNAL */
 	output reg         mark_line,    // the download ring's mark line, ordinal 5 (f2h_irq[12]), a clk register
+	// the events tier's port (MISTER_OCRAM_EVT, hps_ocram_evt below): ask for the next offer, take it
 	output wire        e_ask,        // one cycle: the master asks for hps_io's next offer
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_EVT the offers are not read
 	input  wire        e_v,          // one cycle: an offer is in e_d
 	input  wire [41:0] e_d,          // {kind[1:0], arg[7:0], data[31:0]}, held until the next
 	/* verilator lint_on UNUSEDSIGNAL */
+	// the capture lane's REPLY (MISTER_OCRAM_LANE): hps_ocram_rx's capture frame and its replies
 	output wire [15:0] e_free,       // the EVT ring's free words
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_LANE the capture lane is not read
 	input  wire        p_post,       // a capture frame is held for its REPLY record
 	input  wire  [7:0] p_arg,        // the frame's arg
 	input  wire [10:0] p_n,          // its len: the REPLY's payload words
@@ -268,6 +271,11 @@ generate
 endgenerate
 
 // The capture lane's frames are the download tier's.
+`ifdef MISTER_OCRAM_LANE
+`ifndef MISTER_OCRAM_FIO
+ocram_lane_needs_MISTER_OCRAM_FIO lane_fio_guard();
+`endif
+`endif
 
 assign present = 1'b1;
 
@@ -345,6 +353,10 @@ reg         stopped_q = 1'b0;          // the EVT ring stopped on a fault this s
 reg         prev_mid_q = 1'b0;         // the EVT record of the session before this one was part-written
 reg         osd_bind_q = 1'b0;         // H_BIND bit 11 read: the OSD bind asked for this session
 reg  [3:0]  bind_q = 4'd0;             // the C_BIND bits {11, 2:0} last stored
+`ifdef MISTER_OCRAM_EVT
+reg         evt_bind_q = 1'b0;         // H_BIND bit 8 read: the events bind asked for this session
+reg         evt_bound_q = 1'b0;        // C_BIND bit 8 as last stored
+`endif
 reg  [2:0]  sec_ask_q = 3'd0;          // H_SECTOR bits 2:0 read this session (those this build serves)
 reg         bind_pend = 1'b0;          // a C_BIND store is owed
 reg         osd_stopped_q = 1'b0;      // the OSD ring stopped on a fault this session
@@ -444,7 +456,9 @@ function hj_has(input [4:0] k);
 `ifndef MISTER_OCRAM_SECTOR_SLOT
 		if (k >= 5'd11 && k <= 5'd15) hj_has = 1'b0;
 `endif
+`ifndef MISTER_OCRAM_FIO
 		if (k >= 5'd16 && k <= 5'd18) hj_has = 1'b0;
+`endif
 `ifndef MISTER_OCRAM_MOUNT0_SLOT
 `ifndef MISTER_OCRAM_MOUNT1_SLOT
 		if (k >= 5'd19 && k <= 5'd22) hj_has = 1'b0;
@@ -458,7 +472,9 @@ endfunction
 function [4:0] hj_next(input [4:0] k);
 	begin
 		hj_next = k + 5'd1;
+`ifndef MISTER_OCRAM_FIO
 		if (k == 5'd15) hj_next = 5'd19;
+`endif
 `ifndef MISTER_OCRAM_MOUNT0_SLOT
 `ifndef MISTER_OCRAM_MOUNT1_SLOT
 		if (hj_next == 5'd19) hj_next = 5'd23;
@@ -694,10 +710,60 @@ assign rq_start = 1'b0;
 assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
 `endif
 
+`ifdef MISTER_OCRAM_LANE
+// The capture lane's REPLY {0x22, arg, n}: each payload word as the walker hands it over. It opens behind an owed
+// BIND, REQUEST and WRITE, with room for its n words and its header.
+wire        r_post = p_post && !bind_pend && !brec_owed;
+wire [31:0] r_hdr  = {8'h22, p_arg, 5'd0, p_n};
+wire        r_wv   = p_wv;
+wire [31:0] r_wd   = p_wd;
+assign p_start  = w_start[S_REP];
+assign p_wtake  = w_wtake[S_REP];
+assign e_free   = w_free;
+`else
 wire        r_post = 1'b0, r_wv = 1'b0;
 wire [31:0] r_hdr = 32'd0, r_wd = 32'd0;
 assign p_start = 1'b0, p_wtake = 1'b0, e_free = 16'd0;
+`endif
 
+`ifdef MISTER_OCRAM_EVT
+// The events tier's records.
+localparam [1:0] EK_STATUS = 2'd0, EK_INFO = 2'd1, EK_UPLOAD = 2'd2, EK_RUMBLE = 2'd3;
+reg         ev_have = 1'b0;            // an offer is in e_d and not spent
+reg         ev_wait = 1'b0;            // an offer is asked for and not yet in
+reg         ev_void = 1'b0;            // the offer in flight was asked for by an ended session: dropped on arrival
+reg   [1:0] rec_ek_q = EK_STATUS;      // the events record's kind
+reg   [2:0] rec_pad_q = 3'd0;          // a RUMBLE's pad
+reg   [3:0] st_flag_q = 4'd0;          // the STATUS being written: its stflg
+reg   [3:0] st_last_q = 4'd0;          // the stflg of the last STATUS published this session (0 at the hello)
+reg  [95:0] rum_last_q = 96'd0;        // each pad's level last published this session (0 at the hello)
+/* verilator lint_off UNUSEDSIGNAL */   // the bench's: the protocol monitor forgets an abandoned record's words
+reg         ev_abandon = 1'b0;         // one cycle: a STATUS record is abandoned, its head not stored
+/* verilator lint_on UNUSEDSIGNAL */
+wire  [1:0] ev_k    = e_d[41:40];
+wire  [7:0] ev_arg  = e_d[39:32];
+wire  [2:0] ev_pad  = (ev_arg[2:0] > 3'd5) ? 3'd5 : ev_arg[2:0];
+wire [15:0] ev_rlast = rum_last_q[{ev_pad, 4'd0} +: 16];
+wire        ev_bound = evt_bound_q && phase == P_SESSION && !stopped_q;
+// the offer in hand opens a record
+wire        ev_rec  = (ev_k == EK_STATUS) ? (ev_arg[7:6] == 2'd0 && ev_arg[3:0] != st_last_q) :
+                      (ev_k == EK_INFO) ? (ev_arg != 8'd0) : (ev_k == EK_UPLOAD) ? 1'b1 : (e_d[15:0] != ev_rlast);
+wire [31:0] ev_hdr  = (ev_k == EK_STATUS) ? {8'h20, 8'd0, 16'd4} : (ev_k == EK_INFO) ? {8'h28, ev_arg, 16'd0} :
+                      (ev_k == EK_UPLOAD) ? {8'h29, ev_arg, 16'd0} : {8'h2A, 5'd0, ev_pad, 16'd1};
+// its first payload word: a STATUS's word 0, a RUMBLE's level
+wire [31:0] ev_w1   = (ev_k == EK_RUMBLE) ? {16'd0, e_d[15:0]} : e_d[31:0];
+// a STATUS record's words 1-3: the offer in hand is that word with the record's stflg
+wire        st_open = w_act && w_src == S_EV && rec_ek_q == EK_STATUS;
+wire        st_wait = st_open && rec_k >= 11'd2 && rec_k <= 11'd4;
+wire        st_wok  = ev_have && ev_k == EK_STATUS && {9'd0, ev_arg[7:6]} == rec_k - 11'd1 && ev_arg[3:0] == st_flag_q;
+// a STATUS word that is not the open record's next, with its stflg, abandons that record before its head
+wire        ev_drop = st_wait && ev_have && !st_wok && !w_wfly && !run_ended;
+wire        e_post = ev_bound && ev_have && ev_rec && !bind_pend && !brec_owed;
+wire [31:0] e_hdr  = ev_hdr;
+wire        e_wv   = !st_wait || st_wok;   // a STATUS word not yet offered lets the consumers in
+wire [31:0] e_wd   = st_wait ? e_d[31:0] : rec_lba_q;
+assign e_ask = ev_bound && !ev_have && !ev_wait;
+`else
 wire        ev_drop = 1'b0;
 wire        e_post = 1'b0, e_wv = 1'b0;
 wire [31:0] e_hdr = 32'd0, e_wd = 32'd0;
@@ -705,6 +771,7 @@ wire [31:0] e_hdr = 32'd0, e_wd = 32'd0;
 wire [31:0] ev_w1 = 32'd0;
 /* verilator lint_on UNUSEDSIGNAL */
 assign e_ask = 1'b0;
+`endif
 
 wire        k_post = 1'b0, k_wv = 1'b0, v_post = 1'b0;
 wire [31:0] k_hdr = 32'd0, mark_word = 32'd0, v_hdr = 32'd0, vd_word = 32'd0;
@@ -735,7 +802,11 @@ ocram_evt_wr #(.N(NS)) evt_wr
 	.req(w_req), .off(w_off), .wdata(w_wdata), .counted(w_counted), .grant(gnt[6]), .done(t_done)
 );
 
+`ifdef MISTER_OCRAM_EVT
+wire [31:0] bind_word = {20'd0, c0_open, 2'd0, evt_bind_q, 5'd0, c0_sbind};
+`else
 wire [31:0] bind_word = {20'd0, c0_open, 8'd0, c0_sbind};
+`endif
 
 // The arbiter (ocram_arb.sv): each port's request, offset and data from registers or a table; a consumer only in a
 // session, and never while a MARK's first payload word waits.
@@ -788,6 +859,9 @@ always @(posedge clk) begin
 
 	// the OSD bind's C_BIND store is owed whenever the enable link's open differs from the stored bit
 	if (phase == P_SESSION && ({c0_open, c0_sbind} != bind_q)) bind_pend <= 1'b1;
+`ifdef MISTER_OCRAM_EVT
+	if (phase == P_SESSION && evt_bind_q != evt_bound_q) bind_pend <= 1'b1;
+`endif
 
 	// the hello clears the session's state when its first store is about to run (the writer its ring's)
 	if (hello_start) begin
@@ -804,6 +878,9 @@ always @(posedge clk) begin
 		fio_stopped_q <= 1'b0;
 		mark_arm_q  <= 1'b0;
 		osd_bind_q  <= 1'b0;
+`ifdef MISTER_OCRAM_EVT
+		evt_bind_q <= 1'b0; evt_bound_q <= 1'b0;
+`endif
 		bind_q      <= 4'd0;
 		sec_ask_q   <= 3'd0;
 		bind_pend   <= 1'b0;
@@ -836,6 +913,9 @@ always @(posedge clk) begin
 		rd_act     <= R_NONE;
 		wr_act     <= W_NONE;
 		osd_bind_q <= 1'b0;
+`ifdef MISTER_OCRAM_EVT
+		evt_bind_q <= 1'b0; evt_bound_q <= 1'b0;
+`endif
 		bind_q     <= 4'd0;
 		sec_ask_q  <= 3'd0;
 		bind_pend  <= 1'b0;
@@ -868,6 +948,9 @@ always @(posedge clk) begin
 		poll_step  <= 3'd0;
 		rd_act     <= R_NONE;
 		osd_bind_q <= 1'b0;
+`ifdef MISTER_OCRAM_EVT
+		evt_bind_q <= 1'b0; evt_bound_q <= 1'b0;
+`endif
 		bind_q     <= 4'd0;
 		sec_ask_q  <= 3'd0;
 		bind_pend  <= 1'b0;
@@ -898,6 +981,9 @@ always @(posedge clk) begin
 			J_STO: begin wr_act <= W_ONE; sto_pend <= 1'b0; end
 			J_BIND: begin
 				wr_act <= W_BIND; bind_pend <= 1'b0; bind_q <= {c0_open, c0_sbind};
+`ifdef MISTER_OCRAM_EVT
+				evt_bound_q <= evt_bind_q;
+`endif
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 				brec_pend <= !stopped_q;
 `endif
@@ -913,6 +999,15 @@ always @(posedge clk) begin
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 		if (w_start[S_BIND]) brec_pend <= 1'b0;
 		if (w_start[S_MNT]) begin rec_lba_q <= m_lba; rec_mw_q <= m_write; end
+`endif
+`ifdef MISTER_OCRAM_EVT
+		if (w_start[S_EV]) begin
+			// the offer is spent into the record: a STATUS's word 0 or a RUMBLE's level is its first payload
+			rec_lba_q <= ev_w1;
+			rec_ek_q  <= ev_k;
+			rec_pad_q <= ev_pad;
+			st_flag_q <= ev_arg[3:0];
+		end
 `endif
 	end
 
@@ -936,6 +1031,10 @@ always @(posedge clk) begin
 			end
 		end
 		else if (wr_act != W_NONE) wr_act <= W_NONE;
+`ifdef MISTER_OCRAM_EVT
+		if (w_pub[S_EV] && rec_ek_q == EK_STATUS) st_last_q <= st_flag_q;
+		if (w_pub[S_EV] && rec_ek_q == EK_RUMBLE) rum_last_q[{rec_pad_q, 4'd0} +: 16] <= rec_lba_q[15:0];
+`endif
 	end
 
 	// a hello step that this build does not store is passed without a transaction
@@ -970,8 +1069,13 @@ always @(posedge clk) begin
 				end
 			end
 			else if (phase == P_SESSION) begin
+`ifdef MISTER_OCRAM_EVT
+				if (rdata == echo_q) poll_step <= ((OSD_EN != 0 && !osd_bind_q) || !evt_bind_q) ? 3'd1 :
+				                                  SEC_EN != 0 ? 3'd5 : FIO_EN != 0 ? 3'd6 : 3'd2;
+`else
 				if (rdata == echo_q) poll_step <= (OSD_EN != 0 && !osd_bind_q) ? 3'd1 : SEC_EN != 0 ? 3'd5 :
 				                                  FIO_EN != 0 ? 3'd6 : 3'd2;
+`endif
 				else begin
 					// the session ends: its line drops, and each record part-written is recorded for the next hello
 					`ifdef MISTER_OCRAM_SECTOR_SLOT
@@ -988,6 +1092,9 @@ always @(posedge clk) begin
 					sto_data  <= (rdata == 32'd0) ? C_HELLO_ARMED : C_HELLO_WAIT;
 					phase     <= (rdata == 32'd0) ? P_ARMED : P_WAIT;
 					osd_bind_q<= 1'b0;
+`ifdef MISTER_OCRAM_EVT
+					evt_bind_q <= 1'b0; evt_bound_q <= 1'b0;
+`endif
 					bind_q    <= 4'd0;
 					sec_ask_q <= 3'd0;
 					bind_pend <= 1'b0;
@@ -996,6 +1103,9 @@ always @(posedge clk) begin
 		end
 		else if (rd_act == R_BIND) begin
 			if (rdata[11]) osd_bind_q <= 1'b1;
+`ifdef MISTER_OCRAM_EVT
+			if (rdata[8]) evt_bind_q <= 1'b1;
+`endif
 			poll_step <= SEC_EN != 0 ? 3'd5 : FIO_EN != 0 ? 3'd6 : 3'd2;
 		end
 		else if (rd_act == R_SECT) begin
@@ -1035,6 +1145,25 @@ always @(posedge clk) begin
 		end
 	end
 
+`ifdef MISTER_OCRAM_EVT
+	// the events tier's offers: one asked for at a time; spent into a record, or at once when it needs none
+	ev_abandon <= 1'b0;
+	if (e_ask) ev_wait <= 1'b1;
+	if (e_v) begin ev_wait <= 1'b0; ev_have <= !ev_void; ev_void <= 1'b0; end
+	else if (w_start[S_EV] || (w_wtake[S_EV] && st_wait)) ev_have <= 1'b0;
+	else if (ev_have && ev_bound && !st_open && !ev_rec) ev_have <= 1'b0;
+	if (ev_drop) ev_abandon <= 1'b1;
+	// a session's end spends the offer in hand, and voids the one in flight: none is posted in the next session
+	if (run_ended || hello_start) begin
+		ev_have <= 1'b0;
+		if ((ev_wait && !e_v) || e_ask) ev_void <= 1'b1;
+	end
+	if (hello_start) begin
+		st_last_q  <= 4'd0;
+		rum_last_q <= 96'd0;
+	end
+`endif
+
 	// the EVT line: high in a session, allowed by H_LINE, the ring not stopped, the head not the tail
 	line <= (phase == P_SESSION) && line_en_q && !stopped_q && (w_head != w_tail);
 	// the mark line: high in a session while H_MARK[1] is armed and the download ring's tail has reached its index
@@ -1042,6 +1171,41 @@ always @(posedge clk) begin
 end
 
 endmodule
+
+`ifdef MISTER_OCRAM_EVT
+//============================================================================
+// hps_ocram_evt -- the events tier's port between hps_io and the master (MISTER_OCRAM_EVT only) hps_io presents one
+// offer at a time on HPS_BUS[374:333], {kind[1:0], arg[7:0], data[31:0]}, its rotor's item (sys/hps_io.sv).
+
+/* verilator lint_off DECLFILENAME */   // the port shares the master's file, as the sink does
+module hps_ocram_evt
+(
+	input  wire        clk,          // clk_100m: the master's side
+	input  wire        ask,          // one cycle: the master asks for the next offer
+	output wire        e_v,          // one cycle: the offer is in e_d
+	output wire [41:0] e_d,          // held until the next offer
+	input  wire        clk_sys,
+	input  wire [41:0] o_d,          // hps_io's offer
+	output wire        take          // one cycle: the offer is launched; hps_io's rotor steps
+);
+
+wire a_busy, a_v, r_busy;
+reg  a_owed = 1'b0;                  // clk: an ask not yet launched
+reg  r_owed = 1'b0;                  // clk_sys: an ask arrived, its offer not yet launched
+/* verilator lint_off PINCONNECTEMPTY */   // the ask carries no data
+lw_xfer #(.W(1)) ask_x(.s_clk(clk), .s_go(ask || a_owed), .s_d(1'b1), .s_busy(a_busy),
+                       .d_clk(clk_sys), .d_q(), .d_v(a_v));
+/* verilator lint_on PINCONNECTEMPTY */
+always @(posedge clk) a_owed <= (ask || a_owed) && a_busy;
+
+assign take = (a_v || r_owed) && !r_busy;
+always @(posedge clk_sys) r_owed <= (a_v || r_owed) && r_busy;
+lw_xfer #(.W(42)) rep_x(.s_clk(clk_sys), .s_go(take), .s_d(o_d), .s_busy(r_busy),
+                        .d_clk(clk), .d_q(e_d), .d_v(e_v));
+
+endmodule
+/* verilator lint_on DECLFILENAME */
+`endif
 
 `default_nettype wire
 `endif

@@ -2,7 +2,7 @@
 
 A proposed third path between the HPS and a core, beside the GPO/GPI ("SPI") link and the LW bridge window of `docs/LW_BRIDGE.md`. It is for bulk: OSD rows, disk blocks, replies. The HPS writes records into its own 64 KB **on-chip RAM** (OCRAM, physical `0xFFFF0000`), and the core fetches them as an AXI master on the Cyclone V **FPGA-to-HPS bridge**, whose atom `sys/` already instantiates with no port connected.
 
-**Status: the floor, the OSD tier, the SECTOR tier and the download tier are built, for test cores only.** `MISTER_OCRAM` builds the bridge master, the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake. `MISTER_OCRAM_OSD` and `MISTER_OCRAM_SECTOR_SLOT` each build their half of `sys/hps_ocram_rx.sv`, one walker for both host-to-core rings: the OSD half writes the OSD ring's rows into every `osd`'s `osd_buffer` through the LW OSDBUF writer's port, and the SECTOR half plays block frames into one `hps_io` slot and posts its REQUEST records ("The SECTOR tier as built"). `MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` add two mount slots beside the SECTOR slot: their reads from ring 0 and their writes as EVT records ("The mount slots as built"). Nothing else in this document is built: no PAD ring, and no H_BIND LANE or PAD function. The SECTOR, download, mount, UIO, events and capture tiers are benched, not yet fitted or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that core and host authors can read both paths side by side and say which they would build.
+**Status: the floor, the OSD tier, the SECTOR tier and the download tier are built, for test cores only.** `MISTER_OCRAM` builds the bridge master, the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake. `MISTER_OCRAM_OSD` and `MISTER_OCRAM_SECTOR_SLOT` each build their half of `sys/hps_ocram_rx.sv`, one walker for both host-to-core rings: the OSD half writes the OSD ring's rows into every `osd`'s `osd_buffer` through the LW OSDBUF writer's port, and the SECTOR half plays block frames into one `hps_io` slot and posts its REQUEST records ("The SECTOR tier as built"). `MISTER_OCRAM_FIO` adds a third host-to-core ring to that walker, ring 1: link frames played into `hps_io`'s download block through `lw_link`, with a mark line on `f2h_irq[12]` ("The download tier as built"). `MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` add two mount slots beside the SECTOR slot: their reads from ring 0 and their writes as EVT records ("The mount slots as built"). Nothing else in this document is built: no PAD ring, and no H_BIND LANE or PAD function. The SECTOR, download, mount, UIO, events and capture tiers are benched, not yet fitted or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that core and host authors can read both paths side by side and say which they would build.
 
 ## The menu
 
@@ -13,6 +13,7 @@ Every path is its own macro, off by default; a path that is not defined builds n
 | `MISTER_OCRAM` | the floor: the bridge master, its arbiter and poller, the hello, the core-to-host ring's writer and its interrupt line, one GPI bit | - | 180-260 ALMs, no block memory |
 | `MISTER_OCRAM_OSD` | OSD rows from the OSD ring into each `osd`'s `osd_buffer`, through the LW OSDBUF writer's port | the floor (`ocram_tier_needs_MISTER_OCRAM`) | 60-80 ALMs |
 | `MISTER_OCRAM_PAD` | pad stores from a ring | the floor | 40-60 ALMs |
+| `MISTER_OCRAM_CONFSTR` | the configuration string as one record after the hello | `MISTER_OCRAM_EVT` | 30-50 ALMs |
 | `MISTER_OCRAM_BELL` | an LW register whose store starts a poll at once (only if the poll proves too slow) | both floors | 10-20 ALMs |
 | `MISTER_OCRAM_POLL` | the idle poll period, as a power of two of `clk_100m` cycles (default 12: 41 us) | the floor | - |
 
@@ -146,6 +147,18 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 `MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` (each an `hps_io` slot, 0-15, neither the SECTOR slot nor the other's) and `MISTER_OCRAM_MOUNT_FRAME` (the largest request in 32-bit words: one block, `32 << BLKSZ`, to 1,020; default 128) declare them; a build stops on an unservable one (`ocram_mount_unservable_geometry`) and without `MISTER_OCRAM_SECTOR_SLOT` (`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), whose feeder, walker and record writer they share. The core hooks each slot through `lw_save_mux`, its `core_din` the slot's `sd_buff_din`. The hello stores C_CAPS bit 0, C_IDX[0] = 0, C_RING[0] = `{kind 2, no line, 1,024 words, 0x6000}` (`0x10281800`) and C_K[10, 11].
 
 - **The binds:** H_SECTOR bit k asks for mount slot k and C_BIND bit k answers, under the SECTOR slot's rules, with no flush: no frame waits in ring 0.
+
+### The download tier as built
+
+`MISTER_OCRAM_FIO` declares it, with `MISTER_OCRAM_FIO_GAP` (cycles between strobes, 4-7, default 4) and `MISTER_OCRAM_FIO_RING` (ring 1's log2 words, default 10). A gap or ring outside those ranges stops the build (`ocram_fio_unservable_geometry`), and so does `MISTER_LW_LANE` beside it (`link_on_two_players`: two players on one set of link nets). The hello stores C_CAPS bit 1, C_IDX[1] = 0, C_RING[1] = `{kind 5, line 5, log2, 0, offset}` (`0x29680400` at the defaults) and C_K[9]. No H_BIND bit takes ring 1: the walker serves it in every session.
+
+- **A record is an LFRAME,** `{0x30, arg, len}` with `arg = {odd[7], 0[6:2], sel[1:0]}` and `len` ring words. Each ring word carries two link words, low half first; `odd` drops the last word's high half. Only a `sel` in C_K[9]'s mask is served: 1 (the FPGA select, the file-I/O block), and with `MISTER_OCRAM_UIO` also 0, 2 and 3 (below). A record of any other kind, a `sel` outside the mask, a non-zero `arg[6:2]` or a zero length is skipped by its length, silently: it is not a fault, and nothing of it reaches the link, so a host gates what it sends on C_K[9] (and on C_CAPS for the bits above `sel`). A head more than the ring ahead, or a length past the head, stops the ring on a fault (C_STATE bit 9); a session that ends mid-record sets bit 17 at the next hello.
+
+### The UIO and OSD frames as built
+
+An LFRAME with `sel` 0 is one UIO transaction, with `sel` 2 or 3 one transaction on that OSD select. The player is the download tier's, unchanged: it plays only between link transactions, into the link's own decoders through `lw_link`, so each frame's end runs the stock steps (the RTC and timestamp toggles, the mount strobe's fall, an OSD control word's enable).
+
+- **One select a frame.** The link's OSD transaction raises both OSD selects together; on ring 1 it is two frames, `sel` 2 then `sel` 3, each only if the mask serves it.
 
 ## What a host must not assume
 

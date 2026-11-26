@@ -26,13 +26,35 @@ localparam        OCRAM_OSD_EN    = 1;
 localparam        OCRAM_OSD_EN    = 0;
 `endif
 localparam        OCRAM_TS_EN     = 0;
+`ifdef MISTER_OCRAM_FIO
+localparam        OCRAM_FIO_EN    = 1;
+`else
 localparam        OCRAM_FIO_EN    = 0;
+`endif
 
 // The download tier's declaration: the ring's log2 words (2-10 at 0x1000, or 13 at 0x7000) and the player's strobe
 // gap (4-7); hps_ocram_rx stops the build on an unservable one.
+`ifdef MISTER_OCRAM_FIO_RING
+localparam [31:0] OCRAM_FIO_RING  = `MISTER_OCRAM_FIO_RING;
+`else
 localparam [31:0] OCRAM_FIO_RING  = 32'd10;
+`endif
+`ifdef MISTER_OCRAM_FIO_GAP
+localparam [31:0] OCRAM_FIO_GAP   = `MISTER_OCRAM_FIO_GAP;
+`else
 localparam [31:0] OCRAM_FIO_GAP   = 32'd4;
+`endif
+// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}, for the walker and C_K[9]: the FPGA select alone;
+// with MISTER_OCRAM_UIO also the UIO select and the OSD selects, HDMI only with an HDMI osd
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_DEBUG_NOHDMI
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b1011;
+`else
+localparam  [3:0] OCRAM_FIO_SELS  = 4'b1111;
+`endif
+`else
 localparam  [3:0] OCRAM_FIO_SELS  = 4'b0010;
+`endif
 
 // The SECTOR tier's declaration: the hps_io slot, the frame in 32-bit words (1-4096), the strobe gap (2-15) and
 // BLKSZ; hps_ocram_rx stops the build on an unservable geometry.
@@ -104,11 +126,23 @@ localparam [31:0] OCRAM_C_CAPS    = 32'h0000_0008
 `ifdef MISTER_OCRAM_MOUNT1_SLOT
                                   | 32'h0000_0001
 `endif
+`ifdef MISTER_OCRAM_FIO
+                                  | 32'h0000_0002
+`endif
+`ifdef MISTER_OCRAM_EVT
+                                  | 32'h0000_0800
+`endif
+`ifdef MISTER_OCRAM_LANE
+                                  | 32'h0000_1000
+`endif
 `ifdef MISTER_DISABLE_SPI_BLK
                                   | 32'h0001_0000
 `endif
 `ifdef MISTER_DISABLE_SPI_OSD
                                   | 32'h0002_0000
+`endif
+`ifdef MISTER_DISABLE_SPI_EVT
+                                  | 32'h0004_0000
 `endif
                                   ;
 

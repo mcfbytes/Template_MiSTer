@@ -40,10 +40,21 @@
 // LW_EVT_X: the events tier (MISTER_LW_EVT, with MISTER_LW) exports uio_block's core->host flags.
 `define LW_EVT_X
 `endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_EVT
+// LW_OCRAM_EVT_X: the OCRAM events tier (MISTER_OCRAM_EVT) offers them on one event port in the same span.
+`define LW_OCRAM_EVT_X
+`endif
+`endif
 `endif
 // LW_UIO_FLAGS_X: uio_block's flag registers are declared at module scope, for either tier's exports.
 `ifdef LW_EVT_X
 `define LW_UIO_FLAGS_X
+`endif
+`ifdef LW_OCRAM_EVT_X
+`ifndef LW_UIO_FLAGS_X
+`define LW_UIO_FLAGS_X
+`endif
 `endif
 //
 module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, BLKSZ=2, PS2WE=0, STRLEN=$size(CONF_STR)>>3, F12KEYMOD=0, FFB=0)
@@ -271,6 +282,35 @@ assign HPS_BUS[371:240] = {status_req, stflg};
 assign HPS_BUS[374:372] = {upload_req, info_n != 8'd0, |ev_rq};
 assign HPS_BUS[376] = 1'b1;
 `endif
+`ifdef LW_OCRAM_EVT_X
+// The OCRAM events tier's event port (hps_ocram_evt, sys/hps_ocram_master.sv): one offer at a time, the rotor's
+// item, HPS_BUS[374:333] = {kind[1:0], arg[7:0], data[31:0]}: ev_rot 0-3 STATUS (kind 0) word ev_rot, arg
+// {word[1:0], 0, stflg}, data status_req's word; 4 INFO (1), arg info_n (0: no notice); 5 UPLOAD (2), arg
+// ioctl_upload_index, or INFO with arg 0 while none is pending; 6-11 RUMBLE (3) pad ev_rot - 6, data its level.
+wire        ev_take = HPS_BUS[382];
+reg   [3:0] ev_rot = 4'd0;
+always @(posedge clk_sys) if (ev_take) ev_rot <= (ev_rot == 4'd11) ? 4'd0 : ev_rot + 4'd1;
+reg  [15:0] ev_rum;
+always @(*) begin
+	case (ev_rot)
+		4'd6:    ev_rum = joystick_0_rumble;
+		4'd7:    ev_rum = joystick_1_rumble;
+		4'd8:    ev_rum = joystick_2_rumble;
+		4'd9:    ev_rum = joystick_3_rumble;
+		4'd10:   ev_rum = joystick_4_rumble;
+		default: ev_rum = joystick_5_rumble;
+	endcase
+end
+wire  [3:0] ev_pad  = ev_rot - 4'd6;
+wire  [1:0] ev_kind = (ev_rot < 4'd4) ? 2'd0 : (ev_rot == 4'd4 || (ev_rot == 4'd5 && !upload_req)) ? 2'd1 :
+                      (ev_rot == 4'd5) ? 2'd2 : 2'd3;
+wire  [7:0] ev_arg  = (ev_rot < 4'd4) ? {ev_rot[1:0], 2'b00, stflg} : (ev_rot == 4'd4) ? info_n :
+                      (ev_rot == 4'd5) ? (upload_req ? ioctl_upload_index : 8'd0) : {4'd0, ev_pad};
+wire [31:0] ev_data = (ev_rot < 4'd4) ? status_req[{ev_rot[1:0], 5'd0} +: 32] :
+                      (ev_rot >= 4'd6) ? {16'd0, ev_rum} : 32'd0;
+assign HPS_BUS[374:333] = {ev_kind, ev_arg, ev_data};
+assign HPS_BUS[376] = 1'b1;
+`endif
 `else
 // A tier macro without MISTER_LW: the build stops here, naming the guard.
 `ifdef MISTER_LW_PAD
@@ -281,6 +321,9 @@ lw_tier_needs_MISTER_LW evt_guard();
 `endif
 `ifdef MISTER_LW_SECTOR_SLOT
 lw_tier_needs_MISTER_LW sector_guard();
+`endif
+`ifdef MISTER_LW_LANE
+lw_tier_needs_MISTER_LW lane_guard();
 `endif
 `ifdef MISTER_LW_OSD
 lw_tier_needs_MISTER_LW osd_guard();
@@ -303,6 +346,9 @@ ocram_tier_needs_MISTER_OCRAM ocram_mount0_floor_guard();
 `endif
 `ifdef MISTER_OCRAM_MOUNT1_SLOT
 ocram_tier_needs_MISTER_OCRAM ocram_mount1_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_FIO
+ocram_tier_needs_MISTER_OCRAM ocram_fio_floor_guard();
 `endif
 `endif
 // The LW SECTOR block reports MISTER_LW_BLKSZ (default 2) as the slot's block size, so it must be this instance's
@@ -417,6 +463,52 @@ generate
 endgenerate
 `endif
 // The LW frame lane and the OCRAM download tier each put a player on the link nets through lw_link: one a build.
+`ifdef MISTER_LW_LANE
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_FIO
+link_on_two_players link_guard();
+`endif
+`endif
+`endif
+// MISTER_OCRAM_EVT: its port takes the LW events tier's span of HPS_BUS (so MISTER_LW, and never beside
+// MISTER_LW_EVT) and its records are the OCRAM floor's (so MISTER_OCRAM).
+`ifdef MISTER_OCRAM_EVT
+`ifndef MISTER_LW
+ocram_evt_needs_MISTER_LW ocram_evt_lw_guard();
+`endif
+`ifdef MISTER_LW_EVT
+evt_on_two_tiers ocram_evt_two_guard();
+`endif
+`ifndef MISTER_OCRAM
+ocram_evt_needs_MISTER_OCRAM ocram_evt_floor_guard();
+`endif
+`endif
+`ifdef MISTER_DISABLE_SPI_EVT
+`ifndef LW_OCRAM_EVT_X
+spi_evt_off_needs_MISTER_OCRAM_EVT spi_evt_guard();
+`endif
+`endif
+// MISTER_OCRAM_UIO widens the OCRAM download tier's player to the UIO and OSD selects: without it there is no player.
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_FIO
+ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
+`endif
+`else
+ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
+`endif
+`endif
+// MISTER_OCRAM_LANE captures the replies of the download tier's frames into REPLY records on the EVT ring: without
+// that tier there is no frame.
+`ifdef MISTER_OCRAM_LANE
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_FIO
+ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
+`endif
+`else
+ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
+`endif
+`endif
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;
 assign HPS_BUS[32]   = io_wide;
@@ -620,6 +712,11 @@ always@(posedge clk_sys) begin : uio_block
 		status_req <= status_in;
 	end
 
+`ifdef LW_OCRAM_EVT_X
+	// the event port took this notice; an edge in the same cycle latches the next one below
+	if(ev_take && ev_rot == 4'd5) upload_req <= 0;
+	if(ev_take && ev_rot == 4'd4) info_n <= 0;
+`endif
 	old_upload_req <= ioctl_upload_req;
 	if(~old_upload_req & ioctl_upload_req) upload_req <= 1;
 
@@ -669,17 +766,23 @@ always@(posedge clk_sys) begin : uio_block
 				'h0X17,
 				'h0X18: begin sd_ack <= disk[VD:0]; sdn_ack <= io_din[11:8]; end
 `endif
+`ifndef MISTER_DISABLE_SPI_EVT
 				  'h29: io_dout <= {4'hA, stflg};
+`endif
 				  'h32: io_dout <= gamma_bus[21];
+`ifndef MISTER_DISABLE_SPI_EVT
 				  'h36: begin io_dout <= info_n; info_n <= 0; end
 				  'h3C: if(upload_req) begin io_dout <= {ioctl_upload_index, 8'd1}; upload_req <= 0; end				  
+`endif
 				  'h43: io_dout <= |F12KEYMOD;
+`ifndef MISTER_DISABLE_SPI_EVT
 				'h003F: io_dout <= joystick_0_rumble;
 				'h013F: io_dout <= joystick_1_rumble;
 				'h023F: io_dout <= joystick_2_rumble;
 				'h033F: io_dout <= joystick_3_rumble;
 				'h043F: io_dout <= joystick_4_rumble;
 				'h053F: io_dout <= joystick_5_rumble;
+`endif
 				'h0045: if(FFB) begin io_dout <= {8'hFB, joystick_0_ffb[55:48]}; ffb_data <= joystick_0_ffb[47:0]; end
 				'h0145: if(FFB) begin io_dout <= {8'hFB, joystick_1_ffb[55:48]}; ffb_data <= joystick_1_ffb[47:0]; end
 				'h0245: if(FFB) begin io_dout <= {8'hFB, joystick_2_ffb[55:48]}; ffb_data <= joystick_2_ffb[47:0]; end
@@ -882,6 +985,7 @@ always@(posedge clk_sys) begin : uio_block
 				//RTC
 				'h24: TIMESTAMP[(byte_cnt-6'd1)<<4 +:16] <= io_din;
 
+`ifndef MISTER_DISABLE_SPI_EVT
 				//status set
 				'h29: if(!byte_cnt[MAX_W:4]) begin
 							case(byte_cnt[3:0])
@@ -895,6 +999,7 @@ always@(posedge clk_sys) begin : uio_block
 								8: io_dout <= status_req[127:112];
 							endcase
 						end
+`endif
 
 				//menu mask
 				'h2E: if(byte_cnt == 1) io_dout <= status_menumask;
@@ -1151,6 +1256,9 @@ end
 endmodule
 `ifdef LW_EVT_X
 `undef LW_EVT_X
+`endif
+`ifdef LW_OCRAM_EVT_X
+`undef LW_OCRAM_EVT_X
 `endif
 `ifdef LW_UIO_FLAGS_X
 `undef LW_UIO_FLAGS_X

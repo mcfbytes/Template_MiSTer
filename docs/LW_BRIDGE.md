@@ -24,6 +24,7 @@ An optional extension of `sys/` that gives the HPS a second, memory-mapped path 
 | `MISTER_LW_SAVE0_FRAME` | 256 | its 32-bit words per frame, 1-510 (the FIFO's entries - 2; 256 = one 1 KB block) |
 | `MISTER_LW_SAVE0_LBA_BITS` | 32 | its LBA bits kept, crossed and compared, 1-32 |
 | `MISTER_LW_SAVE1_SLOT`, `_WSRC`, `_EXTENT`, `_FRAME`, `_LBA_BITS` | absent, 256, 32 | save slot 1 (slot index 2), likewise |
+| `MISTER_LW_LANE` | absent | with `MISTER_LW`: builds the frame lane (LANE block) and its link front, `lw_link` |
 
 A save slot is declared by its `_SLOT` macro, needs its `_WSRC` and needs `MISTER_LW_SECTOR_SLOT` too. **An unservable geometry stops the build** (in synthesis too), naming the undefined module `lw_sector_unservable_geometry`: a primary frame outside 1-4096 words, a save slot's outside 1-510, an LBA width outside 1-32, a gap outside 2-15, an `hps_io` slot above 15, two slots on one `hps_io` slot, or a save slot without an image base. Frames are one fixed length per slot; a slot whose requests vary in length or use `sd_blk_cnt` stays on SPI by not being declared.
 
@@ -37,6 +38,7 @@ A core pays only for what its `.qsf` names. Every figure is **ESTIMATED**: regis
 | L1 pads | `MISTER_LW_PAD` | the PAD block, `hps_io`'s LW write arm | 150-185 ALMs, 1 M10K |
 | L2 events | `MISTER_LW_EVT` | the EVT block, `hps_io`'s event exports, line 2 | 85-120 ALMs, 132 of its registers being the status hold on `clk_sys`; no block memory |
 | L3 SECTOR | `MISTER_LW_SECTOR_SLOT` and its geometry | the SECTOR block and its enable link, line 1, the core-side muxes, `hps_io`'s commit mark | 325-400 ALMs and about 12 per mux, 3 M10K |
+| L3 lane | `MISTER_LW_LANE` | the LANE block and its enable link, `lw_link`, line 3 | 225-255 ALMs, 3 M10K |
 | L3 OSD | `MISTER_LW_OSD` | the OSDBUF block and its enable link, a second write source in each `osd` | 75-100 ALMs, 2 M10K |
 
 ### Beside the window: the OCRAM mailbox (proposed)
@@ -73,6 +75,7 @@ Offsets are from the window start; absolute LW offset = `0x40000` + offset. An a
 | `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
 | `0x03000` | `0x43000` | `0x1000` | EVT (with `MISTER_LW_EVT`) |
 | `0x04000` | `0x44000` | `0x2000` | OSDBUF (with `MISTER_LW_OSD`) |
+| `0x06000` | `0x46000` | `0x1000` | LANE (with `MISTER_LW_LANE`) |
 | `0x08000` | `0x48000` | `0x8000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`): registers at `+0x0000`, DATA at `+0x4000` |
 | `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
 | `0x40000` | `0x80000` | `0x40000` | PAD (with `MISTER_LW_PAD`) |
@@ -219,6 +222,30 @@ The block serves one primary `hps_io` read slot and up to two save slots through
 | `0x10C + 0x20k` | WACK_S[k] | write the LBA: answers a save slot's WRITE (*k* = 1, 2) with an ack pulse and no strobes |
 | `0x4000 + 4i` | DATA[i] | word *i* of the open frame, taken only at *i* = `next_index` (an earlier word's resend, a later word and a store past the frame's length are ignored) |
 
+### LANE block (kind 5, "LAN1")
+
+The frame lane carries link transactions over the bridge. The HPS stores a frame (BEGIN, its data words, END), and a player on `clk_sys` replays it onto `sys_top`'s link nets, so `hps_io`, `hps_ext`, both `osd` instances and `sys_top`'s own command arms each decode one ordinary link transaction. The lane adds no decoder. A frame opened with the capture bit also records the link's reply word after each of its strobes, which makes the lane a request/reply mailbox for any opcode.
+
+| offset | access | register |
+|---|---|---|
+| `0x00` | W | BEGIN `{capture[18], sel[17:16], op[15:0]}`: opens a frame. sel 0 = UIO, 1 = FPGA (FIO), 2 = OSD on HDMI, 3 = OSD on VGA |
+| `0x04` | W | WORD `[15:0]`: the next data word of the open frame |
+| `0x08` | W | END: commits the frame |
+| `0x0C` | W | RPOP: removes the oldest reply word (ignored when there is none) |
+| `0x10` | R | PLAYED: frames played, free-running 16-bit; compare modulo 2^16 |
+| `0x14` | R | DROPS: frames discarded whole at END because they did not fit, free-running 16-bit |
+| `0x18` | R | ID `0x314E414C` ("LAN1") |
+| `0x1C` | R | RSTAT `{reply_drops[31:16], replies[15:0]}`: reply words dropped on a full reply FIFO (free-running, never cleared), and waiting |
+| `0x20` | R | RHEAD `[15:0]`: the oldest reply word, 0 when none is waiting. Reading it has no side effect |
+| `0x24` | R, W1C | CAUSE: `[0]` PLAYED, a frame finished playing; `[1]` REPLY, a reply word landed; `[2]` DROP, a frame was discarded at END or a reply word was dropped. Clear at an ENABLE |
+
+| word | value |
+|---|---|
+| K0-K7 | the UIO (sel 0) opcodes verified for write-only replay, PAD's bitmap shape: `0x01`, `0x1C`, `0x1D`, `0x1E`, `0x22`, `0x24`, `0x31`, `0x32`, `0x33`, `0x3B` |
+| K8 | first-word replies the lane stands in for, one byte per opcode: `[7:0]` = 3, the reply of `sys_top`'s `0x20` arm |
+| K9 | `{fifo_depth[31:16] = 1024, strobe_gap[15:0] = 4}` |
+| K10 | `{reply_depth[31:16] = 256, 0}` (minor 1) |
+
 ## Hooking the SECTOR block
 
 The block replaces the HPS side of one `hps_io` slot. The core keeps its own reader. `sys/lw_blk_mux.sv` sits between `hps_io` and that reader:
@@ -279,6 +306,7 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
 | `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT` or `MISTER_OCRAM_SECTOR_SLOT`); presence, constant 1: the mark |
+| `[382]` | to core | the OCRAM events tier's take (`sys_top` drives it, `hps_io` reads it, with `MISTER_OCRAM_EVT`); nothing else drives it |
 | `[383]` | - | reserved: nothing drives it; every reader ignores it |
 
 ## What a host must not assume

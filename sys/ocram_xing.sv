@@ -22,6 +22,9 @@
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 `define LW_OCRAM_XING_BUILT
 `endif
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_XING_BUILT
+`endif
 `ifdef LW_OCRAM_XING_BUILT
 `default_nettype none
 
@@ -76,7 +79,7 @@ module ocram_xing #(parameter OSD_EN = 1, parameter SEC_EN = 0, parameter FIO_EN
 	input  wire [31:0] f_dat,
 	input  wire        f_rest,
 	input  wire        p_go,
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_LANE the replies are not read
 	input  wire [31:0] p_dat,
 	/* verilator lint_on UNUSEDSIGNAL */
 	input  wire        p_rest,
@@ -96,7 +99,11 @@ module ocram_xing #(parameter OSD_EN = 1, parameter SEC_EN = 0, parameter FIO_EN
 	input  wire        x_wide
 );
 
+`ifdef MISTER_OCRAM_LANE
+localparam        CAP_EN    = 1;            // the capture lane: its answers carry the replies
+`else
 localparam        CAP_EN    = 0;
+`endif
 localparam [1:0] TG_OHEAD = 2'd0, TG_SHEAD = 2'd1, TG_DATA = 2'd2, TG_FHEAD = 2'd3;
 localparam [1:0] RG_OSD = 2'd0, RG_SEC = 2'd1, RG_FIO = 2'd2;   // the ring of the last head
 localparam [1:0] A_TOOK = 2'd0;
@@ -207,6 +214,9 @@ always @(posedge clk_sys) begin
 	else if (p_go) begin
 		done_go   <= 1'b1;
 		done_code <= A_TOOK;
+`ifdef MISTER_OCRAM_LANE
+		done_dat  <= p_dat;                 // the ring word's two link replies
+`endif
 	end
 	else if (o_go) begin
 		done_go   <= 1'b1;

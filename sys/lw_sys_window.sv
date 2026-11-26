@@ -18,8 +18,9 @@
 `ifdef MISTER_LW
 `default_nettype none
 
-// Each tier is a parameter here (sys_top.v sets it from its macro), and a tier set without its macro stops the
-// build.
+// LW window declared by `SYS_LW_CAPS (emu_ports.vh): the directory (MISTER_LW), then the blocks of the tiers the
+// core builds: PAD (MISTER_LW_PAD, lw_pad.sv), EVT (MISTER_LW_EVT, lw_evt.sv), SECTOR (MISTER_LW_SECTOR_SLOT,
+// lw_sector.sv), OSDBUF (MISTER_LW_OSD, lw_osd.sv) and LANE (MISTER_LW_LANE, lw_lane.sv).
 
 module lw_sys_window #(
 	// The tiers (sys_top.v sets each from its macro): 1 = build the block and list it while its piece is present.
@@ -45,6 +46,7 @@ module lw_sys_window #(
 	parameter [31:0] SAVE1_EXT   = 32'd0,
 	parameter [31:0] SAVE1_FRAME = 32'd256,
 	parameter [31:0] SAVE1_LBA_BITS = 32'd32,
+	// LANE block (sys_top.v sets it with MISTER_LW_LANE): 1 = build the frame lane and list its entry.
 	parameter        LANE_EN   = 0,
 	// The OCRAM SECTOR feeder (sys_top.v sets it with MISTER_OCRAM_SECTOR_SLOT): 1 = the primary slot's to-core bits
 	// of HPS_BUS take the xsec_* inputs; no SECTOR entry is listed. With SEC_EN the build stops.
@@ -610,10 +612,24 @@ assign xmnt_wr      = mnt_wired & {hps_lw[203], hps_lw[168]};
 assign xmnt_lba     = {MNT_EXT[1] ? hps_lw[236:205] : 32'd0, MNT_EXT[0] ? hps_lw[201:170] : 32'd0};
 
 generate
+`ifdef MISTER_LW_LANE
+if (LANE_EN) begin : lane
+	lw_lane #(.AW(LANE_AW), .GAP(LANE_GAP[2:0]), .RAW(LANE_RAW)) lane
+	(
+		.clk(clk),
+		.raddr(rlane), .rdata(lane_rdata),
+		.waddr(wlane), .wsel(w_lane), .write(wr_lane), .wdata(lw_wdata), .be(lw_be), .hen(en_q),
+		.take(e_take), .f_open(lane_open), .f_owned(lane_owned), .f_idle(lane_idle), .irq(lane_irq),
+		.clk_sys(clk_sys), .l_busy(lane_busy), .l_wait(lane_wait), .l_dout(lane_dout),
+		.own(lane_own), .hold(lane_hold), .sel(lane_sel), .strobe(lane_strobe), .din(lane_din)
+	);
+end
+`else
 // LANE_EN without the tier macro: lw_lane.sv is empty, so the build stops here, naming the macro
 if (LANE_EN) begin : lane
 	lw_lane_needs_MISTER_LW_LANE guard();
 end
+`endif
 else begin : nolane
 	assign lane_rdata  = 32'd0;
 	assign lane_open   = 1'b0;

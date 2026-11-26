@@ -22,6 +22,9 @@
 `ifdef MISTER_OCRAM_SECTOR_SLOT
 `define LW_OCRAM_RING_RD_BUILT
 `endif
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_RING_RD_BUILT
+`endif
 `ifdef LW_OCRAM_RING_RD_BUILT
 `default_nettype none
 
@@ -76,7 +79,7 @@ module ocram_ring_rd #(parameter ROWS = 16, parameter OSD_EN = 1, parameter SEC_
 	output wire [10:0] p_n,
 	output wire        p_wv,
 	output wire [31:0] p_wd,
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // without MISTER_OCRAM_LANE the master's answers are not read
 	input  wire [15:0] e_free,
 	input  wire        p_start,
 	input  wire        p_wtake,
@@ -157,6 +160,9 @@ endgenerate
 localparam [3:0] W_IDLE = 4'd0, W_HEAD = 4'd1, W_HDR = 4'd2, W_LBA = 4'd3, W_HGO = 4'd4, W_ANS = 4'd5,
                  W_PAY = 4'd6, W_XFER = 4'd7, W_TAIL = 4'd8, W_FLUSH = 4'd9, W_FTAIL = 4'd10,
                  W_MNT = 4'd11;           // the mount WRITE has the forward cell
+`ifdef MISTER_OCRAM_LANE
+localparam [3:0] W_CAP = 4'd15;           // a capture frame waits for its REPLY's header
+`endif
 
 reg   [3:0] wst = W_IDLE;
 reg         req = 1'b0;
@@ -236,8 +242,13 @@ wire [16:0] ravail  = {1'b0, av_r};
 wire [15:0] rwords  = W_TAB[{ring, 4'd0} +: 16];
 // an LFRAME the player takes: kind 0x30, arg {odd, 0, sel} with sel in the mask, a len of at least one word; with
 // the capture lane also arg {odd, tag, 1, sel} with a len of at most 1,020
+`ifdef MISTER_OCRAM_LANE
+wire        f_cap   = c_rdata[18];
+wire        f_arg   = f_cap ? c_rdata[15:0] <= 16'd1020 : c_rdata[22:19] == 4'd0;
+`else
 wire        f_cap   = 1'b0;
 wire        f_arg   = c_rdata[22:18] == 5'd0;
+`endif
 wire        f_rec   = c_rdata[31:24] == 8'h30 && f_arg && FIO_SELS[c_rdata[17:16]] && c_rdata[15:0] != 16'd0;
 // a mount FRAME that answers the read in hand: its slot, blk_cnt and len
 wire        m_rec   = c_rdata[31:24] == 8'h10 &&
@@ -260,12 +271,28 @@ wire        mt_f   = avail[16*RG_FIO +: 16] == 16'd0;
 wire        mt_m   = avail[16*RG_MNT +: 16] == 16'd0;
 wire        job_o  = walk_o && (!mt_o || due[RG_OSD]);
 wire        job_s  = walk_s && sb && !drop_s && ((!mt_s && stand && !s_wait) || (mt_s && due[RG_SEC]));
+`ifdef MISTER_OCRAM_LANE
+// a capture frame left for want of room holds ring 1 until the EVT ring has it
+reg         cap_held = 1'b0;
+reg  [10:0] cap_n_q = 11'd0;
+reg  [31:0] cap_hdr_q = 32'd0;
+reg         cap_q = 1'b0;              // the frame being played is a capture frame
+reg         p_have = 1'b0;             // p_wd holds a reply word for the master
+wire        cap_room = {5'd0, cap_n_q} + 16'd1 <= e_free && !evt_stop;
+wire        job_f  = walk_f && (!mt_f || due[RG_FIO]) && !(cap_held && !cap_room);
+assign p_post = wst == W_CAP;
+assign p_arg  = cap_hdr_q[23:16];
+assign p_n    = cap_n_q;
+assign p_wv   = p_have;
+assign p_wd   = done_q[33:2];
+`else
 wire        job_f  = walk_f && (!mt_f || due[RG_FIO]);
 assign p_post = 1'b0;
 assign p_arg  = 8'd0;
 assign p_n    = 11'd0;
 assign p_wv   = 1'b0;
 assign p_wd   = 32'd0;
+`endif
 wire        job_m  = walk_m && (m_wjob || !mt_m || due[RG_MNT]);
 wire        streaming = ring == RG_SEC && wst != W_IDLE;
 wire        mstream   = ring == RG_MNT && wst != W_IDLE;
@@ -339,6 +366,9 @@ assign x_d   = (wst == W_PAY) ? {TG_DATA, 3'd0, c_rdata} :
                (wst == W_LBA) ? {TG_SHEAD, 1'b0, (ring == RG_MNT) ? mfk : 2'd0, c_rdata} :
                (wst == W_HDR) ? {TG_FHEAD, 3'd0, c_rdata} :
                (wst == W_MNT) ? mw_d :
+`ifdef MISTER_OCRAM_LANE
+               (ring == RG_FIO) ? {TG_FHEAD, 3'd0, cap_hdr_q} :     // a capture frame's header, once its REPLY is open
+`endif
                {TG_OHEAD, 3'd0, 11'd0, row_q, 16'd0};
 assign x_out = word_out | mw_out;
 
@@ -410,14 +440,23 @@ always @(posedge clk) begin
 		wst <= W_IDLE; req <= 1'b0; rd_pend <= 1'b0; st_pend <= 1'b0; word_out <= 1'b0;
 		tail <= 64'd0; avail <= 64'd0; due <= 4'b1111; stop <= 4'b0000; mid <= 4'b0000;
 		s_wait <= 1'b0; turn <= RG_OSD; fl_pend <= 1'b0; fresh <= 1'b0; rq_posted <= 1'b0; m_posted <= 2'd0;
+`ifdef MISTER_OCRAM_LANE
+		cap_held <= 1'b0; cap_q <= 1'b0; p_have <= 1'b0;
+`endif
 	end
 	else if (!s_live && wst != W_IDLE) begin
 		// the session ended: the record is abandoned, its mid bit left for the master
 		wst <= W_IDLE; req <= 1'b0; rd_pend <= 1'b0; st_pend <= 1'b0; word_out <= 1'b0;
+`ifdef MISTER_OCRAM_LANE
+		cap_q <= 1'b0; p_have <= 1'b0;
+`endif
 	end
 	else if (!s_live) fl_pend <= 1'b0;
 	else case (wst)
 	W_IDLE: begin
+`ifdef MISTER_OCRAM_LANE
+		cap_q <= 1'b0;
+`endif
 		mid <= 4'b0000;
 		if (flush) begin
 			ring <= RG_SEC; req <= 1'b1; req_we <= 1'b0; req_off <= H_IDX4; req_wd <= widx_i; wst <= W_FLUSH;
@@ -464,6 +503,14 @@ always @(posedge clk) begin
 		else if (ring == RG_SEC && c_rdata[31:24] == 8'h10 && c_rdata[23:16] == 8'd0 && c_rdata[15:0] == SEC_LEN) begin
 			flen_q <= SEC_K; k <= 14'd1; rd_pend <= 1'b1; wst <= W_LBA;
 		end
+`ifdef MISTER_OCRAM_LANE
+		else if (ring == RG_FIO && f_rec && f_cap) begin
+			// a capture frame: held for its REPLY while the EVT ring has room, else left where it is
+			cap_hdr_q <= c_rdata; cap_n_q <= c_rdata[10:0]; k <= 14'd0;
+			if ({5'd0, c_rdata[10:0]} + 16'd1 <= e_free && !evt_stop) begin cap_held <= 1'b0; wst <= W_CAP; end
+			else begin cap_held <= 1'b1; mid[RG_FIO] <= 1'b0; wst <= W_IDLE; end
+		end
+`endif
 		else if (ring == RG_FIO && f_rec) begin
 			flen_q <= c_rdata[13:0]; k <= 14'd0; word_out <= 1'b1; wst <= W_XFER;   // x_go launched FIO_HEAD
 		end
@@ -493,11 +540,33 @@ always @(posedge clk) begin
 		if (!c_ok) rd_pend <= 1'b1;                                   // read it again
 		else begin word_out <= 1'b1; wst <= W_XFER; end              // x_go launched it
 	end
+`ifdef MISTER_OCRAM_LANE
+	W_CAP: if (p_start) begin
+		// the REPLY's header is written: the frame's header crosses, then its words as a download frame's
+		flen_q <= {3'd0, cap_n_q}; cap_q <= 1'b1; word_out <= 1'b1; wst <= W_HGO;
+	end
+	else if (!cap_room) begin cap_held <= 1'b1; mid[RG_FIO] <= 1'b0; wst <= W_IDLE; end
+	W_XFER: if (p_have) begin
+		// a reply word in p_wd: the next ring word waits until the master has it (or the EVT ring has stopped)
+		if (p_wtake || evt_stop) begin
+			p_have <= 1'b0;
+			if (k == flen_q) begin k <= k + 14'd1; st_pend <= 1'b1; wst <= W_TAIL; end
+			else begin k <= k + 14'd1; rd_pend <= 1'b1; wst <= W_PAY; end
+		end
+	end
+	else if (done_v) begin
+		word_out <= 1'b0;
+		if (cap_q && ring == RG_FIO && k != 14'd0 && !evt_stop) p_have <= 1'b1;   // a ring word's two replies
+		else if (k == flen_q) begin k <= k + 14'd1; st_pend <= 1'b1; wst <= W_TAIL; end
+		else begin k <= k + 14'd1; rd_pend <= 1'b1; wst <= W_PAY; end
+	end
+`else
 	W_XFER: if (done_v) begin
 		word_out <= 1'b0;
 		if (k == flen_q) begin k <= k + 14'd1; st_pend <= 1'b1; wst <= W_TAIL; end
 		else begin k <= k + 14'd1; rd_pend <= 1'b1; wst <= W_PAY; end
 	end
+`endif
 	W_MNT: begin
 		// ocram_mnt_wr walks the WRITE on the walker's counter
 		if (mw_k0) k <= 14'd0;

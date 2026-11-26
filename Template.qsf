@@ -103,6 +103,9 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_FRAME=256"
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_LBA_BITS=32"
 
+# LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block")
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"
+
 # LW OSD image stores, written through each osd's own osd_buffer port (docs/LW_BRIDGE.md, "OSDBUF block")
 #set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
 
@@ -121,6 +124,13 @@ set_global_assignment -name SEED 1
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT0_SLOT=2"
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT1_SLOT=3"
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT_FRAME=128"
+# OCRAM file downloads into hps_io's download block (needs MISTER_OCRAM; not MISTER_LW_LANE), and link frames on
+# the UIO and OSD selects (needs MISTER_OCRAM_FIO).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_FIO=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_UIO=1"
+# OCRAM events tier (needs MISTER_OCRAM and MISTER_LW, not MISTER_LW_EVT) and capture lane (needs MISTER_OCRAM_FIO).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_EVT=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_LANE=1"
 # Idle poll period as a power of two clk_100m cycles (default 12: 41 us).
 #set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_POLL=12"
 
