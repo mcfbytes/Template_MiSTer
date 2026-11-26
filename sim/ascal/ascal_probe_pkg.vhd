@@ -12,4 +12,5 @@ PACKAGE ascal_probe_pkg IS
 	SIGNAL p_wadl   : natural := 0;                             -- line buffer write address
 	SIGNAL p_ldw    : unsigned(23 DOWNTO 0) := (OTHERS => '0'); -- line buffer write data
 	SIGNAL p_copy   : std_logic := '0';                         -- a line copy is in progress
+	SIGNAL p_seed   : std_logic := '0';                         -- a line's first copy may start
 END PACKAGE ascal_probe_pkg;

@@ -50,6 +50,16 @@ ENTITY tb_ascal IS
 		IN2_H    : natural := 0;
 		SW_HMIN  : natural := 0;
 		SW_HMAX  : natural := 0;
+		-- a mid-line window change: at output frame MID_FRAME (0 = never), MID_CYC o_clk cycles
+		-- after the HS edge that starts its line MID_LINE, the window becomes MID_HMIN..MID_HMAX
+		MID_FRAME : natural := 0;
+		MID_LINE  : natural := 0;
+		MID_CYC   : natural := 0;
+		MID_HMIN  : natural := 0;
+		MID_HMAX  : natural := 0;
+		-- MID_SEED: the change must fall in a copy gap, at least 16 o_clk after a copy ends and 4 to 11
+		-- before a line's first copy may start (seed.txt says MISSED otherwise, and run.sh fails)
+		MID_SEED  : boolean := false;
 		-- output mode
 		HTOTAL : natural := 2200; HSSTART : natural := 2008; HSEND : natural := 2052;
 		HDISP  : natural := 1920; HMIN : natural := 240; HMAX : natural := 1679;
@@ -291,14 +301,42 @@ BEGIN
 	Monitor:PROCESS(o_clk)
 		FILE fv : text OPEN write_mode IS OUTDIR & "/vid.txt";
 		FILE fp : text OPEN write_mode IS OUTDIR & "/pix.txt";
+		FILE fs : text OPEN write_mode IS OUTDIR & "/seed.txt";
+		VARIABLE pcp, psd : std_logic := '0';
+		VARIABLE cfall, mat : natural := 0;
+		VARIABLE mpend : boolean := false;
 		VARIABLE l : line;
-		VARIABLE cyc, nde, nnz, nlw, ln, fr : natural := 0;
+		VARIABLE cyc, nde, nnz, nlw, ln, fr, hc : natural := 0;
 		VARIABLE hv, hl, hf, ha : u32 := FNV0;
 		VARIABLE phs, pvs : std_logic := '0';
 		VARIABLE hf9d, hf1d : unsigned(11 DOWNTO 0) := (OTHERS => '0');
 	BEGIN
 		IF rising_edge(o_clk) THEN
 			cyc := cyc + 1;
+			hc := hc + 1;
+			IF MID_FRAME > 0 AND fr = MID_FRAME AND ln = MID_LINE AND hc = MID_CYC THEN
+				hmin_s <= MID_HMIN; hmax_s <= MID_HMAX;
+				mat := cyc; mpend := MID_SEED;
+				IF MID_SEED AND (p_copy = '1' OR cyc - cfall < 16) THEN
+					write(l, string'("MISSED in a copy or under 16 after one")); writeline(fs, l);
+				END IF;
+			END IF;
+			IF MID_FRAME > 0 THEN
+				IF p_copy = '0' AND pcp = '1' THEN cfall := cyc; END IF;
+				IF p_seed = '1' AND psd = '0' THEN
+					write(l, string'("S ")); write(l, fr); write(l, string'(" ")); write(l, ln);
+					write(l, string'(" ")); write(l, hc); writeline(fs, l);
+					IF mpend THEN
+						mpend := false;
+						write(l, string'("M ")); write(l, mat - cfall); write(l, string'(" "));
+						write(l, cyc - mat); writeline(fs, l);
+						IF cyc - mat < 4 OR cyc - mat > 11 THEN
+							write(l, string'("MISSED: the seed is not 4 to 11 after the change")); writeline(fs, l);
+						END IF;
+					END IF;
+				END IF;
+				pcp := p_copy; psd := p_seed;
+			END IF;
 			hv := mix(hv, o_r & o_g & o_b & o_hs & o_vs & o_de & o_vbl & o_brd);
 			IF o_de = '1' THEN
 				nde := nde + 1;
@@ -343,7 +381,7 @@ BEGIN
 				write(l, string'(" ")); write(l, to_hstring(ha));
 				writeline(fv, l);
 				hv := FNV0; hl := FNV0; hf := FNV0; ha := FNV0; nde := 0; nnz := 0; nlw := 0;
-				ln := ln + 1;
+				ln := ln + 1; hc := 0;
 			END IF;
 			IF o_vs = '1' AND pvs = '0' THEN
 				write(l, string'("F ")); write(l, fr); write(l, string'(" "));

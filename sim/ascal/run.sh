@@ -9,6 +9,8 @@
 #         <config>/phase digest (the phase of every cycle of a line copy, written or not) is
 #         reported but not gated: a restructure that accumulates rather than divides follows
 #         a changed o_hsize some cycles later, which only a copy straddling a mode change sees.
+#         <config>/avlseq (avl.txt without its times) is gated too. The fences below are reported.
+#         A MID_SEED config whose window change misses its copy gap exits 2 (seed.txt says MISSED).
 #
 # Needs GHDL (4.x or 5.x; the LLVM or GCC backend is several times faster than mcode) and
 # python3. GHDL=... picks the binary. GHDL_IEEE_SRC=... points at GHDL's ieee2008 sources
@@ -106,11 +108,20 @@ cut -d' ' -f1 "$LIST" | while read -r name; do
 	echo "$(awk '$1=="L"{NF=10} 1' "$name/vid.txt" | digest)  $name/vid"
 	echo "$(awk '$1=="L"{print $2, $3, $11} $1=="F"' "$name/vid.txt" | digest)  $name/phase"
 	echo "$(digest < "$name/avl.txt")  $name/avl.txt"
+	echo "$(awk '{$2=""} 1' "$name/avl.txt" | digest)  $name/avlseq"
 done > SHA256SUMS
+missed=$(grep -l MISSED */seed.txt 2>/dev/null || true)
+if [ -n "$missed" ]; then echo "run.sh: stimulus missed:" $missed; rc=2; fi
 if [ $CHECK = 1 ]; then
-	bad=$(grep -v '/phase$' SHA256SUMS | grep -vxFf "$HERE/golden.sha256" | sed 's/^[0-9a-f]*  //' || true)
-	soft=$(grep '/phase$' SHA256SUMS | grep -vxFf "$HERE/golden.sha256" | sed 's/^[0-9a-f]*  //' || true)
-	[ -n "$soft" ] && echo "run.sh: copy-cycle phase differs (not gated):" $soft
+	# Fences: outside the restructure's exact domain only the phase may differ (midline-1080: a window
+	# change mid-copy, the straddled line; lfb-1080-fbwide: an input wider than the window). Their vid
+	# is reported, not gated; their avl.txt (every read and write) is gated.
+	# midseed-1080 holds its seed for the new window's constants: its reads may move a few cycles, so its
+	# avl.txt (with times) is reported and its avlseq (the same reads and writes, untimed) gated.
+	FENCE='^[0-9a-f]*  ((midline-1080|lfb-1080-fbwide)/vid|midseed-1080/avl\.txt)$'
+	bad=$(grep -v '/phase$' SHA256SUMS | grep -Ev "$FENCE" | grep -vxFf "$HERE/golden.sha256" | sed 's/^[0-9a-f]*  //' || true)
+	soft=$( (grep '/phase$' SHA256SUMS; grep -E "$FENCE" SHA256SUMS) | grep -vxFf "$HERE/golden.sha256" | sed 's/^[0-9a-f]*  //' || true)
+	[ -n "$soft" ] && echo "run.sh: copy-cycle phase or a fence's vid differs (not gated):" $soft
 	if [ -n "$bad" ]; then
 		echo "run.sh: MISMATCH against golden.sha256:" $bad; rc=1
 	else

@@ -6,4 +6,5 @@ USE work.ascal_probe_pkg.ALL;
 	p_wr     <= o_wr;\
 	p_wadl   <= o_wadl;\
 	p_ldw    <= o_ldw.r & o_ldw.g & o_ldw.b;\
-	p_copy   <= '0' WHEN o_copy=sWAIT ELSE '1';
+	p_copy   <= '0' WHEN o_copy=sWAIT ELSE '1';\
+	p_seed   <= '1' WHEN o_copy=sWAIT AND o_primv(0)='1' AND o_copylev>0 AND o_copyv(0)='0' ELSE '0';
