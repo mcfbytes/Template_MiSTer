@@ -338,7 +338,8 @@ wire [15:0] sec_off = SEC_BASE + ((widx & (SEC_WORDS - 1)) << 2);
 wire [15:0] fio_off = FIO_BASE + ((widx & (FIO_WORDS - 1)) << 2);
 wire [15:0] mnt_off = MNT_BASE + ((widx & (MNT_WORDS - 1)) << 2);
 wire [63:0] R_TAB   = {mnt_off, fio_off, sec_off, osd_off};    // each ring's word at tail + k
-wire [15:0] new_gap = c_rdata[15:0] - tl;
+reg  [15:0] tl_q = 16'd0;                  // tl, a cycle on: the walked ring's tail in W_HEAD and W_FLUSH
+wire [15:0] new_gap = c_rdata[15:0] - tl_q;
 
 assign c_req    = req;
 assign c_we     = req_we;
@@ -412,6 +413,7 @@ ocram_mnt_wr mwr_u
 
 always @(posedge clk) begin
 	flt <= 4'b0000;
+	tl_q <= tl;
 	if (c_grant) req <= 1'b0;
 
 	// the disc slot's unbind owes a flush of ring 1, unless the ring has stopped

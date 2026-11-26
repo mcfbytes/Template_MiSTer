@@ -460,6 +460,10 @@ hps_ocram_rx #(.ROWS(ROWS), .OSD_EN(OSD_B), .SEC_EN(SEC_B), .FRAME(SFRAME), .GAP
 	.l_busy(l_busy_m), .l_wait(l_wait_m),
 	.l_own(p_own), .l_hold(p_hold), .l_sel(p_sel), .l_strobe(p_strobe), .l_din(p_din)
 );
+// the walker's registered tail: in a head read (W_HEAD, W_FLUSH) it is the walked ring's
+always @(posedge clk)
+	if ((u_osd.rd.wst == 4'd1 || u_osd.rd.wst == 4'd9) && u_osd.rd.tl_q !== u_osd.rd.tail[{u_osd.rd.ring, 4'd0} +: 16])
+		merr("the walker's tl_q is not the walked ring's tail in a head read");
 
 // The two real osd.v instances: A only over SPI, B only from the OCRAM writer.
 reg         io_osd_a = 1'b0, io_strobe_a = 1'b0;
