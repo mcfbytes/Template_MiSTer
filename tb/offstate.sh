@@ -30,7 +30,9 @@
 #      `ifdef MISTER_OCRAM, first (sys/lw_lane.sv: each pair defining its local macros, then their guard); `default_nettype none first inside it, `default_nettype wire last. Each macro
 #      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
 #      file ends; it undefines no macro it did not define; it defines no LW_DIAG (a build sets that one).
-#   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
+#   4. Every other file under sys/, and files.qip, is byte-identical to upstream, except that sys/ascal.vhd, with
+#      its OHRESC declaration (4096) dropped and OHRESC read as OHRESH, is: upstream's OHRESH is 4096 at the default
+#      OHRES 2304, so only an OHRES 1024 or 2048 build changes; sys.qip adds only
 #      SYSTEMVERILOG_FILE lines for LW-only files, SOURCE_FILE lines for the OCRAM headers (sys/ocram_*.vh, which
 #      only a guarded `include reads) and one SDC_FILE line for lw_bridge.sdc, right after
 #      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's, and its
@@ -455,7 +457,15 @@ for p in sorted(theirs - mine):
 for p in sorted(mine & theirs) + ['files.qip']:
     if p in STOCK or p == 'sys/sys.qip':
         continue
-    check(open(p, 'rb').read() == open(os.path.join(UP, p), 'rb').read(), '%s: differs from upstream' % p)
+    b, u = open(p, 'rb').read(), open(os.path.join(UP, p), 'rb').read()
+    if p == 'sys/ascal.vhd':
+        decl = b'\tCONSTANT OHRESC : natural := 4096; -- Output counters, beyond the line buffers\n'
+        check(b.count(decl) == 1, '%s: not one OHRESC declaration of 4096' % p)
+        b = b.replace(decl, b'').replace(b'OHRESC', b'OHRESH')
+        check(re.search(rb'OHRES +: natural RANGE 1 TO 4096 :=2304;', u) is not None and
+              re.search(rb'FUNCTION ohres_h.*?WHEN OTHERS => RETURN 4096;', u, re.S) is not None,
+              '%s: upstream\'s OHRESH is not 4096 at its default OHRES' % p)
+    check(b == u, '%s: differs from upstream' % p)
 qip = open('sys/sys.qip').read().splitlines()
 add = re.compile(r'set_global_assignment -name (SYSTEMVERILOG_FILE \[file join \$::quartus\(qip_path\) '
                  r'(hps_lw_|lw_|hps_ocram_|ocram_)\w+\.sv|SOURCE_FILE +\[file join \$::quartus\(qip_path\) '
