@@ -40,7 +40,8 @@
 //     and LBA come back once through status_in, and hps_io never sees the request; with the slot's EN clear the
 //     next request reaches hps_io's sd_rd with the next LBA;
 //   - with the OSD tier, each osd instance that exists carries the window's OSDBUF write port, and the window takes
-//     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd) and GPO[31] on clk_sys;
+//     both osd selects as each osd sees them (the HDMI one 0 without an HDMI osd, the VGA one 0 without a VGA
+//     osd, which MISTER_DISABLE_VGA_SCALER removes, and then osd_status is the HDMI osd's) and GPO[31] on clk_sys;
 //   - the link's selects, data and acknowledge reach hps_io, the osds and GPI as the stock decode makes them,
 //     also through the lane's link front;
 //   - an LW read through the bridge atom returns the directory magic and the default word;
@@ -55,6 +56,15 @@ module top_tb;
 
 `ifndef LW_TB_SYS_HP_PS
 `define LW_TB_SYS_HP_PS 14762
+`endif
+// LW_TB_VGA_OSD: sys_top builds vga_osd (not with MISTER_DISABLE_VGA_SCALER, unless NOHDMI or DUAL_SDRAM)
+`define LW_TB_VGA_OSD
+`ifdef MISTER_DISABLE_VGA_SCALER
+`ifndef MISTER_DEBUG_NOHDMI
+`ifndef MISTER_DUAL_SDRAM
+`undef LW_TB_VGA_OSD
+`endif
+`endif
 `endif
 
 reg clk50, clk_100m, clk_sys, clk_hdmi, clk_audio;
@@ -472,8 +482,10 @@ initial begin
 		force dut.lw_sys_window.osd_addr = (k != 0) ? 13'h15A5 : 13'h0A5A;
 		force dut.lw_sys_window.osd_byte = (k != 0) ? 8'h3C : 8'hC3;
 		#1;
+`ifdef LW_TB_VGA_OSD
 		check("vga_osd {lw_we, lw_addr, lw_byte}", {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte},
 		      {dut.lw_sys_window.osd_we, dut.lw_sys_window.osd_addr, dut.lw_sys_window.osd_byte});
+`endif
 `ifndef MISTER_DEBUG_NOHDMI
 		check("hdmi_osd {lw_we, lw_addr, lw_byte}", {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_byte},
 		      {dut.lw_sys_window.osd_we, dut.lw_sys_window.osd_addr, dut.lw_sys_window.osd_byte});
@@ -488,8 +500,10 @@ initial begin
 	force dut.ocram_rx.addr = 13'h0A5A;
 	force dut.ocram_rx.dbyte = 8'hC3;
 	#1;
+`ifdef LW_TB_VGA_OSD
 	check("vga_osd {lw_we, lw_addr, lw_byte} from the OCRAM writer",
 	      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte}, {1'b1, 13'h0A5A, 8'hC3});
+`endif
 `ifndef MISTER_DEBUG_NOHDMI
 	check("hdmi_osd {lw_we, lw_addr, lw_byte} from the OCRAM writer",
 	      {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_byte}, {1'b1, 13'h0A5A, 8'hC3});
@@ -500,8 +514,13 @@ initial begin
 	force dut.lw_sys_window.osd_addr = 13'h15A5;
 	force dut.lw_sys_window.osd_byte = 8'h3C;
 	#1;
+`ifdef LW_TB_VGA_OSD
 	check("the mux takes the LW writer while the OCRAM writer is quiet",
 	      {dut.vga_osd.lw_we, dut.vga_osd.lw_addr, dut.vga_osd.lw_byte}, {1'b1, 13'h15A5, 8'h3C});
+`else
+	check("the mux takes the LW writer while the OCRAM writer is quiet",
+	      {dut.hdmi_osd.lw_we, dut.hdmi_osd.lw_addr, dut.hdmi_osd.lw_byte}, {1'b1, 13'h15A5, 8'h3C});
+`endif
 	release dut.lw_sys_window.osd_we; release dut.lw_sys_window.osd_addr; release dut.lw_sys_window.osd_byte;
 `endif
 	release dut.ocram_rx.we; release dut.ocram_rx.addr; release dut.ocram_rx.dbyte;
@@ -517,17 +536,31 @@ initial begin
 		check("hps_io fp_enable", dut.emu.hps_io.fp_enable, {~ss[1] & ss[0]});
 		check("hps_io io_enable", dut.emu.hps_io.io_enable, {~ss[1] & ss[2]});
 		check("hps_io io_din", dut.emu.hps_io.io_din, {16'h1234 ^ {i[3:0], 12'd0}});
+`ifdef LW_TB_VGA_OSD
 		check("vga_osd io_osd", dut.vga_osd.io_osd, {ss[1] & ~ss[2]});
+`endif
 `ifndef MISTER_DEBUG_NOHDMI
 		check("hdmi_osd io_osd", dut.hdmi_osd.io_osd, {ss[1] & ~ss[0]});
+`endif
+`ifndef LW_TB_VGA_OSD
+		check("osd_status is the HDMI osd's", dut.osd_status, dut.hdmi_osd.osd_status);
+`endif
+`ifdef MISTER_OCRAM_OSD
+`ifndef LW_TB_VGA_OSD
+		check("the OCRAM writer's selects: 0 for the VGA osd that is not built, and the HDMI osd's",
+		      dut.ocram_osd_sel, {1'b0, dut.hdmi_osd.io_osd});
+`endif
 `endif
 `ifdef MISTER_LW_OSD
 `ifdef MISTER_DEBUG_NOHDMI
 		check("the OSD writer's selects: the VGA osd's, and 0 for the HDMI osd that is not built",
 		      dut.lw_sys_window.osd_sel, {dut.vga_osd.io_osd, 1'b0});
-`else
+`elsif LW_TB_VGA_OSD
 		check("the OSD writer's selects: {VGA, HDMI} as each osd sees them", dut.lw_sys_window.osd_sel,
 		      {dut.vga_osd.io_osd, dut.hdmi_osd.io_osd});
+`else
+		check("the OSD writer's selects: 0 for the VGA osd that is not built, and the HDMI osd's",
+		      dut.lw_sys_window.osd_sel, {1'b0, dut.hdmi_osd.io_osd});
 `endif
 		check("the OSD writer's view: the I/O view", dut.lw_sys_window.osd_view, 1'b1);
 `endif
@@ -725,3 +758,4 @@ endmodule
 `default_nettype wire
 
 `undef LW_TB_ANY_SECTOR
+`undef LW_TB_VGA_OSD
