@@ -560,6 +560,10 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_hdd,o_hdr : unsigned(12 DOWNTO 0) :=(OTHERS =>'0');
 	SIGNAL o_hdq : unsigned(8 DOWNTO 0) :=(OTHERS =>'0');
 	SIGNAL o_hdcpt : natural RANGE 0 TO 9 :=0;
+	-- The pass's operands, and its 8-step result until the constants are published together
+	SIGNAL o_hd_hsize,o_hd_ihsize,o_hp_hsize,o_hp_ihsize : uint12 :=0;
+	SIGNAL o_hqi_t : unsigned(9 DOWNTO 0) :=(OTHERS =>'0');
+	SIGNAL o_hri_t : unsigned(12 DOWNTO 0) :=(OTHERS =>'0');
 	SIGNAL o_vdivi : unsigned(12 DOWNTO 0);
 	SIGNAL o_vdivr : unsigned(24 DOWNTO 0);
 	SIGNAL o_divstart : std_logic;
@@ -1874,18 +1878,26 @@ BEGIN
 	-- Horizontal phase constants. A free-running restoring divider:
 	-- 256*o_ihsize = Q*2*o_hsize + R after 8 steps, and 512*o_ihsize after 9.
 	-- o_hacc_ini = o_hsize + o_ihsize, so its quotient is 128 + Q, remainder R.
+	-- Every constant of one pass is published on one edge with the sizes it was computed from
+	-- (o_hp_hsize, o_hp_ihsize): a line copy starts only while those are the live sizes.
 	HDivider:PROCESS (o_clk) IS
 		VARIABLE t_v : unsigned(13 DOWNTO 0);
 	BEGIN
 		IF rising_edge(o_clk) THEN
 			IF o_hdcpt=9 THEN
-				o_hqi<=to_unsigned(128,10) + o_hdq(7 DOWNTO 0);
-				o_hri<=o_hdr;
+				o_hqi_t<=to_unsigned(128,10) + o_hdq(7 DOWNTO 0);
+				o_hri_t<=o_hdr;
 			END IF;
 			IF o_hdcpt=0 THEN
+				o_hqi<=o_hqi_t;
+				o_hri<=o_hri_t;
 				o_hqs<=resize(o_hdq,10);
 				o_hrs<=o_hdr;
 				o_hrsd<=resize(o_hdr,14) - resize(o_hdd,14);
+				o_hp_hsize<=o_hd_hsize;
+				o_hp_ihsize<=o_hd_ihsize;
+				o_hd_hsize<=o_hsize;
+				o_hd_ihsize<=o_ihsize;
 				o_hdd<=to_unsigned(2*o_hsize,13);
 				o_hdr<=to_unsigned(o_ihsize,13);
 				o_hdq<=(OTHERS =>'0');
@@ -2251,7 +2263,9 @@ BEGIN
 			CASE o_copy IS
 				WHEN sWAIT =>
 					o_copyv(0)<='0';
-					IF o_copylev>0 AND o_copyv(0)='0' THEN
+					-- a line's first copy waits for the phase constants of the live sizes
+					IF o_copylev>0 AND o_copyv(0)='0' AND
+					   (o_primv(0)='0' OR (o_hp_hsize=o_hsize AND o_hp_ihsize=o_ihsize)) THEN
 						o_copy<=sCOPY;
 						IF o_off(0)>0 AND o_primv(0)='1' THEN
 							o_copy<=sSHIFT;
@@ -2617,6 +2631,7 @@ BEGIN
 			-----------------------------------
 			-- Horizontal phase: floor(256*o_hacc / (2*o_hsize)), all ones from o_hacc = 2*o_hsize,
 			-- as FRAC bits rounded up to an even count. Three stages keep the divider's latency.
+			-- Equal to the per-pixel divider while o_ihsize <= o_hsize and the sizes hold for the line.
 			dir_v:=x"000";
 			IF o_hq(9 DOWNTO 8)/="00" THEN
 				dir_v(11 DOWNTO 4):=x"FF";
