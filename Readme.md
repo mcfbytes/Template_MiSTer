@@ -50,6 +50,8 @@ MISTER_LW_PAD            | LW PAD block and hps_io's LW write arm; needs MISTER_
 MISTER_LW_KBM            | LW keys, mouse and triggers as PAD stores; needs MISTER_LW_PAD
 MISTER_LW_EVT            | LW EVT block (status, block-request, info, upload flags); needs MISTER_LW
 MISTER_LW_OSD            | LW OSDBUF block, a write port into each osd's osd_buffer; needs MISTER_LW
+MISTER_LW_SECTOR_SLOT    | LW SECTOR block on this hps_io slot; with _FRAME, _GAP, MISTER_LW_BLKSZ (= hps_io's BLKSZ)
+MISTER_LW_SAVE0_SLOT     | LW save slot 0 (likewise SAVE1); needs _WSRC, _EXTENT, the SECTOR slot
 MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)
 MISTER_DISABLE_SPI_KBM   | Removes the SPI key, mouse and trigger commands; needs MISTER_LW_KBM
 MISTER_DISABLE_SPI_OSD   | Removes osd.v's SPI row writes; needs MISTER_OCRAM_OSD or MISTER_LW_OSD

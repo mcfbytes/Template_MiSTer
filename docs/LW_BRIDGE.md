@@ -16,8 +16,16 @@ An optional extension of `sys/` that gives the HPS a second, memory-mapped path 
 | `MISTER_LW_PAD` | absent | with `MISTER_LW`: the PAD block (`lw_pad.sv`) and `hps_io`'s LW write arm |
 | `MISTER_LW_EVT` | absent | with `MISTER_LW`: the EVT block (`lw_evt.sv`): `hps_io`'s status, block-request, info and upload flags as causes, `hps_io`'s exports and its line |
 | `MISTER_LW_OSD` | absent | with `MISTER_LW`: the OSDBUF block (`lw_osd.sv`) and a write port into each `osd`'s `osd_buffer` |
+| `MISTER_LW_SECTOR_SLOT` | absent | the `hps_io` slot the SECTOR block feeds, 0-15; its presence builds the block |
+| `MISTER_LW_SECTOR_FRAME` | 128 | 32-bit words per primary frame, 1-4096 (128 = one 512-byte block) |
+| `MISTER_LW_SECTOR_GAP` | 2 | `clk_sys` cycles between write strobes, and from the ack to the first, 2-15 |
+| `MISTER_LW_BLKSZ` | 2 | the core's `hps_io` `BLKSZ`, reported in the GET_SDSTAT words; a value other than `hps_io`'s stops the build at `lw_blksz_differs_from_hps_io` |
+| `MISTER_LW_SAVE0_SLOT`, `_WSRC`, `_EXTENT` | absent | save slot 0 (slot index 1): `hps_io` slot (0-15), DDR image base, image bytes |
+| `MISTER_LW_SAVE0_FRAME` | 256 | its 32-bit words per frame, 1-510 (the FIFO's entries - 2; 256 = one 1 KB block) |
+| `MISTER_LW_SAVE0_LBA_BITS` | 32 | its LBA bits kept, crossed and compared, 1-32 |
+| `MISTER_LW_SAVE1_SLOT`, `_WSRC`, `_EXTENT`, `_FRAME`, `_LBA_BITS` | absent, 256, 32 | save slot 1 (slot index 2), likewise |
 
-**An unservable geometry stops the build** (in synthesis too), naming the undefined module `lw_sector_unservable_geometry`: a primary frame outside 1-4096 words, a save slot's outside 1-510, an LBA width outside 1-32, a gap outside 2-15, an `hps_io` slot above 15, two slots on one `hps_io` slot, or a save slot without an image base. Frames are one fixed length per slot; a slot whose requests vary in length or use `sd_blk_cnt` stays on SPI by not being declared.
+A save slot is declared by its `_SLOT` macro, needs its `_WSRC` and needs `MISTER_LW_SECTOR_SLOT` too. **An unservable geometry stops the build** (in synthesis too), naming the undefined module `lw_sector_unservable_geometry`: a primary frame outside 1-4096 words, a save slot's outside 1-510, an LBA width outside 1-32, a gap outside 2-15, an `hps_io` slot above 15, two slots on one `hps_io` slot, or a save slot without an image base. Frames are one fixed length per slot; a slot whose requests vary in length or use `sd_blk_cnt` stays on SPI by not being declared.
 
 ### Tiers and their cost
 
@@ -28,6 +36,7 @@ A core pays only for what its `.qsf` names. Every figure is **ESTIMATED**: regis
 | L0 floor | `MISTER_LW` | the firewall, the decode, the directory and its header words, the host enable, GPI bits 25, 24 and 22, the 384-bit `HPS_BUS` | 150-200 ALMs, no block memory |
 | L1 pads | `MISTER_LW_PAD` | the PAD block, `hps_io`'s LW write arm | 150-185 ALMs, 1 M10K |
 | L2 events | `MISTER_LW_EVT` | the EVT block, `hps_io`'s event exports, line 2 | 85-120 ALMs, 132 of its registers being the status hold on `clk_sys`; no block memory |
+| L3 SECTOR | `MISTER_LW_SECTOR_SLOT` and its geometry | the SECTOR block and its enable link, line 1, the core-side muxes, `hps_io`'s commit mark | 325-400 ALMs and about 12 per mux, 3 M10K |
 | L3 OSD | `MISTER_LW_OSD` | the OSDBUF block and its enable link, a second write source in each `osd` | 75-100 ALMs, 2 M10K |
 
 ## Discovery and safety
@@ -51,6 +60,7 @@ Offsets are from the window start; absolute LW offset = `0x40000` + offset. An a
 | `0x00000` | `0x40000` | `0x1000` | directory: header and entries; the rest of the page reads 0 |
 | `0x03000` | `0x43000` | `0x1000` | EVT (with `MISTER_LW_EVT`) |
 | `0x04000` | `0x44000` | `0x2000` | OSDBUF (with `MISTER_LW_OSD`) |
+| `0x08000` | `0x48000` | `0x8000` | SECTOR (with `MISTER_LW_SECTOR_SLOT`): registers at `+0x0000`, DATA at `+0x4000` |
 | `0x20000` | `0x60000` | `0x20000` | reserved for a core's own blocks; not decoded in this revision |
 | `0x40000` | `0x80000` | `0x40000` | PAD (with `MISTER_LW_PAD`) |
 
@@ -166,6 +176,57 @@ Image stores written into `osd_buffer` itself, in each `osd` instance (HDMI and 
 | `0x1C` | ID | `0x32545645` ("EVT2") |
 
 - **The status crosses whole.** When the core raises `status_set`, `{status_req, flag}` crosses to the bridge in one held-data handshake: a transfer is never torn, at any `clk_sys`. Requests faster than the handshake coalesce into the latest, and the latest always arrives.
+
+### SECTOR block (kind 2, version 2.0, "SEC3")
+
+The block serves one primary `hps_io` read slot and up to two save slots through one feeder. Every per-slot field (the EN bit, the CAUSE bit, the slot's registers and its descriptor) is indexed by the slot index *k*: 0 the primary, 1 save slot 0, 2 save slot 1; never by the `hps_io` slot number. The feeder replays `hps_io`'s own handshake into the core: `sd_ack`, then, as `hps_io`'s `io_wide` (`WIDE`) says, two 16-bit `sd_buff_wr` strobes per 32-bit word, low half first, at the halfword index, or four 8-bit strobes, byte 0 first, at the byte index. Strobes are `strobe_gap` `clk_sys` cycles apart, and the ack leads the first by `strobe_gap`.
+
+**Kind words** (the entry's CAUSE word gives the CAUSE register, LINE ordinal 1):
+
+| word | value |
+|---|---|
+| K0 | `{fifo_entries[31:16] = 512, 0, strobe_gap[7:0]}`: `MISTER_LW_SECTOR_GAP` |
+| K1 | `{0, BLKSZ[10:8], 0, wide[0]}`: 1 = 16-bit strobes, 0 = 8-bit (`hps_io`'s `io_wide`) |
+| K2 | the slot descriptors that follow, 1-3 |
+| K3 | 0 |
+| K4 + 4*k* | `{flags[31:24], 0, hps_io slot[19:16], 0, frame_words[12:0]}`; flags bit 0 = RD, bit 1 = WR; flags 0 = declared but not wired, not servable |
+| K5 + 4*k* | `{0, lba_bits[5:0]}`: 32 for the primary; a save slot's `_LBA_BITS` |
+| K6 + 4*k* | DDR image base, physical (0 for the primary) |
+| K7 + 4*k* | DDR image size in bytes (0 for the primary) |
+
+| offset | register | |
+|---|---|---|
+| `0x000` | CAUSE | bit *k*: slot *k*'s request opened or re-opened while its EN is set (a refused or withdrawn answer re-opens it); a store clears each bit written as 1 |
+| `0x004` | REQ | `{pending[31], 0, k[17:16], GET_SDSTAT word[15:0]}` of the highest-priority open request (*k* = 0, 1, 2); 0 when none |
+| `0x010` | ACCEPT | `{ok[31], closed[30], 0, drops[27:16], 0, next_index[12:0]}` for the frame being stored; `ok`: every word taken (the primary), the frame committed (a save slot); `closed`: no frame is open, because the last BEGIN_S or WACK_S was refused (a full FIFO or a held ABORT) or its frame was withdrawn, and DATA is ignored until the next one; `drops` counts stores refused by a full FIFO |
+| `0x014` | ID | `0x33434553` ("SEC3") |
+| `0x100 + 0x20k` | RSTAT_S[k] | `{offered[31], answered[30], 0, GET_SDSTAT word[15:0]}` from slot *k*'s latest request record |
+| `0x104 + 0x20k` | LBA_S[k] | slot *k*'s LBA, from its latest request record |
+| `0x108 + 0x20k` | BEGIN_S[k] | write the LBA: opens a READ frame of slot *k*'s frame_words |
+| `0x10C + 0x20k` | WACK_S[k] | write the LBA: answers a save slot's WRITE (*k* = 1, 2) with an ack pulse and no strobes |
+| `0x4000 + 4i` | DATA[i] | word *i* of the open frame, taken only at *i* = `next_index` (an earlier word's resend, a later word and a store past the frame's length are ignored) |
+
+## Hooking the SECTOR block
+
+The block replaces the HPS side of one `hps_io` slot. The core keeps its own reader. `sys/lw_blk_mux.sv` sits between `hps_io` and that reader:
+
+```verilog
+// .qsf: VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1", "MISTER_LW_SECTOR_FRAME=128", "MISTER_LW_BLKSZ=2"
+wire        blk_req, blk_ack, blk_wr;
+wire [13:0] blk_addr;
+wire [15:0] blk_data;
+lw_blk_mux blk_lw
+(
+    .HPS_BUS(HPS_BUS), .reset(reset),
+    .core_req(blk_req), .core_lba(sd_lba[1]), .core_ack(blk_ack), .core_wr(blk_wr), .core_addr(blk_addr),
+    .core_data(blk_data),
+    .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_addr(sd_buff_addr), .hps_data(sd_buff_dout)
+);
+// the reader takes blk_req/blk_ack/blk_wr/blk_addr/blk_data where it took sd_rd[1]/sd_ack[1]/sd_buff_wr/
+// sd_buff_addr/sd_buff_dout (with WIDE = 0 the data is blk_data[7:0], the address a byte index)
+```
+
+- **The mux only switches between requests.** While the host's EN is off, everything passes through to `hps_io` and SPI serves the slot. Each slot's mux switches only while the slot is idle and its SPI ack is low, and moves to the LW side only while `hps_io`'s commit mark reads 0: from a GET_SDSTAT answer that shows the SPI host a request until that host's block transfer ends, or until a GET_SDSTAT shows none, no slot's mux moves. One mark covers every slot, so a bind may take effect one SPI transfer late.
 
 ## Clock-domain contracts
 

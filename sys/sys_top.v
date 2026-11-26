@@ -1863,23 +1863,82 @@ localparam        LW_SEC_EXT   = 0;
 localparam  [1:0] LW_MNT_EXT   = 2'd0;
 // The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
 // macro and needs its _WSRC; lw_sys_window stops the build on an unservable geometry.
+`ifdef MISTER_LW_SECTOR_SLOT
+localparam        LW_SEC_EN    = 1;
+localparam [31:0] LW_SEC_SLOT  = `MISTER_LW_SECTOR_SLOT;
+`else
 localparam        LW_SEC_EN    = 0;
 localparam [31:0] LW_SEC_SLOT  = 32'd1;
+`endif
+`ifdef MISTER_LW_SECTOR_FRAME
+localparam [31:0] LW_SEC_FRAME = `MISTER_LW_SECTOR_FRAME;
+`else
 localparam [31:0] LW_SEC_FRAME = 32'd128;
+`endif
+`ifdef MISTER_LW_SECTOR_GAP
+localparam [31:0] LW_SEC_GAP   = `MISTER_LW_SECTOR_GAP;
+`else
 localparam [31:0] LW_SEC_GAP   = 32'd2;
+`endif
+`ifdef MISTER_LW_BLKSZ
+localparam  [2:0] LW_BLKSZ     = `MISTER_LW_BLKSZ;
+`else
 localparam  [2:0] LW_BLKSZ     = 3'd2;
+`endif
+`ifdef MISTER_LW_SAVE0_SLOT
+localparam        LW_SAVE0_EN    = 1;
+localparam [31:0] LW_SAVE0_SLOT  = `MISTER_LW_SAVE0_SLOT;
+`else
 localparam        LW_SAVE0_EN    = 0;
 localparam [31:0] LW_SAVE0_SLOT  = 32'hE;
+`endif
+`ifdef MISTER_LW_SAVE0_WSRC
+localparam [31:0] LW_SAVE0_WSRC  = `MISTER_LW_SAVE0_WSRC;
+`else
 localparam [31:0] LW_SAVE0_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_EXTENT
+localparam [31:0] LW_SAVE0_EXT   = `MISTER_LW_SAVE0_EXTENT;
+`else
 localparam [31:0] LW_SAVE0_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_FRAME
+localparam [31:0] LW_SAVE0_FRAME = `MISTER_LW_SAVE0_FRAME;
+`else
 localparam [31:0] LW_SAVE0_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE0_LBA_BITS
+localparam [31:0] LW_SAVE0_LBAB  = `MISTER_LW_SAVE0_LBA_BITS;
+`else
 localparam [31:0] LW_SAVE0_LBAB  = 32'd32;
+`endif
+`ifdef MISTER_LW_SAVE1_SLOT
+localparam        LW_SAVE1_EN    = 1;
+localparam [31:0] LW_SAVE1_SLOT  = `MISTER_LW_SAVE1_SLOT;
+`else
 localparam        LW_SAVE1_EN    = 0;
 localparam [31:0] LW_SAVE1_SLOT  = 32'hF;
+`endif
+`ifdef MISTER_LW_SAVE1_WSRC
+localparam [31:0] LW_SAVE1_WSRC  = `MISTER_LW_SAVE1_WSRC;
+`else
 localparam [31:0] LW_SAVE1_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_EXTENT
+localparam [31:0] LW_SAVE1_EXT   = `MISTER_LW_SAVE1_EXTENT;
+`else
 localparam [31:0] LW_SAVE1_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_FRAME
+localparam [31:0] LW_SAVE1_FRAME = `MISTER_LW_SAVE1_FRAME;
+`else
 localparam [31:0] LW_SAVE1_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE1_LBA_BITS
+localparam [31:0] LW_SAVE1_LBAB  = `MISTER_LW_SAVE1_LBA_BITS;
+`else
 localparam [31:0] LW_SAVE1_LBAB  = 32'd32;
+`endif
 localparam        LW_LANE_EN   = 0;
 hps_lw_bridge hps_lw_bridge
 (

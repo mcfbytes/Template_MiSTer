@@ -528,10 +528,51 @@ end
 endgenerate
 
 generate
+`ifdef MISTER_LW_SECTOR_SLOT
+if (SEC_EN) begin : sec
+	if (SEC_BAD) begin : geometry
+		lw_sector_unservable_geometry guard();
+	end
+	// synthesis translate_off
+	initial if (SEC_BAD) begin
+		$display({"lw_sys_window: unservable SECTOR geometry: slot %0d, frame %0d, gap %0d; save slot 0 (%0d) on ",
+		          "slot %0d, frame %0d, %0d LBA bits, image 0x%08h; save slot 1 (%0d) on slot %0d, frame %0d, %0d LBA ",
+		          "bits, image 0x%08h"}, SEC_SLOT, SEC_FRAME, SEC_GAP, SAVE_DECL0, SAVE0_SLOT, SAVE0_FRAME,
+		         SAVE0_LBA_BITS, SAVE0_WSRC, SAVE_DECL1, SAVE1_SLOT, SAVE1_FRAME, SAVE1_LBA_BITS, SAVE1_WSRC);
+		$finish;
+	end
+	// synthesis translate_on
+	lw_sector #(.SLOT(SEC_SLOT[7:0]), .FRAME(SEC_FRAME[12:0]), .BLKSZ(BLKSZ), .AW(SEC_AW),
+	            .XSLOT0(SAVE0_SLOT[3:0]), .XSLOT1(SAVE1_SLOT[3:0]), .XFRAME0(SAVE0_FRAME[12:0]),
+	            .XFRAME1(SAVE1_FRAME[12:0]), .XLB0(SAVE0_LBA_BITS[5:0]), .XLB1(SAVE1_LBA_BITS[5:0]),
+	            .GAP(SEC_GAP[3:0])) sector
+	(
+		.clk(clk),
+		.raddr(rsec), .rsel(r_sec), .rdata(sec_rdata),
+		.waddr(wsec), .wsel(w_sec), .write(wr_sec), .wdata(lw_wdata), .be(lw_be), .hen(en_q),
+		.take(e_take), .f_open(sec_open), .f_owned(sec_owned), .f_idle(sec_idle),
+		.wired(wired),
+		.doorbell(sec_bell),
+		.clk_sys(clk_sys),
+		// HPS_BUS[166:132], the primary's mux: {lba[31:0], req, hps_ack, reset}
+		.c_reset(hps_lw[132]), .hps_ack(hps_lw[133]), .c_req(hps_lw[134] & wired[0]), .c_lba(hps_lw[166:135]),
+		.c_commit(hps_lw[380]),                     // HPS_BUS[380], hps_io's commit mark
+		.c_wide(wide_c),
+		.en_sys(sec_en_sys), .o_ack(sec_ack), .o_wr(sec_wr), .o_dat(sec_dat), .o_adr(sec_adr),
+		// HPS_BUS[201:167] and [236:202], the save slots' muxes: {lba[31:0], rd, wr, hps_ack}; an undeclared or
+		// absent slot's request lines are held low, so the feeder never serves it
+		.x_hps_ack({hps_lw[202], hps_lw[167]}),
+		.x_wr({hps_lw[203], hps_lw[168]} & wired[2:1]), .x_rd({hps_lw[204], hps_lw[169]} & wired[2:1]),
+		.x_lba({hps_lw[236:205], hps_lw[201:170]}),
+		.x_en_sys(sec_xen), .x_ack(sec_xack)
+	);
+end
+`else
 // SEC_EN without the tier macro: lw_sector.sv is empty, so the build stops here, naming the macro
 if (SEC_EN) begin : sec
 	lw_sector_needs_MISTER_LW_SECTOR_SLOT guard();
 end
+`endif
 else begin : nosec
 	assign sec_rdata  = 32'd0;
 	assign sec_bell   = 1'b0;

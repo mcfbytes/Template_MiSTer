@@ -279,10 +279,29 @@ lw_tier_needs_MISTER_LW pad_guard();
 `ifdef MISTER_LW_EVT
 lw_tier_needs_MISTER_LW evt_guard();
 `endif
+`ifdef MISTER_LW_SECTOR_SLOT
+lw_tier_needs_MISTER_LW sector_guard();
+`endif
 `ifdef MISTER_LW_OSD
 lw_tier_needs_MISTER_LW osd_guard();
 `endif
 // The OCRAM SECTOR tier drives the LW sector bits of HPS_BUS, which only MISTER_LW builds.
+`endif
+// The LW SECTOR block reports MISTER_LW_BLKSZ (default 2) as the slot's block size, so it must be this instance's
+// BLKSZ, or the build stops here.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef MISTER_LW_BLKSZ
+localparam integer LW_BLKSZ_DECL = `MISTER_LW_BLKSZ;
+`else
+localparam integer LW_BLKSZ_DECL = 2;
+`endif
+generate
+	if (LW_BLKSZ_DECL != BLKSZ) begin : lw_blksz
+		lw_blksz_differs_from_hps_io guard();
+	end
+endgenerate
+`endif
 `endif
 // LW_OCRAM_CFG_HPS: the OCRAM floor's macros as localparams (ocram_cfg.vh), for its tiers' checks below.
 `ifdef MISTER_DISABLE_SPI_PAD
@@ -383,6 +402,25 @@ reg [MAX_W:0] byte_cnt;
 reg   [3:0] sdn_ack;
 wire [15:0] disk = 16'd1 << io_din[11:8];
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_SECTOR_SLOT
+`define LW_COMMIT_MARK
+`endif
+`endif
+`ifdef LW_COMMIT_MARK
+// The commit mark for sys_top's LW SECTOR block (lw_sector.sv) or OCRAM SECTOR feeder (hps_ocram_rx.sv), either
+// SECTOR macro: "the SPI host has been shown a block request and has not finished it".
+reg  sd_commit = 0;
+wire sd_answer = io_enable & io_strobe & ~|byte_cnt & (io_din == 16'h0016);
+wire sd_shown  = sd_rd[sdn] | sd_wr[sdn];
+always @(posedge clk_sys) begin
+	if (sd_answer) sd_commit <= sd_shown;
+	else if (~io_enable & |sd_ack) sd_commit <= 0;
+end
+assign HPS_BUS[380] = sd_commit | (sd_answer & sd_shown);
+assign HPS_BUS[381] = 1'b1;
+`undef LW_COMMIT_MARK
+`endif
 always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;
 	reg  [2:0] b_wr;
