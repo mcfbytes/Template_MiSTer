@@ -85,7 +85,7 @@ Macro                     | 0x20 reply bit | Saves (Quartus 17.0.2, one fit)  | 
 --------------------------|----------------|----------------------------------|---------------------------------
 MISTER_DISABLE_DOWNSCALE  | 2              | about 270 ALMs, 5 M10K, 6 DSP    | any HDMI picture smaller than the core's output
 MISTER_DISABLE_VGA_SCALER | 3              | about 1,000 ALMs, 0 M10K (one fit), and the analog osd's 470-496 ALMs, 6 M10K | `vga_scaler=1`, the framebuffer and the OSD on the analog output
-MISTER_SMALL_HRES         | none           | about 126 ALUTs, 4 M10K (synthesis) | an image window more than 2048 pixels wide (only a custom modeline with 2049-2304 active pixels and no `pr`)
+MISTER_SMALL_HRES         | none           | about 112 ALUTs, 4 M10K (synthesis) | an image window more than 2048 pixels wide (only a custom modeline with 2049-2304 active pixels and no `pr`)
 
 **Policy.** MISTER_SMALL_HRES may ship in a published core. MISTER_DISABLE_DOWNSCALE and MISTER_DISABLE_VGA_SCALER are for area-critical builds only: each is the core author's choice, never a default, and never enabled just because it fits.
 
