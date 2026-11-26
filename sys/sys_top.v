@@ -229,21 +229,196 @@ end
 
 /////////////////////////  HPS I/O  /////////////////////////////////////
 
+// MISTER_LW_LANE (with MISTER_LW): the link nets below come from lw_link (LW BRIDGE), the link's own or the LW
+// frame lane's while it plays a frame.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_LANE
+`define LW_LANE_LINK
+`endif
+`ifdef MISTER_LW_OSD
+`define LW_OSD_PORTS
+`endif
+`endif
+// MISTER_OCRAM_FIO (with MISTER_OCRAM): the same link front, lw_link, with the OCRAM download player's nets on its
+// player side (hps_ocram_rx.sv).
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_FIO
+`define LW_OCRAM_FIO_LINK
+`ifndef LW_LANE_LINK
+`define LW_LANE_LINK
+`endif
+`endif
+`endif
+// MISTER_OCRAM_OSD: the OCRAM OSD writer drives the same osd_buffer port the LW OSDBUF writer uses. The host
+// binds one writer, so the two never meet in a legal session; a build with neither keeps the port out of osd.v.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`define OCRAM_OSD_PORTS
+`endif
+`endif
+`ifdef LW_OSD_PORTS
+`define OSD_WPORTS
+`endif
+`ifdef OCRAM_OSD_PORTS
+`ifndef OSD_WPORTS
+`define OSD_WPORTS
+`endif
+`endif
+// OCRAM_RX_PORTS: hps_ocram_rx is built, for the OSD ring, the SECTOR ring (MISTER_OCRAM_SECTOR_SLOT), the
+// download ring (MISTER_OCRAM_FIO), or any of them together.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`define OCRAM_RX_PORTS
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`ifndef OCRAM_RX_PORTS
+`define OCRAM_RX_PORTS
+`endif
+`endif
+`ifdef MISTER_OCRAM_FIO
+`ifndef OCRAM_RX_PORTS
+`define OCRAM_RX_PORTS
+`endif
+`endif
+`endif
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
+`ifdef MISTER_OCRAM
+// gp_in[26] = 1 - the OCRAM floor is built and its master runs (hps_ocram_master.sv drives it)
+wire        ocram_present, ocram_line;
+// The master's consumer port 0 (hps_ocram_rx's walker) and its session interface. With neither ring the port is
+// tied off and the OSD statistics are the constant 0; without the SECTOR tier its nets are constants.
+wire        ocram_c0_req, ocram_c0_we;
+wire [15:0] ocram_c0_off;
+wire [31:0] ocram_c0_wdata;
+wire        ocram_c0_grant, ocram_c0_done, ocram_c0_ok;
+wire [31:0] ocram_c0_rdata;
+wire        ocram_s_hello, ocram_s_live, ocram_s_tick, ocram_osd_bind;
+wire        ocram_c0_rest, ocram_c0_fault, ocram_c0_mid, ocram_c0_open;
+wire [15:0] ocram_osd_rows, ocram_osd_deepest;
+wire  [2:0] ocram_sec_ask, ocram_c0_sbind;
+wire        ocram_evt_stop, ocram_c0_sfault, ocram_c0_smid, ocram_c0_wide;
+// The mount slots: their ring's fault and mid levels and their records to the EVT writer; constants without them.
+wire        ocram_c0_mfault, ocram_c0_mmid, ocram_m_post, ocram_m_write, ocram_m_wv;
+wire        ocram_m_start, ocram_m_wtake, ocram_m_pub;
+wire  [7:0] ocram_m_arg;
+wire [10:0] ocram_m_len;
+wire [31:0] ocram_m_lba, ocram_m_wd;
+wire        ocram_rq_post, ocram_rq_start;
+wire [31:0] ocram_rq_lba;
+`ifdef MISTER_OCRAM_EVT
+// The events tier (MISTER_OCRAM_EVT): the master's ask and hps_ocram_evt's offer.
+wire        ocram_e_ask, ocram_e_v;
+wire [41:0] ocram_e_d;
+`endif
+`ifdef MISTER_OCRAM_LANE
+// The capture lane (MISTER_OCRAM_LANE): the walker's capture frame, its replies, and the master's REPLY record.
+wire [15:0] ocram_e_free;
+wire        ocram_p_post, ocram_p_wv, ocram_p_start, ocram_p_wtake;
+wire  [7:0] ocram_p_arg;
+wire [10:0] ocram_p_n;
+wire [31:0] ocram_p_wd;
+`endif
+// The download tier: the mark line (f2h_irq[12]), the ring's tail and its fault and mid levels; constants without it.
+wire        ocram_mline, ocram_c0_ffault, ocram_c0_fmid;
+wire [15:0] ocram_fio_tail;
+// The tiers' .qsf macros as localparams (OCRAM_*_EN, the geometry, OCRAM_FIO_SELS), declared once.
+`include "sys/ocram_cfg.vh"
+`ifdef LW_OCRAM_FIO_LINK
+// the download player's side of lw_link
+wire        ocram_fio_own, ocram_fio_hold, ocram_fio_strobe;
+wire  [3:0] ocram_fio_sel;
+wire [15:0] ocram_fio_din;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+// the feeder's nets to the window's primary-slot bits (lw_sys_window's xsec_*), and to the save-slot bits
+// (xmnt_*) for the mount slots
+wire        xsec_en, xsec_ack, xsec_wr, xsec_reset, xsec_hps_ack, xsec_req, xsec_commit;
+wire [15:0] xsec_dat;
+wire [13:0] xsec_adr;
+wire [31:0] xsec_lba;
+wire  [1:0] xmnt_en, xmnt_ack, xmnt_hps_ack, xmnt_rd, xmnt_wr;
+wire [63:0] xmnt_lba;
+`endif
+`ifdef MISTER_OCRAM_OSD
+wire        ocram_osd_we;
+wire [12:0] ocram_osd_addr;
+wire  [7:0] ocram_osd_byte;
+`endif
+`ifndef OCRAM_RX_PORTS
+assign ocram_c0_ffault = 1'b0;
+assign ocram_c0_fmid   = 1'b0;
+assign ocram_fio_tail  = 16'd0;
+assign ocram_c0_sfault = 1'b0;
+assign ocram_c0_smid   = 1'b0;
+assign ocram_c0_sbind  = 3'd0;
+assign ocram_c0_mfault = 1'b0;
+assign ocram_c0_mmid   = 1'b0;
+assign ocram_m_post    = 1'b0;
+assign ocram_m_write   = 1'b0;
+assign ocram_m_arg     = 8'd0;
+assign ocram_m_len     = 11'd0;
+assign ocram_m_lba     = 32'd0;
+assign ocram_m_wv      = 1'b0;
+assign ocram_m_wd      = 32'd0;
+assign ocram_c0_wide   = 1'b0;
+assign ocram_rq_post   = 1'b0;
+assign ocram_rq_lba    = 32'd0;
+assign ocram_c0_req   = 1'b0;
+assign ocram_c0_we    = 1'b0;
+assign ocram_c0_off   = 16'd0;
+assign ocram_c0_wdata = 32'd0;
+assign ocram_c0_rest  = 1'b1;
+assign ocram_c0_fault = 1'b0;
+assign ocram_c0_mid   = 1'b0;
+assign ocram_c0_open  = 1'b0;
+assign ocram_osd_rows = 16'd0;
+assign ocram_osd_deepest = 16'd0;
+`endif
+`endif
+`ifdef MISTER_LW
+// gp_in[25] = 1 - the LW firewall answers every LW address (hps_lw_bridge.sv drives it) gp_in[24] - the firewall
+// holds no transaction (its idle register) gp_in[22] - the LW host enable is set (lw_sys_window's enable register)
+wire        lw_present, lw_idle, lw_held;
+`ifdef MISTER_OCRAM
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 1'b0, ocram_present, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`else
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 2'b00, lw_present, lw_idle, 1'b0, lw_held, 1'b0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`endif
+`else
+`ifdef MISTER_OCRAM
+wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 1'b0, ocram_present, 5'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`else
 wire [31:0] gp_in = {1'b0, btn_user | btn[1], btn_osd | btn[0], io_dig, 7'd0, ~HDMI_TX_INT, io_ver, io_ack, io_wide, io_dout | io_dout_sys};
+`endif
+`endif
 wire [31:0] gp_out;
 
 wire  [1:0] io_ver = 1; // 0 - obsolete. 1 - optimized HPS I/O. 2,3 - reserved for future.
 wire        io_wait;
 wire        io_wide;
 wire [15:0] io_dout;
+`ifdef LW_LANE_LINK
+wire [15:0] io_din;
+`else
 wire [15:0] io_din = gp_outr[15:0];
+`endif
 wire        io_clk = gp_outr[17];
 wire        io_ss0 = gp_outr[18];
 wire        io_ss1 = gp_outr[19];
 wire        io_ss2 = gp_outr[20];
 
+`ifdef LW_LANE_LINK
+wire  [3:0] io_sel;     // {osd_vga, osd_hdmi, fpga, uio}
+wire        io_strobe;
+wire        io_ack;
+wire  [3:0] link_sel = {io_ss1 & ~io_ss2, io_ss1 & ~io_ss0, ~io_ss1 & io_ss0, ~io_ss1 & io_ss2};   // the link's own
+`ifndef MISTER_DEBUG_NOHDMI
+	wire io_osd_hdmi = io_sel[2];
+`endif
+wire io_fpga     = io_sel[1];
+wire io_uio      = io_sel[0];
+`else
 `ifndef MISTER_DEBUG_NOHDMI
 	wire io_osd_hdmi = io_ss1 & ~io_ss0;
 `endif
@@ -261,6 +436,7 @@ always @(posedge clk_sys) begin
 		io_ack <= rack;
 	end
 end
+`endif
 
 reg [31:0] gp_outr;
 always @(posedge clk_sys) begin
@@ -298,7 +474,11 @@ reg        cfg_set      = 0;
 
 wire       audio_96k    = cfg[6];
 wire       csync_en     = cfg[3];
+`ifdef LW_LANE_LINK
+wire       io_osd_vga   = io_sel[3];
+`else
 wire       io_osd_vga   = io_ss1 & ~io_ss2;
+`endif
 `ifndef MISTER_DUAL_SDRAM
 	wire forced_scandoubler = cfg[4];
 	wire ypbpr_en           = cfg[5];
@@ -308,7 +488,9 @@ wire       io_osd_vga   = io_ss1 & ~io_ss2;
 	`else
 		wire vga_scaler   = cfg[2] | vga_force_scaler;
 	`endif
+`else
 `endif
+// UIO_SET_VIDEO (0x20) reply: bit 0 pixel repetition, bit 1 VRR, bits 2+ a scaler feature compiled out.
 
 reg        cfg_custom_t = 0;
 reg  [5:0] cfg_custom_p1;
@@ -570,11 +752,58 @@ cyclonev_hps_interface_peripheral_uart uart
 	.txd(uart_txd)
 );
 
+`ifdef MISTER_LW
+// LW lines and OSDBUF stores (lw_sys_window.sv).
+// f2h_irq[7+k] = LW line ordinal k (GIC SPI 47+k), level-high: the entry whose LINE word is k (the LW directory).
+wire  [2:0] lw_lines;
+`ifdef LW_OSD_PORTS
+// The OSDBUF writer's bytes (lw_sys_window, on clk_sys) to every osd's osd_buffer.
+wire        lw_osd_we;
+wire [12:0] lw_osd_addr;
+wire  [7:0] lw_osd_byte;
+`endif
+`ifdef MISTER_OCRAM
+// f2h_irq[11] = the OCRAM EVT ring's line, framework ordinal 4 (GIC SPI 51); f2h_irq[12] = the download ring's
+// mark line, ordinal 5 (GIC SPI 52), 0 without MISTER_OCRAM_FIO.
+wire [63:0] f2h_irq = {51'd0, ocram_mline, ocram_line, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
+`else
+wire [63:0] f2h_irq = {53'd0, lw_lines, 6'd0, video_sync, HDMI_TX_VS};
+`endif
+`else
+`ifdef MISTER_OCRAM
+// f2h_irq[11] = the OCRAM EVT ring's line, framework ordinal 4 (GIC SPI 51); f2h_irq[12] = the download ring's
+// mark line, ordinal 5 (GIC SPI 52), 0 without MISTER_OCRAM_FIO.
+wire [63:0] f2h_irq = {51'd0, ocram_mline, ocram_line, 9'd0, video_sync, HDMI_TX_VS};
+`else
 wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
+`endif
+`endif
 cyclonev_hps_interface_interrupts interrupts
 (
 	.irq(f2h_irq)
 );
+// The osd write port's bytes (osd.v's lw_we/lw_addr/lw_byte): the OCRAM writer's when it writes, else the LW
+// writer's.
+`ifdef OSD_WPORTS
+wire        osd_we;
+wire [12:0] osd_addr;
+wire  [7:0] osd_byte;
+`ifdef OCRAM_OSD_PORTS
+`ifdef LW_OSD_PORTS
+assign osd_we   = ocram_osd_we | lw_osd_we;
+assign osd_addr = ocram_osd_we ? ocram_osd_addr : lw_osd_addr;
+assign osd_byte = ocram_osd_we ? ocram_osd_byte : lw_osd_byte;
+`else
+assign osd_we   = ocram_osd_we;
+assign osd_addr = ocram_osd_addr;
+assign osd_byte = ocram_osd_byte;
+`endif
+`else
+assign osd_we   = lw_osd_we;
+assign osd_addr = lw_osd_addr;
+assign osd_byte = lw_osd_byte;
+`endif
+`endif
 
 ///////////////////////////  RESET  ///////////////////////////////////
 
@@ -600,9 +829,74 @@ end
 
 wire reset;
 wire clk_100m;
+`ifdef MISTER_LW
+wire lw_hps_rst_n;     // the HPS's fabric reset, to the LW firewall and the OCRAM master
+`else
+`ifdef MISTER_OCRAM
+wire ocram_hps_rst_n;  // the HPS's fabric reset, to the OCRAM master
+`endif
+`endif
+`ifdef MISTER_OCRAM
+// The fpga2hps AXI3 master bundle between hps_ocram_master and sysmem (32-bit data).
+wire  [7:0] ocram_awid, ocram_wid, ocram_bid, ocram_arid, ocram_rid;
+wire [31:0] ocram_awaddr, ocram_wdata, ocram_araddr, ocram_rdata;
+wire  [3:0] ocram_awlen, ocram_awcache, ocram_wstrb, ocram_arlen, ocram_arcache;
+wire  [2:0] ocram_awsize, ocram_awprot, ocram_arsize, ocram_arprot;
+wire  [1:0] ocram_awburst, ocram_awlock, ocram_bresp, ocram_arburst, ocram_arlock, ocram_rresp;
+wire  [4:0] ocram_awuser, ocram_aruser;
+wire        ocram_awvalid, ocram_awready, ocram_wlast, ocram_wvalid, ocram_wready;
+wire        ocram_bvalid, ocram_bready, ocram_arvalid, ocram_arready, ocram_rlast, ocram_rvalid, ocram_rready;
+`endif
 
 sysmem_lite sysmem
 (
+`ifdef MISTER_LW
+	.hps_rst_n(lw_hps_rst_n),
+`else
+`ifdef MISTER_OCRAM
+	.hps_rst_n(ocram_hps_rst_n),
+`endif
+`endif
+`ifdef MISTER_OCRAM
+	.awid(ocram_awid),
+	.awaddr(ocram_awaddr),
+	.awlen(ocram_awlen),
+	.awsize(ocram_awsize),
+	.awburst(ocram_awburst),
+	.awlock(ocram_awlock),
+	.awcache(ocram_awcache),
+	.awprot(ocram_awprot),
+	.awuser(ocram_awuser),
+	.awvalid(ocram_awvalid),
+	.awready(ocram_awready),
+	.wid(ocram_wid),
+	.wdata(ocram_wdata),
+	.wstrb(ocram_wstrb),
+	.wlast(ocram_wlast),
+	.wvalid(ocram_wvalid),
+	.wready(ocram_wready),
+	.bid(ocram_bid),
+	.bresp(ocram_bresp),
+	.bvalid(ocram_bvalid),
+	.bready(ocram_bready),
+	.arid(ocram_arid),
+	.araddr(ocram_araddr),
+	.arlen(ocram_arlen),
+	.arsize(ocram_arsize),
+	.arburst(ocram_arburst),
+	.arlock(ocram_arlock),
+	.arcache(ocram_arcache),
+	.arprot(ocram_arprot),
+	.aruser(ocram_aruser),
+	.arvalid(ocram_arvalid),
+	.arready(ocram_arready),
+	.rid(ocram_rid),
+	.rdata(ocram_rdata),
+	.rresp(ocram_rresp),
+	.rlast(ocram_rlast),
+	.rvalid(ocram_rvalid),
+	.rready(ocram_rready),
+`endif
 	//Reset/Clock
 	.reset_core_req(reset_req),
 	.reset_out(reset),
@@ -648,6 +942,133 @@ sysmem_lite sysmem
 	.vbuf_readdatavalid(vbuf_readdatavalid),
 	.vbuf_read(vbuf_read)
 );
+`ifdef MISTER_OCRAM
+// The OCRAM mailbox floor: the fpga2hps bridge's AXI3 master (docs/OCRAM_MAILBOX.md).
+hps_ocram_master #(.SEC_SLOT(OCRAM_SEC_SLOT), .SEC_FRAME(OCRAM_SEC_FRAME), .SEC_GAP(OCRAM_SEC_GAP),
+                   .SEC_BLKSZ(OCRAM_BLKSZ), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),
+                   .FIO_SELS(OCRAM_FIO_SELS),
+                   .MNT0_SLOT(OCRAM_MNT0_SLOT), .MNT1_SLOT(OCRAM_MNT1_SLOT), .MNT_FRAME(OCRAM_MNT_FRAME)) ocram_master
+(
+	.clk(clk_100m),
+`ifdef MISTER_LW
+	.hps_rst_n(lw_hps_rst_n),
+`else
+	.hps_rst_n(ocram_hps_rst_n),
+`endif
+	.gp_out(gp_out),
+	.present(ocram_present),
+	.line(ocram_line),
+	.c0_req(ocram_c0_req),
+	.c0_we(ocram_c0_we),
+	.c0_off(ocram_c0_off),
+	.c0_wdata(ocram_c0_wdata),
+	.c0_grant(ocram_c0_grant),
+	.c0_done(ocram_c0_done),
+	.c0_ok(ocram_c0_ok),
+	.c0_rdata(ocram_c0_rdata),
+	.s_hello(ocram_s_hello),
+	.s_live(ocram_s_live),
+	.s_tick(ocram_s_tick),
+	.osd_bind(ocram_osd_bind),
+	.c0_rest(ocram_c0_rest),
+	.c0_fault(ocram_c0_fault),
+	.c0_mid(ocram_c0_mid),
+	.c0_open(ocram_c0_open),
+	.osd_rows(ocram_osd_rows),
+	.osd_deepest(ocram_osd_deepest),
+	.sec_ask(ocram_sec_ask),
+	.evt_stop(ocram_evt_stop),
+	.c0_sfault(ocram_c0_sfault),
+	.c0_smid(ocram_c0_smid),
+	.c0_sbind(ocram_c0_sbind),
+	.c0_wide(ocram_c0_wide),
+	.rq_post(ocram_rq_post),
+	.rq_lba(ocram_rq_lba),
+	.rq_start(ocram_rq_start),
+	.c0_mfault(ocram_c0_mfault),
+	.c0_mmid(ocram_c0_mmid),
+	.m_post(ocram_m_post),
+	.m_write(ocram_m_write),
+	.m_arg(ocram_m_arg),
+	.m_len(ocram_m_len),
+	.m_lba(ocram_m_lba),
+	.m_wv(ocram_m_wv),
+	.m_wd(ocram_m_wd),
+	.m_start(ocram_m_start),
+	.m_wtake(ocram_m_wtake),
+	.m_pub(ocram_m_pub),
+	.f_tail(ocram_fio_tail),
+	.c0_ffault(ocram_c0_ffault),
+	.c0_fmid(ocram_c0_fmid),
+	.mark_line(ocram_mline),
+`ifdef MISTER_OCRAM_EVT
+	.e_ask(ocram_e_ask),
+	.e_v(ocram_e_v),
+	.e_d(ocram_e_d),
+`else
+	.e_ask(),
+	.e_v(1'b0),
+	.e_d(42'd0),
+`endif
+`ifdef MISTER_OCRAM_LANE
+	.e_free(ocram_e_free),
+	.p_post(ocram_p_post),
+	.p_arg(ocram_p_arg),
+	.p_n(ocram_p_n),
+	.p_wv(ocram_p_wv),
+	.p_wd(ocram_p_wd),
+	.p_start(ocram_p_start),
+	.p_wtake(ocram_p_wtake),
+`else
+	.e_free(),
+	.p_post(1'b0),
+	.p_arg(8'd0),
+	.p_n(11'd0),
+	.p_wv(1'b0),
+	.p_wd(32'd0),
+	.p_start(),
+	.p_wtake(),
+`endif
+	.awid(ocram_awid),
+	.awaddr(ocram_awaddr),
+	.awlen(ocram_awlen),
+	.awsize(ocram_awsize),
+	.awburst(ocram_awburst),
+	.awlock(ocram_awlock),
+	.awcache(ocram_awcache),
+	.awprot(ocram_awprot),
+	.awuser(ocram_awuser),
+	.awvalid(ocram_awvalid),
+	.awready(ocram_awready),
+	.wid(ocram_wid),
+	.wdata(ocram_wdata),
+	.wstrb(ocram_wstrb),
+	.wlast(ocram_wlast),
+	.wvalid(ocram_wvalid),
+	.wready(ocram_wready),
+	.bid(ocram_bid),
+	.bresp(ocram_bresp),
+	.bvalid(ocram_bvalid),
+	.bready(ocram_bready),
+	.arid(ocram_arid),
+	.araddr(ocram_araddr),
+	.arlen(ocram_arlen),
+	.arsize(ocram_arsize),
+	.arburst(ocram_arburst),
+	.arlock(ocram_arlock),
+	.arcache(ocram_arcache),
+	.arprot(ocram_arprot),
+	.aruser(ocram_aruser),
+	.arvalid(ocram_arvalid),
+	.arready(ocram_arready),
+	.rid(ocram_rid),
+	.rdata(ocram_rdata),
+	.rresp(ocram_rresp),
+	.rlast(ocram_rlast),
+	.rvalid(ocram_rvalid),
+	.rready(ocram_rready)
+);
+`endif
 
 wire [28:0] ram2_address;
 wire  [7:0] ram2_burstcount;
@@ -1198,6 +1619,12 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
 		.de_out(hdmi_de_osd)
+`ifdef OSD_WPORTS
+		,
+		.lw_we(osd_we),
+		.lw_addr(osd_addr),
+		.lw_byte(osd_byte)
+`endif
 	);
 
 	wire hdmi_cs_osd;
@@ -1419,6 +1846,12 @@ osd vga_osd
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
 	.de_out(vga_de_osd)
+`ifdef OSD_WPORTS
+	,
+	.lw_we(osd_we),
+	.lw_addr(osd_addr),
+	.lw_byte(osd_byte)
+`endif
 );
 
 wire vga_cs_osd;
@@ -1469,7 +1902,9 @@ reg  [39:0] PhaseInc;
 	wire VGA_DISABLE;
 	wire [23:0] vgas_o;
 	wire vgas_hs, vgas_vs, vgas_cs, vgas_de;
-	`ifndef MISTER_DEBUG_NOHDMI
+	`ifdef MISTER_DEBUG_NOHDMI
+		assign {vgas_o, vgas_hs, vgas_vs, vgas_cs, vgas_de} = 0;
+	`else
 		vga_out vga_scaler_out
 		(
 			.clk(clk_hdmi),
@@ -1485,8 +1920,6 @@ reg  [39:0] PhaseInc;
 			.csync_o(vgas_cs),
 			.de_o(vgas_de)
 		);
-	`else
-		assign {vgas_o, vgas_hs, vgas_vs, vgas_cs, vgas_de} = 0;
 	`endif
 
 	wire [23:0] vga_o, vga_o_t;
@@ -1687,6 +2120,157 @@ assign user_in[6] =         USER_IO[6];
 ///////////////////  User module connection ////////////////////////////
 
 wire        clk_sys;
+`ifdef OCRAM_RX_PORTS
+// The host-to-core rings' consumer (hps_ocram_rx.sv): ROW records into every osd's osd_buffer, and with the SECTOR
+// tier the FRAME records into one hps_io slot through the window's xsec nets.
+`ifdef MISTER_OCRAM_OSD
+`ifdef MISTER_DEBUG_NOHDMI
+wire [1:0] ocram_osd_sel = {io_osd_vga, 1'b0};       // no HDMI osd
+`else
+wire [1:0] ocram_osd_sel = {io_osd_vga, io_osd_hdmi};
+`endif
+`endif
+hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_EN), .FRAME(OCRAM_SEC_FRAME),
+               .GAP(OCRAM_SEC_GAP), .FIO_EN(OCRAM_FIO_EN), .FIO_RING(OCRAM_FIO_RING), .FIO_GAP(OCRAM_FIO_GAP),
+               .MNT_EN(OCRAM_MNT_EN), .MFRAME(OCRAM_MNT_FRAME), .BLKSZ(OCRAM_BLKSZ), .FIO_SELS(OCRAM_FIO_SELS)) ocram_rx
+(
+	.clk(clk_100m),
+	.clk_sys(clk_sys),
+	.gp_out25(gp_out[25]),
+	.s_hello(ocram_s_hello),
+	.s_live(ocram_s_live),
+	.s_tick(ocram_s_tick),
+	.bind_en(ocram_osd_bind),
+	.sec_ask(ocram_sec_ask),
+	.evt_stop(ocram_evt_stop),
+	.c_sfault(ocram_c0_sfault),
+	.c_smid(ocram_c0_smid),
+	.c_sbind(ocram_c0_sbind),
+	.c_wide(ocram_c0_wide),
+	.rq_post(ocram_rq_post),
+	.rq_lba(ocram_rq_lba),
+	.rq_start(ocram_rq_start),
+	.c_rest(ocram_c0_rest),
+	.c_fault(ocram_c0_fault),
+	.c_mid(ocram_c0_mid),
+	.c_open(ocram_c0_open),
+	.osd_rows(ocram_osd_rows),
+	.osd_deepest(ocram_osd_deepest),
+	.f_tail(ocram_fio_tail),
+	.c_ffault(ocram_c0_ffault),
+	.c_fmid(ocram_c0_fmid),
+	.c_mfault(ocram_c0_mfault),
+	.c_mmid(ocram_c0_mmid),
+	.m_post(ocram_m_post),
+	.m_write(ocram_m_write),
+	.m_arg(ocram_m_arg),
+	.m_len(ocram_m_len),
+	.m_lba(ocram_m_lba),
+	.m_wv(ocram_m_wv),
+	.m_wd(ocram_m_wd),
+	.m_start(ocram_m_start),
+	.m_wtake(ocram_m_wtake),
+	.m_pub(ocram_m_pub),
+`ifdef MISTER_OCRAM_LANE
+	.p_post(ocram_p_post),
+	.p_arg(ocram_p_arg),
+	.p_n(ocram_p_n),
+	.p_wv(ocram_p_wv),
+	.p_wd(ocram_p_wd),
+	.e_free(ocram_e_free),
+	.p_start(ocram_p_start),
+	.p_wtake(ocram_p_wtake),
+	.l_dout(io_dout | io_dout_sys),           // the link's reply word, as gp_in carries it to the HPS
+`else
+	.p_post(),
+	.p_arg(),
+	.p_n(),
+	.p_wv(),
+	.p_wd(),
+	.e_free(16'd0),
+	.p_start(1'b0),
+	.p_wtake(1'b0),
+	.l_dout(16'd0),
+`endif
+	.c_req(ocram_c0_req),
+	.c_we(ocram_c0_we),
+	.c_off(ocram_c0_off),
+	.c_wdata(ocram_c0_wdata),
+	.c_grant(ocram_c0_grant),
+	.c_done(ocram_c0_done),
+	.c_ok(ocram_c0_ok),
+	.c_rdata(ocram_c0_rdata),
+`ifdef MISTER_OCRAM_OSD
+	.sel(ocram_osd_sel),
+	.view(gp_outr[31]),
+	.we(ocram_osd_we),
+	.addr(ocram_osd_addr),
+	.dbyte(ocram_osd_byte),
+`else
+	.sel(2'b00),
+	.view(1'b0),
+	.we(),
+	.addr(),
+	.dbyte(),
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+	.x_reset(xsec_reset),
+	.x_hps_ack(xsec_hps_ack),
+	.x_req(xsec_req),
+	.x_lba(xsec_lba),
+	.x_commit(xsec_commit),
+	.x_wide(io_wide),
+	.x_en(xsec_en),
+	.x_ack(xsec_ack),
+	.x_wr(xsec_wr),
+	.x_dat(xsec_dat),
+	.x_adr(xsec_adr),
+	.xm_hps_ack(xmnt_hps_ack),
+	.xm_rd(xmnt_rd),
+	.xm_wr(xmnt_wr),
+	.xm_lba(xmnt_lba),
+	.xm_cnt(12'd0),                        // the save-slot bits carry no blk_cnt: one block a request
+	.xm_en(xmnt_en),
+	.xm_ack(xmnt_ack),
+`else
+	.x_reset(1'b0),
+	.x_hps_ack(1'b0),
+	.x_req(1'b0),
+	.x_lba(32'd0),
+	.x_commit(1'b0),
+	.x_wide(1'b0),
+	.x_en(),
+	.x_ack(),
+	.x_wr(),
+	.x_dat(),
+	.x_adr(),
+	.xm_hps_ack(2'd0),
+	.xm_rd(2'd0),
+	.xm_wr(2'd0),
+	.xm_lba(64'd0),
+	.xm_cnt(12'd0),
+	.xm_en(),
+	.xm_ack(),
+`endif
+`ifdef LW_OCRAM_FIO_LINK
+	.l_busy(|link_sel | ~gp_outr[31]),       // a select, or the ID view: no download frame starts
+	.l_wait(io_wait | vs_wait),
+	.l_own(ocram_fio_own),
+	.l_hold(ocram_fio_hold),
+	.l_sel(ocram_fio_sel),
+	.l_strobe(ocram_fio_strobe),
+	.l_din(ocram_fio_din)
+`else
+	.l_busy(1'b0),
+	.l_wait(1'b0),
+	.l_own(),
+	.l_hold(),
+	.l_sel(),
+	.l_strobe(),
+	.l_din()
+`endif
+);
+`endif
 wire [15:0] audio_l, audio_r;
 wire        audio_s;
 wire  [1:0] audio_mix;
@@ -1762,14 +2346,340 @@ wire [13:0] fb_stride;
 	assign fb_stride = 0;
 `endif
 
+////////////////////  LW BRIDGE  ///////////////////////////////////
+// MISTER_LW: lwhps2fpga (0xFF200000, 2 MB) answers every offset (0xDEADBEEF default); the `SYS_LW_CAPS window holds
+// the directory, and each tier the core builds adds its block: PAD with MISTER_LW_PAD, EVT with MISTER_LW_EVT,
+// SECTOR when the core declares it (MISTER_LW_SECTOR_SLOT), the OSDBUF with MISTER_LW_OSD and the frame lane with
+// MISTER_LW_LANE.
+`ifdef MISTER_LW
+wire [20:0] lw_raddr, lw_waddr;
+wire        lw_write;
+wire [31:0] lw_rdata, lw_wdata;
+wire  [3:0] lw_be;
+wire [383:46] lw_bus;
+wire        lw_wburst, lw_hrst, lw_idv;
+wire  [1:0] lw_freed;
+// GPO[31] = 0, the ID view or the core reset through GPO, as a clk_100m level: it clears the LW host enable and refuses it
+lw_arst lw_idv_arst
+(
+	.clk(clk_100m),
+	.rst_n(gp_out[31]),
+	.q(lw_idv)
+);
+// The tiers the core builds (its .qsf macros).
+`ifdef MISTER_LW_PAD
+localparam        LW_PAD_EN    = 1;
+`else
+localparam        LW_PAD_EN    = 0;
+`endif
+`ifdef MISTER_LW_EVT
+localparam        LW_EVT_EN    = 1;
+`else
+localparam        LW_EVT_EN    = 0;
+`endif
+`ifdef LW_OSD_PORTS
+localparam        LW_OSD_EN    = 1;
+`else
+localparam        LW_OSD_EN    = 0;
+`endif
+// The OCRAM SECTOR feeder drives the primary slot's bits through the window (MISTER_OCRAM_SECTOR_SLOT).
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_SEC_XNETS
+`endif
+`endif
+`ifdef LW_SEC_XNETS
+localparam        LW_SEC_EXT   = 1;
+localparam  [1:0] LW_MNT_EXT   = OCRAM_MNT_EN;
+`else
+localparam        LW_SEC_EXT   = 0;
+localparam  [1:0] LW_MNT_EXT   = 2'd0;
+`endif
+// The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
+// macro and needs its _WSRC; lw_sys_window stops the build on an unservable geometry.
+`ifdef MISTER_LW_SECTOR_SLOT
+localparam        LW_SEC_EN    = 1;
+localparam [31:0] LW_SEC_SLOT  = `MISTER_LW_SECTOR_SLOT;
+`else
+localparam        LW_SEC_EN    = 0;
+localparam [31:0] LW_SEC_SLOT  = 32'd1;
+`endif
+`ifdef MISTER_LW_SECTOR_FRAME
+localparam [31:0] LW_SEC_FRAME = `MISTER_LW_SECTOR_FRAME;
+`else
+localparam [31:0] LW_SEC_FRAME = 32'd128;
+`endif
+`ifdef MISTER_LW_SECTOR_GAP
+localparam [31:0] LW_SEC_GAP   = `MISTER_LW_SECTOR_GAP;
+`else
+localparam [31:0] LW_SEC_GAP   = 32'd2;
+`endif
+`ifdef MISTER_LW_BLKSZ
+localparam  [2:0] LW_BLKSZ     = `MISTER_LW_BLKSZ;
+`else
+localparam  [2:0] LW_BLKSZ     = 3'd2;
+`endif
+`ifdef MISTER_LW_SAVE0_SLOT
+localparam        LW_SAVE0_EN    = 1;
+localparam [31:0] LW_SAVE0_SLOT  = `MISTER_LW_SAVE0_SLOT;
+`else
+localparam        LW_SAVE0_EN    = 0;
+localparam [31:0] LW_SAVE0_SLOT  = 32'hE;
+`endif
+`ifdef MISTER_LW_SAVE0_WSRC
+localparam [31:0] LW_SAVE0_WSRC  = `MISTER_LW_SAVE0_WSRC;
+`else
+localparam [31:0] LW_SAVE0_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_EXTENT
+localparam [31:0] LW_SAVE0_EXT   = `MISTER_LW_SAVE0_EXTENT;
+`else
+localparam [31:0] LW_SAVE0_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE0_FRAME
+localparam [31:0] LW_SAVE0_FRAME = `MISTER_LW_SAVE0_FRAME;
+`else
+localparam [31:0] LW_SAVE0_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE0_LBA_BITS
+localparam [31:0] LW_SAVE0_LBAB  = `MISTER_LW_SAVE0_LBA_BITS;
+`else
+localparam [31:0] LW_SAVE0_LBAB  = 32'd32;
+`endif
+`ifdef MISTER_LW_SAVE1_SLOT
+localparam        LW_SAVE1_EN    = 1;
+localparam [31:0] LW_SAVE1_SLOT  = `MISTER_LW_SAVE1_SLOT;
+`else
+localparam        LW_SAVE1_EN    = 0;
+localparam [31:0] LW_SAVE1_SLOT  = 32'hF;
+`endif
+`ifdef MISTER_LW_SAVE1_WSRC
+localparam [31:0] LW_SAVE1_WSRC  = `MISTER_LW_SAVE1_WSRC;
+`else
+localparam [31:0] LW_SAVE1_WSRC  = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_EXTENT
+localparam [31:0] LW_SAVE1_EXT   = `MISTER_LW_SAVE1_EXTENT;
+`else
+localparam [31:0] LW_SAVE1_EXT   = 32'd0;
+`endif
+`ifdef MISTER_LW_SAVE1_FRAME
+localparam [31:0] LW_SAVE1_FRAME = `MISTER_LW_SAVE1_FRAME;
+`else
+localparam [31:0] LW_SAVE1_FRAME = 32'd256;
+`endif
+`ifdef MISTER_LW_SAVE1_LBA_BITS
+localparam [31:0] LW_SAVE1_LBAB  = `MISTER_LW_SAVE1_LBA_BITS;
+`else
+localparam [31:0] LW_SAVE1_LBAB  = 32'd32;
+`endif
+`ifdef MISTER_LW_LANE
+localparam        LW_LANE_EN   = 1;
+wire        lane_own, lane_hold, lane_strobe;
+wire  [3:0] lane_sel;
+wire [15:0] lane_din;
+`else
+localparam        LW_LANE_EN   = 0;
+`endif
+hps_lw_bridge hps_lw_bridge
+(
+	.clk(clk_100m),
+	.hps_rst_n(lw_hps_rst_n),
+	.lw_hrst(lw_hrst),
+	.lw_freed(lw_freed),
+	.present(lw_present),
+	.idle(lw_idle),
+	.lw_raddr(lw_raddr),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be),
+	.lw_wburst(lw_wburst)
+);
+lw_sys_window #(
+	.PAD_EN(LW_PAD_EN), .EVT_EN(LW_EVT_EN), .OSD_EN(LW_OSD_EN),
+	.SEC_EN(LW_SEC_EN), .SEC_SLOT(LW_SEC_SLOT), .SEC_FRAME(LW_SEC_FRAME), .SEC_GAP(LW_SEC_GAP), .BLKSZ(LW_BLKSZ),
+	.SAVE0_EN(LW_SAVE0_EN), .SAVE0_SLOT(LW_SAVE0_SLOT), .SAVE0_WSRC(LW_SAVE0_WSRC), .SAVE0_EXT(LW_SAVE0_EXT),
+	.SAVE0_FRAME(LW_SAVE0_FRAME), .SAVE0_LBA_BITS(LW_SAVE0_LBAB),
+	.SAVE1_EN(LW_SAVE1_EN), .SAVE1_SLOT(LW_SAVE1_SLOT), .SAVE1_WSRC(LW_SAVE1_WSRC), .SAVE1_EXT(LW_SAVE1_EXT),
+	.SAVE1_FRAME(LW_SAVE1_FRAME), .SAVE1_LBA_BITS(LW_SAVE1_LBAB),
+	.LANE_EN(LW_LANE_EN),
+	.SEC_EXT(LW_SEC_EXT),
+	.MNT_EXT(LW_MNT_EXT)
+) lw_sys_window
+(
+	.clk(clk_100m),
+	.lw_raddr(lw_raddr),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be),
+	.lw_wburst(lw_wburst),
+	.lw_hrst(lw_hrst),
+	.lw_freed(lw_freed),
+	.lw_idv(lw_idv),
+	.held(lw_held),
+	.lines(lw_lines),
+	.clk_sys(clk_sys),
+	.hps_lw(lw_bus),
+	.io_wide(io_wide),
+`ifdef LW_OSD_PORTS
+`ifdef MISTER_DEBUG_NOHDMI
+	.osd_sel({io_osd_vga, 1'b0}),            // no HDMI osd
+`else
+	.osd_sel({io_osd_vga, io_osd_hdmi}),
+`endif
+	.osd_view(gp_outr[31]),
+	.osd_we(lw_osd_we),
+	.osd_addr(lw_osd_addr),
+	.osd_byte(lw_osd_byte),
+`else
+	.osd_sel(2'b00),
+	.osd_view(1'b0),
+	.osd_we(),
+	.osd_addr(),
+	.osd_byte(),
+`endif
+`ifdef MISTER_LW_LANE
+	.lane_busy(|link_sel | ~gp_outr[31]),   // a select, or the ID view: no lane frame starts
+	.lane_wait(io_wait | vs_wait),
+	.lane_dout(io_dout | io_dout_sys),
+	.lane_own(lane_own),
+	.lane_hold(lane_hold),
+	.lane_sel(lane_sel),
+	.lane_strobe(lane_strobe),
+	.lane_din(lane_din),
+`else
+	.lane_busy(1'b0),
+	.lane_wait(1'b0),
+	.lane_dout(16'd0),
+	.lane_own(),
+	.lane_hold(),
+	.lane_sel(),
+	.lane_strobe(),
+	.lane_din(),
+`endif
+`ifdef LW_SEC_XNETS
+	.xsec_en(xsec_en),
+	.xsec_ack(xsec_ack),
+	.xsec_wr(xsec_wr),
+	.xsec_dat(xsec_dat),
+	.xsec_adr(xsec_adr),
+	.xsec_reset(xsec_reset),
+	.xsec_hps_ack(xsec_hps_ack),
+	.xsec_req(xsec_req),
+	.xsec_lba(xsec_lba),
+	.xsec_commit(xsec_commit),
+	.xmnt_en(xmnt_en),
+	.xmnt_ack(xmnt_ack),
+	.xmnt_hps_ack(xmnt_hps_ack),
+	.xmnt_rd(xmnt_rd),
+	.xmnt_wr(xmnt_wr),
+	.xmnt_lba(xmnt_lba)
+`else
+	.xsec_en(1'b0),
+	.xsec_ack(1'b0),
+	.xsec_wr(1'b0),
+	.xsec_dat(16'd0),
+	.xsec_adr(14'd0),
+	.xsec_reset(),
+	.xsec_hps_ack(),
+	.xsec_req(),
+	.xsec_lba(),
+	.xsec_commit(),
+	.xmnt_en(2'd0),
+	.xmnt_ack(2'd0),
+	.xmnt_hps_ack(),
+	.xmnt_rd(),
+	.xmnt_wr(),
+	.xmnt_lba()
+`endif
+);
+`ifdef LW_SEC_XNETS
+`undef LW_SEC_XNETS
+`endif
+`ifdef LW_OSD_PORTS
+`undef LW_OSD_PORTS
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_EVT
+// The OCRAM events tier's port (MISTER_OCRAM_EVT, which needs MISTER_LW: hps_io stops the build otherwise):
+// hps_io's offer on HPS_BUS[374:333] to the master, and the take on HPS_BUS[382], which nothing else drives.
+`ifdef MISTER_LW
+wire        ocram_e_take;
+hps_ocram_evt ocram_evt
+(
+	.clk(clk_100m), .ask(ocram_e_ask), .e_v(ocram_e_v), .e_d(ocram_e_d),
+	.clk_sys(clk_sys), .o_d(lw_bus[374:333]), .take(ocram_e_take)
+);
+assign lw_bus[382] = ocram_e_take;
+`else
+assign ocram_e_v = 1'b0;
+assign ocram_e_d = 42'd0;
+`endif
+`endif
+`endif
+// The link front (lw_link, sys/lw_lane.sv): the link's own selects, strobe and ack, or the player's while it plays a
+// frame, the LW lane's (MISTER_LW_LANE) or the OCRAM download player's (MISTER_OCRAM_FIO).
+`ifdef LW_LANE_LINK
+lw_link lw_link
+(
+	.clk_sys(clk_sys),
+	.l_sel(link_sel),
+	.l_clk(io_clk),
+	.l_din(gp_outr[15:0]),
+	.l_wait(io_wait | vs_wait),
+`ifdef LW_OCRAM_FIO_LINK
+	.p_own(ocram_fio_own),
+	.p_hold(ocram_fio_hold),
+	.p_sel(ocram_fio_sel),
+	.p_strobe(ocram_fio_strobe),
+	.p_din(ocram_fio_din),
+`else
+	.p_own(lane_own),
+	.p_hold(lane_hold),
+	.p_sel(lane_sel),
+	.p_strobe(lane_strobe),
+	.p_din(lane_din),
+`endif
+	.io_sel(io_sel),
+	.io_strobe(io_strobe),
+	.io_din(io_din),
+	.io_ack(io_ack)
+);
+`undef LW_LANE_LINK
+`endif
+`ifdef LW_OCRAM_FIO_LINK
+`undef LW_OCRAM_FIO_LINK
+`endif
+`ifdef OSD_WPORTS
+`undef OSD_WPORTS
+`endif
+`ifdef OCRAM_OSD_PORTS
+`undef OCRAM_OSD_PORTS
+`endif
+`ifdef OCRAM_RX_PORTS
+`undef OCRAM_RX_PORTS
+`endif
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
+`ifdef MISTER_LW
+	// HPS_BUS[383:46]: the LW window's clk_sys lines (lw_sys_window's hps_lw; bit map: docs/LW_BRIDGE.md)
+	.HPS_BUS({lw_bus, f1, HDMI_TX_VS, 
+				 clk_100m, clk_ihdmi,
+				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
+				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
+`else
 	.HPS_BUS({f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
+`endif
 
 	.VGA_R(r_out),
 	.VGA_G(g_out),

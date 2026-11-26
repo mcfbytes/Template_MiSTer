@@ -61,6 +61,10 @@ set_global_assignment -name SEED 1
 # disable bilinear filtering when downscaling
 #set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
 
+# compile out the SPI link's pad commands. AREA-CRITICAL BUILDS ONLY, never a default: a stock HPS binary has no pad input;
+# needs MISTER_LW and MISTER_LW_PAD (pads then come only over the LW PAD block)
+#set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_PAD=1"
+
 # disable adaptive scanline filtering
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 
@@ -72,6 +76,63 @@ set_global_assignment -name SEED 1
 
 # Disable ALSA audio output to save some resources
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
+# LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io, in tiers, each one
+# opt-in. Off by default: sys/ then compiles exactly as without this branch. Every tier needs MISTER_LW; a tier
+# macro without it stops the build. The floor (the window, its directory and the host enable), then pads (L1)
+# and the status back-channel (L2); uncomment the lines to build them. Template.sv's LW example (a pad button
+# that writes the status back) is built only with MISTER_LW.
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
+
+# LW SECTOR block, for a core that reads blocks through hps_io (see docs/LW_BRIDGE.md, "Hooking the SECTOR block"):
+# its hps_io slot (0-15), frame in 32-bit words (1-4096), clk_sys cycles between strobes (2-15) and BLKSZ. An
+# unservable geometry stops the build, naming lw_sector_unservable_geometry. With it Template.sv builds its block
+# reader on that slot, which expects the default frame and BLKSZ; here the slot is 1-9, or the build stops, naming
+# lw_template_block_slot_1_to_9.
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=128"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_GAP=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=2"
+# and a save slot (read by BEGIN_S frames, written back from its image in DDR; save slot 1 likewise, SAVE1): its
+# hps_io slot declares it; its image base is required; frame 1-510 words; LBA bits kept and compared, 1-32
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_SLOT=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_WSRC=32'h30000000"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_EXTENT=32'h00020000"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_FRAME=256"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_LBA_BITS=32"
+
+# LW frame lane with reply capture (docs/LW_BRIDGE.md, "LANE block")
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_LANE=1"
+
+# LW OSD image stores, written through each osd's own osd_buffer port (docs/LW_BRIDGE.md, "OSDBUF block")
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
+
+# OCRAM mailbox floor (docs/OCRAM_MAILBOX.md): the HPS on-chip-RAM AXI master, its hello, its EVT ring and line.
+# Off by default, and it needs no other macro.
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM=1"
+# OSD rows from the OSD ring into every osd's osd_buffer (needs MISTER_OCRAM).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_OSD=1"
+# OCRAM SECTOR tier for one hps_io slot (needs MISTER_OCRAM and MISTER_LW; not MISTER_LW_SECTOR_SLOT): its frame in
+# words, clk_sys cycles between strobes and BLKSZ, which must equal hps_io's.
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_SLOT=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_FRAME=128"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_GAP=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_BLKSZ=2"
+# OCRAM mount slots 0 and 1 (need MISTER_OCRAM_SECTOR_SLOT, so MISTER_LW); the frame is one hps_io block or more.
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT0_SLOT=2"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT1_SLOT=3"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT_FRAME=128"
+# OCRAM file downloads into hps_io's download block (needs MISTER_OCRAM; not MISTER_LW_LANE), and link frames on
+# the UIO and OSD selects (needs MISTER_OCRAM_FIO).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_FIO=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_UIO=1"
+# OCRAM events tier (needs MISTER_OCRAM and MISTER_LW, not MISTER_LW_EVT) and capture lane (needs MISTER_OCRAM_FIO).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_EVT=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_LANE=1"
+# Idle poll period as a power of two clk_100m cycles (default 12: 41 us).
+#set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_POLL=12"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl

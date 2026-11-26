@@ -1,5 +1,19 @@
 // A simple OSD implementation. Can be hooked up between a cores
 // VGA output and the physical VGA pins
+// LW_OSD_W: an OSDBUF tier (MISTER_LW_OSD with MISTER_LW, or MISTER_OCRAM_OSD with MISTER_OCRAM) writes
+// osd_buffer through this block's own write port.
+`ifdef MISTER_LW
+`ifdef MISTER_LW_OSD
+`define LW_OSD_W
+`endif
+`endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_OSD
+`ifndef LW_OSD_W
+`define LW_OSD_W
+`endif
+`endif
+`endif
 
 module osd
 (
@@ -19,9 +33,24 @@ module osd
 	output reg    hs_out,
 
 	output reg    osd_status
+`ifdef LW_OSD_W
+	,
+	// The OSDBUF writer's byte (lw_osd.sv or hps_ocram_osd.sv), on clk_sys: one byte of osd_buffer, row lw_addr[12:8],
+	// column lw_addr[7:0].
+	input         lw_we,
+	input  [12:0] lw_addr,
+	input   [7:0] lw_byte
+`endif
 );
 
 parameter  OSD_COLOR    =  3'd4;
+`ifdef MISTER_DISABLE_SPI_OSD
+`ifndef LW_OSD_W
+// MISTER_DISABLE_SPI_OSD compiles out the link's row writes (OSDCMDWRITE, 0x20); without an OSDBUF tier
+// (MISTER_OCRAM_OSD or MISTER_LW_OSD) the image would have no path, so the build stops here, naming the guard.
+spi_osd_off_needs_an_osd_tier spi_osd_guard();
+`endif
+`endif
 
 localparam OSD_WIDTH    = 12'd256;
 localparam OSD_HEIGHT   = 12'd64;
@@ -52,6 +81,12 @@ always@(posedge clk_sys) begin
 	reg        has_cmd;
 	reg        old_strobe;
 	reg        highres = 0;
+`ifdef LW_OSD_W
+`ifndef MISTER_DISABLE_SPI_OSD
+	reg        spi_we;
+	spi_we = 0;
+`endif
+`endif
 
 	osd_t <= rot[0] ? OSD_WIDTH : (OSD_HEIGHT<<1);
 	osd_h <= rot[0] ? (info ? infow : OSD_WIDTH) : info ? infoh : (OSD_HEIGHT<<highres);
@@ -75,11 +110,13 @@ always@(posedge clk_sys) begin
 					else {osd_status,info} <= {~io_din[2] & ~io_din[3],io_din[2]};
 					bcnt  <= 0;
 				end
+`ifndef MISTER_DISABLE_SPI_OSD
 				// command 0x20: OSDCMDWRITE
 				if(io_din[7:5] == 'b001) begin
 					if(io_din[3]) highres <= 1;
 					bcnt <= {io_din[4:0], 8'h00};
 				end
+`endif
 			end else begin
 				// command 0x40: OSDCMDENABLE, OSDCMDDISABLE
 				if(cmd[7:4] == 4) begin
@@ -91,12 +128,29 @@ always@(posedge clk_sys) begin
 				end
 
 				// command 0x20: OSDCMDWRITE
+`ifdef LW_OSD_W
+`ifndef MISTER_DISABLE_SPI_OSD
+				if(cmd[7:5] == 'b001) spi_we = 1;
+`endif
+`else
 				if(cmd[7:5] == 'b001) osd_buffer[bcnt] <= io_din[7:0];
+`endif
 
 				bcnt <= bcnt + 1'd1;
 			end
 		end
 	end
+`ifdef LW_OSD_W
+`ifdef MISTER_DISABLE_SPI_OSD
+	// MISTER_DISABLE_SPI_OSD: the tier's byte is the only write, and the only source of highres (rows 8-15)
+	if(lw_we) osd_buffer[lw_addr] <= lw_byte;
+	if(lw_we & lw_addr[11] & ~lw_addr[12]) highres <= 1;
+`else
+	// one write port: the SPI byte, else the LW byte; an LW byte in rows 8-15 sets highres as OSDCMDWRITE's bit 3 does
+	if(spi_we | lw_we) osd_buffer[spi_we ? bcnt : lw_addr] <= spi_we ? io_din[7:0] : lw_byte;
+	if(~spi_we & lw_we & lw_addr[11] & ~lw_addr[12]) highres <= 1;
+`endif
+`endif
 end
 
 (* direct_enable *) reg ce_pix;
@@ -284,3 +338,7 @@ always @(posedge clk_video) begin
 end
 
 endmodule
+
+`ifdef LW_OSD_W
+`undef LW_OSD_W
+`endif

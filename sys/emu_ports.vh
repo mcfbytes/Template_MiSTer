@@ -1,3 +1,12 @@
+`ifndef SYS_LW_CAPS
+// CONF_STR field-1 token for the LW window sys_top builds with MISTER_LW, with its trailing comma, then a
+// concatenation comma: write `"NAME;", `SYS_LW_CAPS "rest of field 1;"`.
+`ifdef MISTER_LW
+`define SYS_LW_CAPS "AXI:40000:80000:LW,",
+`else
+`define SYS_LW_CAPS
+`endif
+`endif
 //Master input clock
 input         CLK_50M,
 
@@ -6,7 +15,11 @@ input         CLK_50M,
 input         RESET,
 
 //Must be passed to hps_io module
+`ifdef MISTER_LW
+inout [383:0] HPS_BUS,
+`else
 inout  [45:0] HPS_BUS,
+`endif
 
 //Base video clock. Usually equals to CLK_SYS.
 output        CLK_VIDEO,
