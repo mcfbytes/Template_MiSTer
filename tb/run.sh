@@ -152,8 +152,8 @@
 #      events tier without the SECTOR tier (OSD beside it, at 33.8688 MHz): the same cases less the REQUEST order,
 #      and no BIND record at the bind. Then verilator lints the master and hps_ocram_evt with the macro, without the
 #      SECTOR tier, and with MISTER_DISABLE_SPI_EVT
-#   J  the twin (tb/golden/, frozen by tb/golden/freeze.sh from one commit): every tb/ocram_tb.sv shape that arms O,
-#      U, A, I and Y build (diag, osd, sec, fio, mnt at 33.8688 and 20 MHz, uio at both and without HDMI, lane, evt, and
+#   J  the twin (tb/golden/, frozen by tb/golden/freeze.sh from one commit, plus its EVFIX): every tb/ocram_tb.sv
+#      shape that arms O, U, A, I and Y build (diag, osd, sec, fio, mnt at 33.8688 and 20 MHz, uio at both and without HDMI, lane, evt, and
 #      Y's three removal shapes; not arm I's events shape nor arm A's lane shape without SECTOR, which the frozen master
 #      stops), and the lean disc profile's set at 33.8688 MHz less the LW pad tier and its removal (no pad tier here):
 #      MISTER_LW, the OSD, SECTOR (slot 1, 588 words, gap 2) and download tiers, BLKSZ 3, the mount slots 2 and 3 (256

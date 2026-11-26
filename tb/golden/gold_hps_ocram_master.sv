@@ -1,4 +1,4 @@
-// FROZEN from d8fb0a729e14585e21ebe30dd7d711bfebbe9c23:sys/hps_ocram_master.sv by tb/golden/freeze.sh: never edit, re-run the script
+// FROZEN from d8fb0a729e14585e21ebe30dd7d711bfebbe9c23:sys/hps_ocram_master.sv by tb/golden/freeze.sh: never edit, re-run the script, with EVFIX
 //============================================================================
 //  hps_ocram_master.sv -- part of the OCRAM mailbox (docs/OCRAM_MAILBOX.md)
 //
@@ -1031,6 +1031,7 @@ assign m_pub    = t_done && !run_ended && (wr_act == W_RECHEAD) && rec_src_q == 
 localparam [1:0] EK_STATUS = 2'd0, EK_INFO = 2'd1, EK_UPLOAD = 2'd2, EK_RUMBLE = 2'd3;
 reg         ev_have = 1'b0;            // an offer is in e_d and not spent
 reg         ev_wait = 1'b0;            // an offer is asked for and not yet in
+reg         ev_void = 1'b0;            // the offer in flight was asked for by an ended session
 reg         rec_ev_q = 1'b0;           // the record being written is the events tier's
 reg   [1:0] rec_ek_q = EK_STATUS;      // its kind
 reg   [2:0] rec_pad_q = 3'd0;          // a RUMBLE's pad
@@ -1730,9 +1731,13 @@ always @(posedge clk) begin
 	// STATUS word that is not the open record's next, with its stflg, abandons that record before its head
 	ev_abandon <= 1'b0;
 	if (e_ask) ev_wait <= 1'b1;
-	if (e_v) begin ev_wait <= 1'b0; ev_have <= 1'b1; end
+	if (e_v) begin ev_wait <= 1'b0; ev_have <= !ev_void; ev_void <= 1'b0; end
 	else if (t_go && (t_job == J_EREC || (t_job == J_REC && st_wait))) ev_have <= 1'b0;
 	else if (ev_have && ev_bound && !st_open && !ev_rec) ev_have <= 1'b0;
+	if (run_ended || hello_start) begin
+		ev_have <= 1'b0;
+		if ((ev_wait && !e_v) || e_ask) ev_void <= 1'b1;
+	end
 	if (st_wait && ev_have && !st_wok && wr_act != W_REC && !run_ended) begin
 		rec_act    <= 1'b0;
 		rec_k      <= 11'd0;
