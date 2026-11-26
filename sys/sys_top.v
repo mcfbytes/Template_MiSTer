@@ -498,6 +498,10 @@ wire       io_osd_vga   = io_ss1 & ~io_ss2;
 	`ifdef MISTER_DISABLE_VGA_SCALER
 		wire vgas_en      = 0;
 		wire scaler_no_vga = 1;
+		// and no osd on the analog picture: the HDMI osd gives osd_status
+		`ifndef MISTER_DEBUG_NOHDMI
+			`define VGA_OSD_OFF
+		`endif
 	`elsif MISTER_DISABLE_DOWNSCALE
 		wire scaler_no_vga = 0;
 	`endif
@@ -1197,6 +1201,9 @@ wire         bob_deint;
 	`ifdef MISTER_DISABLE_DOWNSCALE
 		.DOWNSCALE("false"),
 	`endif
+	`ifdef MISTER_SMALL_HRES
+		.OHRES(2048),
+	`endif
 		.FRAC(8),
 `ifdef MENU_CORE
 		.N_BURST(2048),
@@ -1652,6 +1659,9 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.io_osd(io_osd_hdmi),
 		.io_strobe(io_strobe),
 		.io_din(io_din),
+`ifdef VGA_OSD_OFF
+		.osd_status(osd_status),
+`endif
 
 		.clk_video(clk_hdmi),
 		.din(hdmi_data_mask),
@@ -1875,6 +1885,9 @@ scanlines #(0) VGA_scanlines
 
 wire [23:0] vga_data_osd;
 wire        vga_vs_osd, vga_hs_osd, vga_de_osd;
+`ifdef VGA_OSD_OFF
+assign {vga_data_osd, vga_vs_osd, vga_hs_osd, vga_de_osd} = {vga_data_sl, vga_vs_sl, vga_hs_sl, vga_de_sl};
+`else
 osd vga_osd
 (
 	.clk_sys(clk_sys),
@@ -1901,6 +1914,7 @@ osd vga_osd
 	.lw_byte(osd_byte)
 `endif
 );
+`endif
 
 wire vga_cs_osd;
 csync csync_vga(clk_vid, vga_hs_osd, vga_vs_osd, vga_cs_osd);
@@ -2178,6 +2192,8 @@ wire        clk_sys;
 `ifdef MISTER_OCRAM_OSD
 `ifdef MISTER_DEBUG_NOHDMI
 wire [1:0] ocram_osd_sel = {io_osd_vga, 1'b0};       // no HDMI osd
+`elsif VGA_OSD_OFF
+wire [1:0] ocram_osd_sel = {1'b0, io_osd_hdmi};      // no VGA osd
 `else
 wire [1:0] ocram_osd_sel = {io_osd_vga, io_osd_hdmi};
 `endif
@@ -2592,6 +2608,8 @@ lw_sys_window #(
 `ifdef LW_OSD_PORTS
 `ifdef MISTER_DEBUG_NOHDMI
 	.osd_sel({io_osd_vga, 1'b0}),            // no HDMI osd
+`elsif VGA_OSD_OFF
+	.osd_sel({1'b0, io_osd_hdmi}),           // no VGA osd
 `else
 	.osd_sel({io_osd_vga, io_osd_hdmi}),
 `endif

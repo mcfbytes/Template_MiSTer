@@ -65,8 +65,12 @@ set_global_assignment -name SEED 1
 # stock Main does not read the 0x20 reply bit, so the picture breaks whenever the HDMI window is smaller than the core's picture
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
 
-# remove the scaled picture on the analog output (vga_scaler=1); safe for published cores; no effect with MISTER_DUAL_SDRAM
+# remove the scaled picture (vga_scaler=1) and the OSD on the analog output. AREA-CRITICAL BUILDS ONLY: the menu then shows
+# on HDMI only; no effect with MISTER_DUAL_SDRAM
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_SCALER=1"
+
+# limit the scaler's output lines to 2048 pixels (OHRES 2048); only a custom video_mode wider than 2048 without pr breaks
+#set_global_assignment -name VERILOG_MACRO "MISTER_SMALL_HRES=1"
 
 # compile out the SPI link's pad commands. AREA-CRITICAL BUILDS ONLY, never a default: a stock HPS binary has no pad input;
 # needs MISTER_LW and MISTER_LW_PAD (pads then come only over the LW PAD block)

@@ -9,7 +9,10 @@
 #                           and without the OSD tier), the SECTOR tier's two, and the download tier's three (alone,
 #                           with the OSD tier and DIAG, beside the SECTOR tier and the LW tiers but the lane),
 #                           the mount slots, the lean disc set, and the events/UIO/lane set, each with no upstream
-#                           macro and with MISTER_DEBUG_NOHDMI (129 configurations)
+#                           macro and with MISTER_DEBUG_NOHDMI (129 configurations); and the scaler trims
+#                           (MISTER_DISABLE_VGA_SCALER, MISTER_DISABLE_DOWNSCALE, MISTER_SMALL_HRES) beside off, the
+#                           LW OSD tier and every LW tier, alone, with MISTER_DEBUG_NOHDMI and with MISTER_DUAL_SDRAM,
+#                           and beside five OCRAM sets with an OSD writer, alone and with MISTER_DEBUG_NOHDMI (19 more)
 #   tb/static.sh --nets FILE MACRO...
 #                           FILE gets one Verilog check call per LW net of that configuration, for tb/top_tb.sv
 # A floor net is a net sys_top.v declares in this configuration whose declaration the off configuration of the
@@ -33,7 +36,12 @@
 #      connected to hps_ocram_master.line, a register assigned only on posedge clk; bit 12 likewise the net
 #      ocram_mline, connected to hps_ocram_master.mark_line, and the constant ocram_mline is a net in every OCRAM
 #      configuration (0 there without MISTER_OCRAM_FIO).
-#   3. Every floor configuration has floor nets to check; the off configuration has none.
+#   3. Every floor configuration has floor nets to check; the off configuration has none. The trims count as an
+#      upstream variant: a trimmed configuration is compared with off under the same trims.
+#   3a. The osds: hdmi_osd and vga_osd, only vga_osd with MISTER_DEBUG_NOHDMI, only hdmi_osd with
+#      MISTER_DISABLE_VGA_SCALER without MISTER_DEBUG_NOHDMI and MISTER_DUAL_SDRAM. osd_status is connected at one
+#      osd, vga_osd's when it is built. Each OSDBUF writer's select pair (the OCRAM and LW writers') is
+#      {io_osd_vga, io_osd_hdmi} with 1'b0 for an osd not built.
 # Then, once, the crossing structure, on every framework-only file (hps_lw_*, lw_*, hps_ocram_*, ocram_*) and the
 # floors' text of the stock files, with every tier:
 #   4. The cell registers (lws0_, lws1_, lwa0_, lwa1_, lwq_, lwsrc_, lwtg_) are named only in sys/lw_cdc.sv, and
@@ -105,6 +113,12 @@ TIERS = [('off', [])] + [('-'.join(['lw'] + [n for k, (n, _) in enumerate(TIER_M
 VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI']), ('.dual', ['MISTER_DUAL_SDRAM'])]
 UPSTREAM = {'MISTER_DEBUG_NOHDMI', 'MISTER_DUAL_SDRAM'}
 CONFIGS = [(t + v, td + vd) for v, vd in VARIANTS for t, td in TIERS]
+# the scaler trims: an upstream-like variant (off is compared under the same trims)
+TRIM = ['MISTER_DISABLE_VGA_SCALER', 'MISTER_DISABLE_DOWNSCALE', 'MISTER_SMALL_HRES']
+TRIM_VARIANTS = [('.trim', TRIM), ('.nohdmi-trim', ['MISTER_DEBUG_NOHDMI'] + TRIM),
+                 ('.dual-trim', ['MISTER_DUAL_SDRAM'] + TRIM)]
+CONFIGS += [(t + v, td + vd) for v, vd in TRIM_VARIANTS for t, td in TIERS
+            if t in ('off', 'lw-osd', 'lw-pad-evt-sec-lane-osd')]
 # the OCRAM floor's configurations: alone, with the diagnostic counters, with the OSD tier, with both, and
 # beside every LW tier (with and without the OSD tier)
 OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
@@ -150,6 +164,9 @@ OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
                                          'MISTER_OCRAM_EVT', 'MISTER_LW', 'MISTER_LW_PAD'])]
 OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
 CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
+CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in TRIM_VARIANTS[:2]
+            if t in ('ocram-osd', 'ocram-osd-lw-all', 'ocram-osd-sec-lw-spioff', 'ocram-lean-disc',
+                     'ocram-evt-uio-lane-lw')]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
 LINES_LO, LINES_W, LINES_PORT = 8, 3, 'lines'
 # gp_in bit -> (the net, the instance and its output that must drive it); the rest of gp_in[27:21] is 0
@@ -370,7 +387,7 @@ def check(ok, what):
 def analyse(defs):
     lw = 'MISTER_LW' in defs
     ocram = 'MISTER_OCRAM' in defs
-    off = [d for d in defs if d in UPSTREAM]
+    off = [d for d in defs if d in UPSTREAM or d in TRIM]
     top = module(tokens(pp('sys/sys_top.v', defs)), 'sys_top')
     top0 = module(tokens(pp('sys/sys_top.v', off)), 'sys_top')
     D, D0 = decls(top), decls(top0)
@@ -473,6 +490,20 @@ for name, defs in CONFIGS:
             else:
                 check(len(t) == 1 and lit_value(t[0]) == 0, '%s: f2h_irq[%d] is %s, not 0' % (name, b, ' '.join(t)))
     check(bool(nets) == (lw or ocram), '%s: %d floor nets for arm E' % (name, len(nets)))
+    hdmi = 'MISTER_DEBUG_NOHDMI' not in defs
+    vga = not hdmi or 'MISTER_DUAL_SDRAM' in defs or 'MISTER_DISABLE_VGA_SCALER' not in defs
+    osds = instances(top, 'osd')
+    want = [n for n, b in (('hdmi_osd', hdmi), ('vga_osd', vga)) if b]
+    check(sorted(n for n, _ in osds) == want, '%s: osds %s, not %s'
+          % (name, ' '.join(sorted(n for n, _ in osds)), ' '.join(want)))
+    st = [n for n, c in osds if c.get('osd_status') == ['osd_status']]
+    check(st == ['vga_osd' if vga else 'hdmi_osd'], '%s: osd_status at %s' % (name, ' '.join(st) or 'no osd'))
+    pair = ['{', 'io_osd_vga' if vga else "1'b0", ',', 'io_osd_hdmi' if hdmi else "1'b0", '}']
+    sels = [('ocram_osd_sel', (D.get('ocram_osd_sel') or (0, 0, None))[2])]
+    sels += [('lw_sys_window.osd_sel', c.get('osd_sel')) for _, c in inst['lw_sys_window']]
+    for n, t in sels:
+        if t is not None and t != ["2'b00"]:
+            check(t == pair, '%s: %s is %s, not %s' % (name, n, ' '.join(t), ' '.join(pair)))
     print('%s: %d floor nets (%s), %d floor ports (%s)'
           % (name, len(nets), ' '.join(nets), len(lwports), ' '.join(lwports)))
     write_nets(os.path.join(O, name + '.nets.vh'), nets, lwports)

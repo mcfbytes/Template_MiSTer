@@ -46,7 +46,8 @@ MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
 MISTER_FB_PALETTE        | Framebuffer palette
 MISTER_DISABLE_DOWNSCALE | Removes Ascal's downscale path (see below)
-MISTER_DISABLE_VGA_SCALER| Removes the scaled picture on the analog output (see below)
+MISTER_DISABLE_VGA_SCALER| Removes the scaled picture and the OSD on the analog output (see below)
+MISTER_SMALL_HRES        | Ascal's output lines at most 2048 pixels wide (see below)
 MISTER_LW                | LW bridge framework: the lightweight-bridge window beside hps_io (docs/LW_BRIDGE.md)
 MISTER_LW_PAD            | LW PAD block and hps_io's LW write arm; needs MISTER_LW
 MISTER_LW_KBM            | LW keys, mouse and triggers as PAD stores; needs MISTER_LW_PAD
@@ -78,21 +79,24 @@ docs/OCRAM_MAILBOX.md.
 
 
 #### Optional scaler features
-Some macros remove a scaler feature to save FPGA resources. Each one sets a bit in the reply to the `UIO_SET_VIDEO` (0x20) command, so the HPS binary can tell the feature is missing. A clear bit means the feature is present.
+Some macros remove a scaler feature to save FPGA resources. Each one that the HPS binary must know about sets a bit in the reply to the `UIO_SET_VIDEO` (0x20) command, so the HPS binary can tell the feature is missing. A clear bit means the feature is present.
 
 Macro                     | 0x20 reply bit | Saves (Quartus 17.0.2, one fit)  | Lost
 --------------------------|----------------|----------------------------------|---------------------------------
 MISTER_DISABLE_DOWNSCALE  | 2              | about 270 ALMs, 5 M10K, 6 DSP    | any HDMI picture smaller than the core's output
-MISTER_DISABLE_VGA_SCALER | 3              | about 1,000 ALMs, 0 M10K (one fit)| `vga_scaler=1` and the framebuffer on the analog output
+MISTER_DISABLE_VGA_SCALER | 3              | about 1,000 ALMs, 0 M10K (one fit), and the analog osd's 470-496 ALMs, 6 M10K | `vga_scaler=1`, the framebuffer and the OSD on the analog output
+MISTER_SMALL_HRES         | none           | about 126 ALUTs, 4 M10K (synthesis) | HDMI modes more than 2048 pixels wide
 
-**Policy.** MISTER_DISABLE_VGA_SCALER may ship in a published core. MISTER_DISABLE_DOWNSCALE is for area-critical builds only: it is the core author's choice, never a default, and never enabled just because it fits.
+**Policy.** MISTER_SMALL_HRES may ship in a published core. MISTER_DISABLE_DOWNSCALE and MISTER_DISABLE_VGA_SCALER are for area-critical builds only: each is the core author's choice, never a default, and never enabled just because it fits.
 
 **MISTER_DISABLE_DOWNSCALE is not safe with a stock HPS binary that does not read bit 2.** Without the downscale path the scaler cannot shrink a picture: if the HDMI output window is smaller than the core's picture (for example `video_mode` 640x480 with a 704-pixel-wide core, or a small `vscale_mode` result) the picture is broken. Stock Main does not read bit 2, so a published core that sets it breaks under stock Main whenever the window is smaller than the picture. Enable it only in a core whose output always fits the usual 720p/1080p windows, and say so in the core's release notes.
 
 #### Optional link features
 **MISTER_DISABLE_SPI_PAD** compiles out `hps_io`'s link arms for the pad commands (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D), so pads reach the core only through the LW PAD block, which then reports it (PAD K9 bit 0). It saves about 85 ALMs (estimated). **Area-critical builds only, never a default: a stock HPS binary has no pad input.** It needs MISTER_LW_PAD, or the build stops naming `spi_pad_off_needs_MISTER_LW_PAD`.
 
-**MISTER_DISABLE_VGA_SCALER is safe with any HPS binary.** The analog output shows the core's native picture, as with `vga_scaler=0`, and a core's `VGA_SCALER` request has no effect. It has no effect with MISTER_DUAL_SDRAM: dual SDRAM boards use the analog pins for the second SDRAM, so that build never had the scaled analog output, and bit 3 stays clear.
+**MISTER_DISABLE_VGA_SCALER works with any HPS binary, but the analog output has no OSD.** The analog output shows the core's native picture, as with `vga_scaler=0`, and a core's `VGA_SCALER` request has no effect. The analog path's osd is not built either: the menu and the info popups appear on HDMI only, so a setup with only an analog display (VGA, YPbPr, RGB or, without MISTER_DISABLE_YC, composite and S-Video) has no menu. The core's `OSD_STATUS` comes from the HDMI osd. With MISTER_DEBUG_NOHDMI the analog osd stays, as the only one. It has no effect with MISTER_DUAL_SDRAM: dual SDRAM boards use the analog pins for the second SDRAM, so that build never had the scaled analog output, keeps its osd as before, and bit 3 stays clear.
+
+**MISTER_SMALL_HRES** builds Ascal with `OHRES` 2048 instead of 2304: its output line buffers hold 2048 pixels, and its line counters wrap at 2048, so an HDMI mode more than 2048 pixels wide shows a broken picture. No reply bit is needed, because stock Main never picks such a mode by itself: an EDID mode wider than 2048 falls back to the default mode, and a computed mode wider than 2048 uses pixel repetition (half the width, as `2560x1440` already does). Only a custom `video_mode` modeline with 2049-2304 active pixels and no `pr` flag loses its picture. Without MISTER_SMALL_HRES the Ascal generics are upstream's.
 
 # Quartus version
 Cores must be developed in **Quartus v17.0.x**. It's recommended to have updates, so it will be **v17.0.2**. Newer versions won't give any benefits to FPGA used in MiSTer, however they will introduce incompatibilities in project settings and it will make harder to maintain the core and collaborate with others. **So please stick to good old 17.0.x version.** You may use either Lite or Standard license.
