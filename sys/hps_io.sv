@@ -35,11 +35,25 @@
 //  0 - not used, Main never polls it (default)
 //  1 - core drives joystick_N_ffb, read by Main with UIO_GET_FFB
 
+`ifdef MISTER_LW
+`ifdef MISTER_LW_EVT
+// LW_EVT_X: the events tier (MISTER_LW_EVT, with MISTER_LW) exports uio_block's core->host flags.
+`define LW_EVT_X
+`endif
+`endif
+// LW_UIO_FLAGS_X: uio_block's flag registers are declared at module scope, for either tier's exports.
+`ifdef LW_EVT_X
+`define LW_UIO_FLAGS_X
+`endif
 //
 module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, BLKSZ=2, PS2WE=0, STRLEN=$size(CONF_STR)>>3, F12KEYMOD=0, FFB=0)
 (
 	input             clk_sys,
+`ifdef MISTER_LW
+	inout     [383:0] HPS_BUS,
+`else
 	inout      [45:0] HPS_BUS,
+`endif
 
 	// buttons up to 32
 	output reg [31:0] joystick_0,
@@ -217,6 +231,78 @@ wire        io_wide  = (WIDE) ? 1'b1 : 1'b0;
 wire [15:0] io_din   = HPS_BUS[31:16];
 reg  [15:0] io_dout;
 
+`ifdef MISTER_LW
+// LW tiers (docs/LW_BRIDGE.md): each piece below, and SECTOR's commit mark before uio_block, drives a constant 1
+// on its own presence bit of HPS_BUS, so the window lists its block only when the wide bus reaches this instance.
+`ifdef MISTER_LW_PAD
+// LW pad stores from sys_top (lw_pad.sv), already on clk_sys; HPS_BUS[375]: this write arm is present
+wire        lw_we    = HPS_BUS[94];
+wire  [7:0] lw_op    = HPS_BUS[93:86];
+wire  [7:0] lw_idx   = HPS_BUS[85:78];
+wire [31:0] lw_dat   = HPS_BUS[77:46];
+assign HPS_BUS[375] = 1'b1;
+`ifdef MISTER_LW_KBM
+wire        lw_pressed  = (lw_dat[15:8] != 8'hf0);
+wire        lw_extended = (~lw_pressed ? (lw_dat[23:16] == 8'he0) : (lw_dat[15:8] == 8'he0));
+`endif
+`endif
+`ifdef LW_UIO_FLAGS_X
+// uio_block's own registers, declared here so the exports can read them:
+reg   [3:0] stflg = 0;
+reg [127:0] status_req = 0;
+reg         old_upload_req = 0;
+reg         upload_req = 0;
+reg         old_info = 0;
+reg   [7:0] info_n = 0;
+`endif
+`ifdef LW_EVT_X
+// The core->host flags, exported to sys_top's LW EVT block (lw_evt.sv): HPS_BUS[239:237] one-cycle pulses {upload,
+// info, blk} from the edges uio_block uses, [371:240] the 0x29 flag and snapshot {status_req, stflg}, [374:372] the
+// levels {upload pending, info pending, a block request stands}, [376] the exports are present.
+wire [VD:0] ev_rq = sd_rd | sd_wr;
+reg  [VD:0] ev_rq_d = 0, ev_ack_d = 0;
+always @(posedge clk_sys) begin
+	ev_rq_d  <= ev_rq;
+	ev_ack_d <= sd_ack;
+end
+assign HPS_BUS[239:237] = {~old_upload_req & ioctl_upload_req, ~old_info & info_req,
+                           |((ev_rq & ~ev_rq_d) | (ev_ack_d & ~sd_ack & ev_rq))};
+assign HPS_BUS[371:240] = {status_req, stflg};
+assign HPS_BUS[374:372] = {upload_req, info_n != 8'd0, |ev_rq};
+assign HPS_BUS[376] = 1'b1;
+`endif
+`else
+// A tier macro without MISTER_LW: the build stops here, naming the guard.
+`ifdef MISTER_LW_PAD
+lw_tier_needs_MISTER_LW pad_guard();
+`endif
+`ifdef MISTER_LW_EVT
+lw_tier_needs_MISTER_LW evt_guard();
+`endif
+// The OCRAM SECTOR tier drives the LW sector bits of HPS_BUS, which only MISTER_LW builds.
+`endif
+// LW_OCRAM_CFG_HPS: the OCRAM floor's macros as localparams (ocram_cfg.vh), for its tiers' checks below.
+`ifdef MISTER_DISABLE_SPI_PAD
+`ifndef MISTER_LW_PAD
+spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();
+`endif
+`endif
+`ifdef MISTER_LW_KBM
+`ifndef MISTER_LW_PAD
+lw_kbm_needs_MISTER_LW_PAD lw_kbm_guard();
+`endif
+generate
+	if (PS2DIV != 0) begin : lw_kbm_ps2div
+		lw_kbm_on_a_PS2DIV_core guard();
+	end
+endgenerate
+`endif
+`ifdef MISTER_DISABLE_SPI_KBM
+`ifndef MISTER_LW_KBM
+spi_kbm_off_needs_MISTER_LW_KBM spi_kbm_guard();
+`endif
+`endif
+// The LW frame lane and the OCRAM download tier each put a player on the link nets through lw_link: one a build.
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;
 assign HPS_BUS[32]   = io_wide;
@@ -284,9 +370,11 @@ reg        gamma_wr;
 reg  [9:0] gamma_wr_addr;
 reg  [7:0] gamma_value;
 
+`ifndef MISTER_DISABLE_SPI_KBM
 reg [31:0] ps2_key_raw = 0;
 wire       pressed  = (ps2_key_raw[15:8] != 8'hf0);
 wire       extended = (~pressed ? (ps2_key_raw[23:16] == 8'he0) : (ps2_key_raw[15:8] == 8'he0));
+`endif
 
 reg [MAX_W:0] byte_cnt;
 reg   [3:0] sdn_ack;
@@ -296,17 +384,27 @@ always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;
 	reg  [2:0] b_wr;
 	reg  [3:0] stick_idx;
+`ifndef MISTER_DISABLE_SPI_KBM
 	reg  [7:0] atrig_idx;
+`endif
 	reg  [3:0] pdsp_idx;
+`ifndef MISTER_DISABLE_SPI_KBM
 	reg        ps2skip = 0;
+`endif
+`ifndef LW_UIO_FLAGS_X
 	reg  [3:0] stflg = 0;
 	reg[127:0] status_req;
+`endif
 	reg        old_status_set = 0;
+`ifndef LW_UIO_FLAGS_X
 	reg        old_upload_req = 0;
+`endif
 	reg [47:0] ffb_data;
+`ifndef LW_UIO_FLAGS_X
 	reg        upload_req = 0;
 	reg        old_info = 0;
 	reg  [7:0] info_n = 0;
+`endif
 	reg [15:0] tmp1;
 	reg  [7:0] tmp2;
 	reg  [3:0] sdn_r;
@@ -332,6 +430,7 @@ always@(posedge clk_sys) begin : uio_block
 	gamma_wr <= 0;
 
 	if(~io_enable) begin
+`ifndef MISTER_DISABLE_SPI_KBM
 		if(cmd == 4 && !ps2skip) ps2_mouse[24] <= ~ps2_mouse[24];
 		if(cmd == 5 && !ps2skip) begin
 			ps2_key <= {~ps2_key[10], pressed, extended, ps2_key_raw[7:0]};
@@ -339,13 +438,16 @@ always@(posedge clk_sys) begin : uio_block
 			if(ps2_key_raw == 'h7CE0F012) ps2_key[9:0] <= 'h17C; // prnscr released
 			if(ps2_key_raw == 'hF014F077) ps2_key[9:0] <= 'h377; // pause  pressed
 		end
+`endif
 		if(cmd == 'h22) RTC[64] <= ~RTC[64];
 		if(cmd == 'h24) TIMESTAMP[32] <= ~TIMESTAMP[32];
 		cmd <= 0;
 		byte_cnt <= 0;
 		sd_ack <= 0;
 		io_dout <= 0;
+`ifndef MISTER_DISABLE_SPI_KBM
 		ps2skip <= 0;
+`endif
 		img_mounted <= 0;
 	end
 	else if(io_strobe) begin
@@ -380,18 +482,22 @@ always@(posedge clk_sys) begin : uio_block
 			endcase
 
 			sd_buff_addr <= 0;
+`ifndef MISTER_DISABLE_SPI_KBM
 			if(io_din == 5) ps2_key_raw <= 0;
+`endif
 		end else begin
 
 			casex(cmd)
 				// buttons and switches
 				'h01: cfg <= io_din;
+`ifndef MISTER_DISABLE_SPI_PAD
 				'h02: if(byte_cnt==1) joystick_0[15:0] <= io_din; else joystick_0[31:16] <= io_din;
 				'h03: if(byte_cnt==1) joystick_1[15:0] <= io_din; else joystick_1[31:16] <= io_din;
 				'h10: if(byte_cnt==1) joystick_2[15:0] <= io_din; else joystick_2[31:16] <= io_din;
 				'h11: if(byte_cnt==1) joystick_3[15:0] <= io_din; else joystick_3[31:16] <= io_din;
 				'h12: if(byte_cnt==1) joystick_4[15:0] <= io_din; else joystick_4[31:16] <= io_din;
 				'h13: if(byte_cnt==1) joystick_5[15:0] <= io_din; else joystick_5[31:16] <= io_din;
+`endif
 
 				// force feedback request, snapshot taken with the command word
 				'h0X45: if(FFB) case(byte_cnt)
@@ -400,6 +506,7 @@ always@(posedge clk_sys) begin : uio_block
 							3: io_dout <= ffb_data[15:0];
 						endcase
 
+`ifndef MISTER_DISABLE_SPI_KBM
 				// store incoming ps2 mouse bytes
 				'h04: begin
 							if(PS2DIV) begin
@@ -430,6 +537,7 @@ always@(posedge clk_sys) begin : uio_block
 								kbd_we <= 1;
 							end
 						end
+`endif
 
 				// reading config string, returning a byte from string
 				'h14: if(byte_cnt <= STRLEN) io_dout[7:0] <= conf_byte;
@@ -456,6 +564,7 @@ always@(posedge clk_sys) begin : uio_block
 							io_dout <= sd_buff_din[sdn_ack];
 						end
 
+`ifndef MISTER_DISABLE_SPI_PAD
 				// joystick left analog
 				'h1a: if(!byte_cnt[MAX_W:2]) begin
 							case(byte_cnt[1:0])
@@ -499,7 +608,9 @@ always@(posedge clk_sys) begin : uio_block
 									endcase
 							endcase
 						end
+`endif
 
+`ifndef MISTER_DISABLE_SPI_KBM
 				// 0x46: player, {RT, LT}
 				'h46: case(byte_cnt)
 							1: atrig_idx <= io_din[7:0];
@@ -512,6 +623,7 @@ always@(posedge clk_sys) begin : uio_block
 									5: {joystick_rt_analog_5, joystick_lt_analog_5} <= io_din;
 								endcase
 						endcase
+`endif
 
 				// notify image selection
 				'h1c: begin
@@ -600,6 +712,73 @@ always@(posedge clk_sys) begin : uio_block
 			endcase
 		end
 	end
+`ifdef MISTER_LW
+`ifdef MISTER_LW_PAD
+	// LW second write path: the same registers the link writes, one full word per store.
+	if(lw_we) begin
+		case(lw_op)
+			'h02: if(!lw_idx) joystick_0 <= lw_dat;
+			'h03: if(!lw_idx) joystick_1 <= lw_dat;
+			'h10: if(!lw_idx) joystick_2 <= lw_dat;
+			'h11: if(!lw_idx) joystick_3 <= lw_dat;
+			'h12: if(!lw_idx) joystick_4 <= lw_dat;
+			'h13: if(!lw_idx) joystick_5 <= lw_dat;
+			'h1a: case(lw_idx[3:0])
+					 0: joystick_l_analog_0 <= lw_dat[15:0];
+					 1: joystick_l_analog_1 <= lw_dat[15:0];
+					 2: joystick_l_analog_2 <= lw_dat[15:0];
+					 3: joystick_l_analog_3 <= lw_dat[15:0];
+					 4: joystick_l_analog_4 <= lw_dat[15:0];
+					 5: joystick_l_analog_5 <= lw_dat[15:0];
+					15: case(lw_idx[7:4])
+							 0: paddle_0 <= lw_dat[7:0];
+							 1: paddle_1 <= lw_dat[7:0];
+							 2: paddle_2 <= lw_dat[7:0];
+							 3: paddle_3 <= lw_dat[7:0];
+							 4: paddle_4 <= lw_dat[7:0];
+							 5: paddle_5 <= lw_dat[7:0];
+							 8: spinner_0 <= {~spinner_0[8],lw_dat[7:0]};
+							 9: spinner_1 <= {~spinner_1[8],lw_dat[7:0]};
+							10: spinner_2 <= {~spinner_2[8],lw_dat[7:0]};
+							11: spinner_3 <= {~spinner_3[8],lw_dat[7:0]};
+							12: spinner_4 <= {~spinner_4[8],lw_dat[7:0]};
+							13: spinner_5 <= {~spinner_5[8],lw_dat[7:0]};
+						endcase
+				endcase
+			'h3d: case(lw_idx[3:0])
+					 0: joystick_r_analog_0 <= lw_dat[15:0];
+					 1: joystick_r_analog_1 <= lw_dat[15:0];
+					 2: joystick_r_analog_2 <= lw_dat[15:0];
+					 3: joystick_r_analog_3 <= lw_dat[15:0];
+					 4: joystick_r_analog_4 <= lw_dat[15:0];
+					 5: joystick_r_analog_5 <= lw_dat[15:0];
+				endcase
+`ifdef MISTER_LW_KBM
+			// the key frame, formed and toggled as the link's frame end forms it; the mouse's extension, then its
+			// packet with bit 24's toggle; a trigger pair, a level
+			'h05: if(!lw_idx) begin
+					ps2_key <= {~ps2_key[10], lw_pressed, lw_extended, lw_dat[7:0]};
+					if(lw_dat == 'hE012E07C) ps2_key[9:0] <= 'h37C; // prnscr pressed
+					if(lw_dat == 'h7CE0F012) ps2_key[9:0] <= 'h17C; // prnscr released
+					if(lw_dat == 'hF014F077) ps2_key[9:0] <= 'h377; // pause  pressed
+				end
+			'h04: case(lw_idx)
+					0: ps2_mouse <= {~ps2_mouse[24], lw_dat[23:0]};
+					1: ps2_mouse_ext <= lw_dat[15:0];
+				endcase
+			'h46: case(lw_idx)
+					0: {joystick_rt_analog_0, joystick_lt_analog_0} <= lw_dat[15:0];
+					1: {joystick_rt_analog_1, joystick_lt_analog_1} <= lw_dat[15:0];
+					2: {joystick_rt_analog_2, joystick_lt_analog_2} <= lw_dat[15:0];
+					3: {joystick_rt_analog_3, joystick_lt_analog_3} <= lw_dat[15:0];
+					4: {joystick_rt_analog_4, joystick_lt_analog_4} <= lw_dat[15:0];
+					5: {joystick_rt_analog_5, joystick_lt_analog_5} <= lw_dat[15:0];
+				endcase
+`endif
+		endcase
+	end
+`endif
+`endif
 end
 
 
@@ -761,6 +940,12 @@ always@(posedge clk_sys) begin : fio_block
 end
 
 endmodule
+`ifdef LW_EVT_X
+`undef LW_EVT_X
+`endif
+`ifdef LW_UIO_FLAGS_X
+`undef LW_UIO_FLAGS_X
+`endif
 
 //////////////////////////////////////////////////////////////////////////////////
 

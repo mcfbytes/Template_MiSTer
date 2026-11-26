@@ -5,6 +5,9 @@ This core contains the latest version of framework and will be updated when fram
 
 It's highly recommended to follow the notes to keep it standardized for easier maintenance and collaboration with other developers.
 
+## LW bridge framework
+This branch adds an optional second path between the HPS and the core: a memory-mapped window on the HPS lightweight bridge, beside the SPI link that `hps_io` decodes. Pads, an OSD shadow, the status back-channel and (optionally) disk blocks travel as plain 32-bit stores and register reads, with two interrupt lines. `hps_io` keeps every SPI decode, so a host that ignores the window drives the core as before. Adoption, register map and contracts: [docs/LW_BRIDGE.md](docs/LW_BRIDGE.md).
+
 ## Source structure
 
 ### Legend:
@@ -42,7 +45,19 @@ MISTER_SMALL_VBUF        | Sets a smaller video buffer for the ASCAL
 MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
 MISTER_FB_PALETTE        | Framebuffer palette
+MISTER_LW                | LW bridge framework: the lightweight-bridge window beside hps_io (docs/LW_BRIDGE.md)
+MISTER_LW_PAD            | LW PAD block and hps_io's LW write arm; needs MISTER_LW
+MISTER_LW_KBM            | LW keys, mouse and triggers as PAD stores; needs MISTER_LW_PAD
+MISTER_LW_EVT            | LW EVT block (status, block-request, info, upload flags); needs MISTER_LW
+MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over the LW PAD block (area-critical builds only, see below)
+MISTER_DISABLE_SPI_KBM   | Removes the SPI key, mouse and trigger commands; needs MISTER_LW_KBM
 
+An LW or OCRAM tier macro without its floor stops the build, naming a guard module (`ocram_tier_needs_MISTER_OCRAM`,
+`lw_blksz_differs_from_hps_io`, ...). Geometry, defaults and every guard: the macro tables in docs/LW_BRIDGE.md and
+docs/OCRAM_MAILBOX.md.
+
+#### Optional link features
+**MISTER_DISABLE_SPI_PAD** compiles out `hps_io`'s link arms for the pad commands (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D), so pads reach the core only through the LW PAD block, which then reports it (PAD K9 bit 0). It saves about 85 ALMs (estimated). **Area-critical builds only, never a default: a stock HPS binary has no pad input.** It needs MISTER_LW_PAD, or the build stops naming `spi_pad_off_needs_MISTER_LW_PAD`.
 
 # Quartus version
 Cores must be developed in **Quartus v17.0.x**. It's recommended to have updates, so it will be **v17.0.2**. Newer versions won't give any benefits to FPGA used in MiSTer, however they will introduce incompatibilities in project settings and it will make harder to maintain the core and collaborate with others. **So please stick to good old 17.0.x version.** You may use either Lite or Standard license.

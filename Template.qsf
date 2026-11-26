@@ -61,6 +61,10 @@ set_global_assignment -name SEED 1
 # disable bilinear filtering when downscaling
 #set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
 
+# compile out the SPI link's pad commands. AREA-CRITICAL BUILDS ONLY, never a default: a stock HPS binary has no pad input;
+# needs MISTER_LW and MISTER_LW_PAD (pads then come only over the LW PAD block)
+#set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_PAD=1"
+
 # disable adaptive scanline filtering
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 
@@ -72,6 +76,15 @@ set_global_assignment -name SEED 1
 
 # Disable ALSA audio output to save some resources
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
+# LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io, in tiers, each one
+# opt-in. Off by default: sys/ then compiles exactly as without this branch. Every tier needs MISTER_LW; a tier
+# macro without it stops the build. The floor (the window, its directory and the host enable), then pads (L1)
+# and the status back-channel (L2); uncomment the lines to build them. Template.sv's LW example (a pad button
+# that writes the status back) is built only with MISTER_LW.
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl
