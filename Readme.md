@@ -56,8 +56,11 @@ MISTER_DISABLE_SPI_PAD   | Removes the SPI link's pad commands; pads only over t
 MISTER_DISABLE_SPI_KBM   | Removes the SPI key, mouse and trigger commands; needs MISTER_LW_KBM
 MISTER_OCRAM             | OCRAM mailbox floor, test cores only (docs/OCRAM_MAILBOX.md); needs no other macro
 MISTER_OCRAM_OSD         | OCRAM OSD tier; needs MISTER_OCRAM
+MISTER_OCRAM_SECTOR_SLOT | OCRAM SECTOR tier on this slot; with _FRAME, _GAP, _BLKSZ; needs MISTER_OCRAM and MISTER_LW
+MISTER_OCRAM_MOUNT0_SLOT | OCRAM mount slot 0 (likewise MOUNT1); _MOUNT_FRAME >= one block; needs OCRAM SECTOR
 MISTER_OCRAM_POLL        | OCRAM idle poll period, a power of two of clk_100m cycles (default 12)
 MISTER_DISABLE_SPI_OSD   | Removes osd.v's SPI row writes; needs MISTER_OCRAM_OSD or MISTER_LW_OSD
+MISTER_DISABLE_SPI_BLK   | Removes hps_io's SPI block arms (_UNUSED = slot mask); needs a block tier per other slot
 
 An LW or OCRAM tier macro without its floor stops the build, naming a guard module (`ocram_tier_needs_MISTER_OCRAM`,
 `lw_blksz_differs_from_hps_io`, ...). Geometry, defaults and every guard: the macro tables in docs/LW_BRIDGE.md and

@@ -278,6 +278,7 @@ The bridge side runs on `clk_100m` (`h2f_user0_clk`). Every crossing to the core
 | `[374:372]` | from core | event levels `{upload pending, info pending, a block request stands}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
+| `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT` or `MISTER_OCRAM_SECTOR_SLOT`); presence, constant 1: the mark |
 | `[383]` | - | reserved: nothing drives it; every reader ignores it |
 
 ## What a host must not assume

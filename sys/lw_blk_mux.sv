@@ -19,11 +19,15 @@
 `ifdef MISTER_LW_SECTOR_SLOT
 `define LW_BLK_MUX_BUILT
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_BLK_MUX_BUILT
+`endif
 `ifdef LW_BLK_MUX_BUILT
 `default_nettype none
 
-// The consumer's ack/write/address/data are muxed here, never the shared sd_buff_wr, so an SPI transfer on another
-// slot cannot land in an LW frame.
+// emu side of the LW SECTOR route (lw_sector.sv, or the OCRAM mailbox's feeder in hps_ocram_rx.sv with
+// MISTER_OCRAM_SECTOR_SLOT): one hps_io read slot's consumer is fed either by hps_io or, while sys_top's en_sys is
+// set, by the LW feeder.
 
 module lw_blk_mux
 (
@@ -60,11 +64,32 @@ endmodule
 `ifdef MISTER_LW_SECTOR_SLOT
 `define LW_SAVE_MUX_BUILT
 `endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_SAVE_MUX_BUILT
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef LW_SAVE_MUX_BUILT
+`define LW_SAVE_MUX_BUILT
+`endif
+`endif
 // LW_SAVE_MUX_DIN: the OCRAM mount slots are built (a mount macro with MISTER_OCRAM and its SECTOR tier), so the
 // LBA field carries core_din under the ack; a mount macro left in a build without them changes nothing here.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_SAVE_MUX_DIN
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef LW_SAVE_MUX_DIN
+`define LW_SAVE_MUX_DIN
+`endif
+`endif
+`endif
+`endif
 `ifdef LW_SAVE_MUX_BUILT
-// While the slot's en_sys is set its rd/wr are hidden from hps_io and the slot's ack/write/addr/data come from the
-// feeder, the write gated by the slot's own ack.
+// emu side of a save slot on the LW SECTOR route (MISTER_LW_SECTOR_SLOT), or of a mount slot on the OCRAM one
+// (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT): SAVE 0 is the slot MISTER_LW_SAVE0_SLOT or MISTER_OCRAM_MOUNT0_SLOT
+// declares (the slot index 1), SAVE 1 the MISTER_LW_SAVE1_SLOT or MISTER_OCRAM_MOUNT1_SLOT one (index 2).
 
 module lw_save_mux #(parameter SAVE = 0)
 (
@@ -94,8 +119,16 @@ localparam U = SAVE ? 202 : 167;
 wire en  = HPS_BUS[128 + 2 * SAVE];
 wire ack = HPS_BUS[129 + 2 * SAVE];
 
+`ifdef LW_SAVE_MUX_DIN
+assign HPS_BUS[U + 34:U]     = {(en & ack) ? {16'd0, core_din} : core_lba, core_rd, core_wr, hps_ack};
+// The ack answers only the request that was up when it rose.
+reg  fell = 1'b0;
+always @(posedge HPS_BUS[36]) fell <= en & ack & (fell | ~(core_rd | core_wr));
+wire cack = ack & ~(fell & (core_rd | core_wr));
+`else
 assign HPS_BUS[U + 34:U]     = {core_lba, core_rd, core_wr, hps_ack};
 wire cack = ack;
+`endif
 assign HPS_BUS[378 + SAVE]   = 1'b1;
 
 assign hps_rd     = core_rd & ~en;
@@ -106,6 +139,9 @@ assign core_addr  = en ? HPS_BUS[127:114]     : hps_addr;
 assign core_data  = en ? HPS_BUS[113:98]      : hps_data;
 
 endmodule
+`endif
+`ifdef LW_SAVE_MUX_DIN
+`undef LW_SAVE_MUX_DIN
 `endif
 `ifdef LW_SAVE_MUX_BUILT
 `undef LW_SAVE_MUX_BUILT

@@ -19,6 +19,9 @@
 `ifdef MISTER_OCRAM_OSD
 `define LW_OCRAM_BLK_REQ_BUILT
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_OCRAM_BLK_REQ_BUILT
+`endif
 `ifdef LW_OCRAM_BLK_REQ_BUILT
 `default_nettype none
 

@@ -62,6 +62,9 @@ assign VIDEO_ARY = (!ar) ? 12'd3 : 12'd0;
 `ifdef MISTER_LW_SECTOR_SLOT
 `define TPL_BLK
 `define TPL_BLK_SLOT `MISTER_LW_SECTOR_SLOT
+`elsif MISTER_OCRAM_SECTOR_SLOT
+`define TPL_BLK
+`define TPL_BLK_SLOT `MISTER_OCRAM_SECTOR_SLOT
 `endif
 `ifdef TPL_BLK
 localparam       BLK_SLOT  = `TPL_BLK_SLOT;            // the hps_io slot the SECTOR feeder serves: 1-9 here (below)
@@ -134,6 +137,8 @@ hps_io #(.CONF_STR(CONF_STR)
 	, .WIDE(1), .VDNUM(BLK_SLOT + 1)
 `ifdef MISTER_LW_BLKSZ
 	, .BLKSZ(`MISTER_LW_BLKSZ)
+`elsif MISTER_OCRAM_BLKSZ
+	, .BLKSZ(`MISTER_OCRAM_BLKSZ)
 `endif
 `endif
 `endif

@@ -19,6 +19,9 @@
 `ifdef MISTER_OCRAM_OSD
 `define LW_OCRAM_RX_BUILT
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_OCRAM_RX_BUILT
+`endif
 `ifdef LW_OCRAM_RX_BUILT
 `default_nettype none
 
@@ -263,8 +266,9 @@ ocram_blk_req #(.SEC_EN(SEC_EN), .MNT_EN(MNT_EN), .MFRAME(MFRAME), .BLKSZ(BLKSZ)
 endmodule
 
 //============================================================================
-// Strobes as hps_io's: with c_wide two 16-bit strobes a word at the halfword index, low half first, else four bytes
-// at the byte index; GAP cycles apart, the first GAP after the ack.
+// hps_ocram_sfeed -- the SECTOR feeder of hps_ocram_rx, on clk_sys (MISTER_OCRAM_SECTOR_SLOT) lw_sector's feeder
+// with the forward crossing's capture register as its one-entry queue: w_v marks an entry (a SEC_HEAD with its slot
+// index and LBA, or a DATA word) held in w_d until it is answered.
 
 /* verilator lint_off DECLFILENAME */   // the feeder shares hps_ocram_rx's file, as the sink shares the master's
 module hps_ocram_sfeed #(parameter [31:0] FRAME = 32'd128, parameter [31:0] GAP = 32'd2,

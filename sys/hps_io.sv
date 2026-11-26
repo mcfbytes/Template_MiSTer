@@ -286,11 +286,23 @@ lw_tier_needs_MISTER_LW sector_guard();
 lw_tier_needs_MISTER_LW osd_guard();
 `endif
 // The OCRAM SECTOR tier drives the LW sector bits of HPS_BUS, which only MISTER_LW builds.
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+ocram_sector_needs_MISTER_LW ocram_sector_guard();
+`endif
 `endif
 // An OCRAM tier macro without the floor, MISTER_OCRAM: the build stops here, naming the guard.
 `ifndef MISTER_OCRAM
 `ifdef MISTER_OCRAM_OSD
 ocram_tier_needs_MISTER_OCRAM ocram_osd_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+ocram_tier_needs_MISTER_OCRAM ocram_sector_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+ocram_tier_needs_MISTER_OCRAM ocram_mount0_floor_guard();
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+ocram_tier_needs_MISTER_OCRAM ocram_mount1_floor_guard();
 `endif
 `endif
 // The LW SECTOR block reports MISTER_LW_BLKSZ (default 2) as the slot's block size, so it must be this instance's
@@ -313,11 +325,46 @@ endgenerate
 `ifdef MISTER_OCRAM
 `define LW_OCRAM_CFG_HPS
 `endif
+`ifdef MISTER_DISABLE_SPI_BLK
+`ifndef LW_OCRAM_CFG_HPS
+`define LW_OCRAM_CFG_HPS
+`endif
+`endif
 `ifdef LW_OCRAM_CFG_HPS
 `include "sys/ocram_cfg.vh"
 `undef LW_OCRAM_CFG_HPS
 `endif
 // The OCRAM mount slots share the SECTOR tier's feeder and EVT writer, and take the LW save-slot bits.
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount0_guard();
+`endif
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
+`endif
+`endif
+// LW_OCRAM_MNT_HPS: the OCRAM mount slots are built (either mount macro, with MISTER_OCRAM). Their block length is
+// MISTER_OCRAM_BLKSZ's (ocram_cfg.vh, default 2), so it must be this instance's BLKSZ, or the build stops here.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_OCRAM_MNT_HPS
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef LW_OCRAM_MNT_HPS
+`define LW_OCRAM_MNT_HPS
+`endif
+`endif
+`endif
+`ifdef LW_OCRAM_MNT_HPS
+generate
+	if (OCRAM_BLKSZ_DECL != BLKSZ) begin : ocram_blksz
+		ocram_blksz_differs_from_hps_io guard();
+	end
+endgenerate
+`endif
+// MISTER_DISABLE_SPI_PAD compiles out the link's pad arms; without the LW pad tier a core would have no pad path.
 `ifdef MISTER_DISABLE_SPI_PAD
 `ifndef MISTER_LW_PAD
 spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();
@@ -337,6 +384,37 @@ endgenerate
 `ifndef MISTER_LW_KBM
 spi_kbm_off_needs_MISTER_LW_KBM spi_kbm_guard();
 `endif
+`endif
+// MISTER_DISABLE_SPI_BLK compiles out the link's block arms (0x16-0x18).
+`ifdef MISTER_DISABLE_SPI_BLK
+`ifdef MISTER_DISABLE_SPI_BLK_UNUSED
+localparam [15:0] BLK_UNUSED = `MISTER_DISABLE_SPI_BLK_UNUSED;
+`else
+localparam [15:0] BLK_UNUSED = 16'd0;
+`endif
+`ifdef MISTER_OCRAM
+localparam [15:0] BLK_TIER = (OCRAM_SEC_EN ? 16'd1 << OCRAM_SEC_SLOT : 16'd0) |
+                             (OCRAM_MNT0_EN ? 16'd1 << OCRAM_MNT0_SLOT : 16'd0) |
+                             (OCRAM_MNT1_EN ? 16'd1 << OCRAM_MNT1_SLOT : 16'd0);
+`else
+localparam [15:0] BLK_TIER = 16'd0;
+`endif
+localparam [15:0] BLK_ALL = (16'd1 << VDNUM) - 16'd1;
+generate
+	if (BLK_TIER == 16'd0) begin : spi_blk_tier
+		spi_blk_off_needs_a_block_tier guard();
+	end
+	if (((BLK_TIER | BLK_UNUSED) & BLK_ALL) != BLK_ALL) begin : spi_blk_slots
+		spi_blk_off_slot_without_a_tier guard();
+	end
+	if ((BLK_TIER & BLK_UNUSED) != 16'd0) begin : spi_blk_unused
+		spi_blk_off_unused_slot_on_a_tier guard();
+	end
+	// a tier slot at or above VDNUM: the core has no such slot, and BLK_ALL would leave it out unseen
+	if ((BLK_TIER & ~BLK_ALL) != 16'd0) begin : spi_blk_vdnum
+		spi_blk_off_tier_slot_outside_vdnum guard();
+	end
+endgenerate
 `endif
 // The LW frame lane and the OCRAM download tier each put a player on the link nets through lw_link: one a build.
 assign HPS_BUS[37]   = ioctl_wait;
@@ -420,10 +498,19 @@ wire [15:0] disk = 16'd1 << io_din[11:8];
 `ifdef MISTER_LW_SECTOR_SLOT
 `define LW_COMMIT_MARK
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_COMMIT_MARK
+`endif
 `endif
 `ifdef LW_COMMIT_MARK
 // The commit mark for sys_top's LW SECTOR block (lw_sector.sv) or OCRAM SECTOR feeder (hps_ocram_rx.sv), either
 // SECTOR macro: "the SPI host has been shown a block request and has not finished it".
+`ifdef MISTER_DISABLE_SPI_BLK
+// MISTER_DISABLE_SPI_BLK: the link shows no request, so the mark holds none and reads 0 (a 0x16 poll that met a
+// raised request would set it with no sd_ack to clear it, and no slot's mux would ever move).
+assign HPS_BUS[380] = 1'b0;
+assign HPS_BUS[381] = 1'b1;
+`else
 reg  sd_commit = 0;
 wire sd_answer = io_enable & io_strobe & ~|byte_cnt & (io_din == 16'h0016);
 wire sd_shown  = sd_rd[sdn] | sd_wr[sdn];
@@ -433,7 +520,70 @@ always @(posedge clk_sys) begin
 end
 assign HPS_BUS[380] = sd_commit | (sd_answer & sd_shown);
 assign HPS_BUS[381] = 1'b1;
+`endif
 `undef LW_COMMIT_MARK
+`endif
+`ifdef MISTER_DISABLE_SPI_BLK
+// The core's word under MISTER_DISABLE_SPI_BLK, which elaboration cannot check, checked in simulation: a slot named
+// unused never requests, the SECTOR slot never raises sd_wr, and no mount request is longer than
+// MISTER_OCRAM_MOUNT_FRAME words.
+localparam integer BLK_SEC = OCRAM_SEC_EN ? OCRAM_SEC_SLOT : 16;
+localparam integer BLK_M0 = OCRAM_MNT0_EN ? OCRAM_MNT0_SLOT : 16;
+localparam integer BLK_M1 = OCRAM_MNT1_EN ? OCRAM_MNT1_SLOT : 16;
+localparam integer BLK_MFRAME = OCRAM_MNT_FRAME;
+`ifdef MISTER_LW
+wire [1:0] blk_mrq = {HPS_BUS[204] | HPS_BUS[203], HPS_BUS[169] | HPS_BUS[168]};
+`else
+wire [1:0] blk_mrq = 2'b00;
+`endif
+reg [VD:0] blk_said_u = 0, blk_said_w = 0, blk_said_m = 0;
+always @(posedge clk_sys) begin : blk_word
+	integer i, words;
+	for (i = 0; i < VDNUM; i = i + 1) begin
+		words = (sd_blk_cnt[i] + 1) << (BLKSZ + 5);
+		if (BLK_UNUSED[i] && (sd_rd[i] | sd_wr[i]) === 1'b1 && !blk_said_u[i]) begin
+			blk_said_u[i] <= 1'b1;
+			$display("FAIL hps_io: MISTER_DISABLE_SPI_BLK: slot %0d is named unused and requests", i);
+		end
+		if (i == BLK_SEC && sd_wr[i] === 1'b1 && !blk_said_w[i]) begin
+			blk_said_w[i] <= 1'b1;
+			$display("FAIL hps_io: MISTER_DISABLE_SPI_BLK: the SECTOR slot %0d raises sd_wr", i);
+		end
+		if ((i == BLK_M0 || i == BLK_M1) && words > BLK_MFRAME && !blk_said_m[i] &&
+		    ((sd_rd[i] | sd_wr[i]) === 1'b1 || (i == BLK_M0 && blk_mrq[0] === 1'b1) ||
+		     (i == BLK_M1 && blk_mrq[1] === 1'b1))) begin
+			blk_said_m[i] <= 1'b1;
+			$display({"FAIL hps_io: MISTER_DISABLE_SPI_BLK: mount slot %0d asks %0d words, more than %0d ",
+			          "(MISTER_OCRAM_MOUNT_FRAME)"}, i, words, BLK_MFRAME);
+		end
+	end
+end
+// synthesis translate_on
+`endif
+`ifdef LW_OCRAM_MNT_HPS
+// The mount slots carry no blk_cnt to the mailbox (sys_top.v ties xm_cnt to 0): a request of more than one block is
+// served as one.
+localparam integer MNT_S0 = OCRAM_MNT0_EN ? OCRAM_MNT0_SLOT : 16;
+localparam integer MNT_S1 = OCRAM_MNT1_EN ? OCRAM_MNT1_SLOT : 16;
+`ifdef MISTER_LW
+wire [1:0] mnt_mrq = {HPS_BUS[204] | HPS_BUS[203], HPS_BUS[169] | HPS_BUS[168]};
+`else
+wire [1:0] mnt_mrq = 2'b00;
+`endif
+reg [VD:0] mnt_said = 0;
+always @(posedge clk_sys) begin : mnt_word
+	integer i;
+	for (i = 0; i < VDNUM; i = i + 1)
+		if ((i == MNT_S0 || i == MNT_S1) && sd_blk_cnt[i] != 6'd0 && !mnt_said[i] &&
+		    ((sd_rd[i] | sd_wr[i]) === 1'b1 || (i == MNT_S0 && mnt_mrq[0] === 1'b1) ||
+		     (i == MNT_S1 && mnt_mrq[1] === 1'b1))) begin
+			mnt_said[i] <= 1'b1;
+			$display({"FAIL hps_io: MISTER_OCRAM_MOUNT_SLOT: mount slot %0d requests with sd_blk_cnt %0d; a mount ",
+			          "request is one block"}, i, sd_blk_cnt[i]);
+		end
+end
+// synthesis translate_on
+`undef LW_OCRAM_MNT_HPS
 `endif
 always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;
@@ -514,9 +664,11 @@ always@(posedge clk_sys) begin : uio_block
 			cmd <= io_din;
 
 			casex(io_din)
+`ifndef MISTER_DISABLE_SPI_BLK
 				  'h16: begin io_dout <= {1'b1, sd_blk_cnt[sdn], BLKSZ[2:0], sdn, sd_wr[sdn], sd_rd[sdn]}; sdn_r <= sdn; end
 				'h0X17,
 				'h0X18: begin sd_ack <= disk[VD:0]; sdn_ack <= io_din[11:8]; end
+`endif
 				  'h29: io_dout <= {4'hA, stflg};
 				  'h32: io_dout <= gamma_bus[21];
 				  'h36: begin io_dout <= info_n; info_n <= 0; end
@@ -597,6 +749,7 @@ always@(posedge clk_sys) begin : uio_block
 				// reading config string, returning a byte from string
 				'h14: if(byte_cnt <= STRLEN) io_dout[7:0] <= conf_byte;
 
+`ifndef MISTER_DISABLE_SPI_BLK
 				// reading sd card status
 				'h16: if(!byte_cnt[MAX_W:2]) begin
 							case(byte_cnt[1:0])
@@ -618,6 +771,7 @@ always@(posedge clk_sys) begin : uio_block
 							if(~&sd_buff_addr) sd_buff_addr <= sd_buff_addr + 1'b1;
 							io_dout <= sd_buff_din[sdn_ack];
 						end
+`endif
 
 `ifndef MISTER_DISABLE_SPI_PAD
 				// joystick left analog

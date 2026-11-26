@@ -255,6 +255,11 @@ end
 `ifdef MISTER_OCRAM_OSD
 `define OCRAM_RX_PORTS
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`ifndef OCRAM_RX_PORTS
+`define OCRAM_RX_PORTS
+`endif
+`endif
 `endif
 // gp_in[31] = 0 - quick flag that FPGA is initialized (HPS reads 1 when FPGA is not in user mode)
 //                 used to avoid lockups while JTAG loading
@@ -286,6 +291,16 @@ wire        ocram_mline, ocram_c0_ffault, ocram_c0_fmid;
 wire [15:0] ocram_fio_tail;
 // The tiers' .qsf macros as localparams (OCRAM_*_EN, the geometry, OCRAM_FIO_SELS), declared once.
 `include "sys/ocram_cfg.vh"
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+// the feeder's nets to the window's primary-slot bits (lw_sys_window's xsec_*), and to the save-slot bits
+// (xmnt_*) for the mount slots
+wire        xsec_en, xsec_ack, xsec_wr, xsec_reset, xsec_hps_ack, xsec_req, xsec_commit;
+wire [15:0] xsec_dat;
+wire [13:0] xsec_adr;
+wire [31:0] xsec_lba;
+wire  [1:0] xmnt_en, xmnt_ack, xmnt_hps_ack, xmnt_rd, xmnt_wr;
+wire [63:0] xmnt_lba;
+`endif
 `ifdef MISTER_OCRAM_OSD
 wire        ocram_osd_we;
 wire [12:0] ocram_osd_addr;
@@ -2106,6 +2121,26 @@ hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_E
 	.addr(),
 	.dbyte(),
 `endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+	.x_reset(xsec_reset),
+	.x_hps_ack(xsec_hps_ack),
+	.x_req(xsec_req),
+	.x_lba(xsec_lba),
+	.x_commit(xsec_commit),
+	.x_wide(io_wide),
+	.x_en(xsec_en),
+	.x_ack(xsec_ack),
+	.x_wr(xsec_wr),
+	.x_dat(xsec_dat),
+	.x_adr(xsec_adr),
+	.xm_hps_ack(xmnt_hps_ack),
+	.xm_rd(xmnt_rd),
+	.xm_wr(xmnt_wr),
+	.xm_lba(xmnt_lba),
+	.xm_cnt(12'd0),                        // the save-slot bits carry no blk_cnt: one block a request
+	.xm_en(xmnt_en),
+	.xm_ack(xmnt_ack),
+`else
 	.x_reset(1'b0),
 	.x_hps_ack(1'b0),
 	.x_req(1'b0),
@@ -2124,6 +2159,7 @@ hps_ocram_rx #(.ROWS(OCRAM_OSD_ROWS), .OSD_EN(OCRAM_OSD_EN), .SEC_EN(OCRAM_SEC_E
 	.xm_cnt(12'd0),
 	.xm_en(),
 	.xm_ack(),
+`endif
 	.l_busy(1'b0),
 	.l_wait(1'b0),
 	.l_own(),
@@ -2241,8 +2277,19 @@ localparam        LW_OSD_EN    = 1;
 `else
 localparam        LW_OSD_EN    = 0;
 `endif
+// The OCRAM SECTOR feeder drives the primary slot's bits through the window (MISTER_OCRAM_SECTOR_SLOT).
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_SEC_XNETS
+`endif
+`endif
+`ifdef LW_SEC_XNETS
+localparam        LW_SEC_EXT   = 1;
+localparam  [1:0] LW_MNT_EXT   = OCRAM_MNT_EN;
+`else
 localparam        LW_SEC_EXT   = 0;
 localparam  [1:0] LW_MNT_EXT   = 2'd0;
+`endif
 // The core's SECTOR declaration (its .qsf macros); every one is optional. A save slot is declared by its _SLOT
 // macro and needs its _WSRC; lw_sys_window stops the build on an unservable geometry.
 `ifdef MISTER_LW_SECTOR_SLOT
@@ -2391,6 +2438,24 @@ lw_sys_window #(
 	.lane_sel(),
 	.lane_strobe(),
 	.lane_din(),
+`ifdef LW_SEC_XNETS
+	.xsec_en(xsec_en),
+	.xsec_ack(xsec_ack),
+	.xsec_wr(xsec_wr),
+	.xsec_dat(xsec_dat),
+	.xsec_adr(xsec_adr),
+	.xsec_reset(xsec_reset),
+	.xsec_hps_ack(xsec_hps_ack),
+	.xsec_req(xsec_req),
+	.xsec_lba(xsec_lba),
+	.xsec_commit(xsec_commit),
+	.xmnt_en(xmnt_en),
+	.xmnt_ack(xmnt_ack),
+	.xmnt_hps_ack(xmnt_hps_ack),
+	.xmnt_rd(xmnt_rd),
+	.xmnt_wr(xmnt_wr),
+	.xmnt_lba(xmnt_lba)
+`else
 	.xsec_en(1'b0),
 	.xsec_ack(1'b0),
 	.xsec_wr(1'b0),
@@ -2407,7 +2472,11 @@ lw_sys_window #(
 	.xmnt_rd(),
 	.xmnt_wr(),
 	.xmnt_lba()
+`endif
 );
+`ifdef LW_SEC_XNETS
+`undef LW_SEC_XNETS
+`endif
 `ifdef LW_OSD_PORTS
 `undef LW_OSD_PORTS
 `endif

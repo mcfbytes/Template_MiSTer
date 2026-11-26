@@ -2,7 +2,7 @@
 
 A proposed third path between the HPS and a core, beside the GPO/GPI ("SPI") link and the LW bridge window of `docs/LW_BRIDGE.md`. It is for bulk: OSD rows, disk blocks, replies. The HPS writes records into its own 64 KB **on-chip RAM** (OCRAM, physical `0xFFFF0000`), and the core fetches them as an AXI master on the Cyclone V **FPGA-to-HPS bridge**, whose atom `sys/` already instantiates with no port connected.
 
-**Status: the floor, the OSD tier, the SECTOR tier and the download tier are built, for test cores only.** `MISTER_OCRAM` builds the bridge master, the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake. Nothing else in this document is built: no PAD ring, and no H_BIND LANE or PAD function. The SECTOR, download, mount, UIO, events and capture tiers are benched, not yet fitted or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that core and host authors can read both paths side by side and say which they would build.
+**Status: the floor, the OSD tier, the SECTOR tier and the download tier are built, for test cores only.** `MISTER_OCRAM` builds the bridge master, the run latch, the poller, the hello, the EVT ring's writer and its line, and the consumer handshake. `MISTER_OCRAM_OSD` and `MISTER_OCRAM_SECTOR_SLOT` each build their half of `sys/hps_ocram_rx.sv`, one walker for both host-to-core rings: the OSD half writes the OSD ring's rows into every `osd`'s `osd_buffer` through the LW OSDBUF writer's port, and the SECTOR half plays block frames into one `hps_io` slot and posts its REQUEST records ("The SECTOR tier as built"). `MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` add two mount slots beside the SECTOR slot: their reads from ring 0 and their writes as EVT records ("The mount slots as built"). Nothing else in this document is built: no PAD ring, and no H_BIND LANE or PAD function. The SECTOR, download, mount, UIO, events and capture tiers are benched, not yet fitted or run on hardware; several facts the floor rests on are unverified ("What is not verified", at the end). It is published with the LW framework so that core and host authors can read both paths side by side and say which they would build.
 
 ## The menu
 
@@ -20,6 +20,7 @@ Every path is its own macro, off by default; a path that is not defined builds n
 
 | set | macros | status, events, saves | cost beyond stock | for |
 |---|---|---|---|---|
+| **default, a disc core: LW pads, OCRAM bulk, SPI status** | `MISTER_LW`, `MISTER_LW_PAD`, `MISTER_OCRAM`, `MISTER_OCRAM_OSD`, `MISTER_OCRAM_SECTOR_SLOT` and its geometry | all on SPI, unchanged | LW floor and pads about 310 ALMs + 1 M10K; mailbox about 530 ALMs, 0 M10K (ESTIMATED) | a core with a disc and little room: pads keep the proven low-latency path, bulk costs no block memory |
 | add events on LW | the default plus `MISTER_LW_EVT` | status and flags on an LW line; saves on SPI | about +120 ALMs (104 fitted) | a core whose status or block-request latency is measured to matter, and that has the room |
 | LW only | the tiers of `docs/LW_BRIDGE.md`, save slots included | LW | about 1,065 ALMs + 5 M10K (fitted, a disc core's build) | a cartridge core; a core that wants save blocks off SPI |
 | lean, no LW bridge | `MISTER_OCRAM`, `MISTER_OCRAM_OSD`; pads on SPI | SPI | about 160 + 160 ALMs, 0 M10K (ESTIMATED) | a core that wants no bridge the HPS must be answered on. A disc core cannot take it yet: the SECTOR tier needs `MISTER_LW` |
@@ -133,6 +134,18 @@ The mirrored danger is **a fabric transaction in flight while the bridge is rese
 
 - **OSD.** A byte in rows 8-15 sets highres, as an LW or SPI write does, so a host sends an SPI OSD control word only when the OSD ring is drained (`C_IDX` equals its head), and binds the OSD before its first row. There is no atomic flip: a repaint is visible as it lands.
 - **FRAME, REQUEST and WRITE share one `arg`,** `{blk_cnt[5:0], k[1:0]}`. For k = 0 (the SECTOR slot) it is 0 in both directions: the frame's length is C_K[4]'s.
+
+### The SECTOR tier as built
+
+`MISTER_OCRAM_SECTOR_SLOT` (the `hps_io` slot), `MISTER_OCRAM_SECTOR_FRAME` (a frame's 32-bit words, 1-4096, default 128), `MISTER_OCRAM_SECTOR_GAP` (cycles between strobes, 2-15, default 2) and `MISTER_OCRAM_BLKSZ` (`hps_io`'s BLKSZ, default 2) declare it; a 2,352-byte disc frame is 588 words at BLKSZ 3. The hello stores C_CAPS bit 4, C_RING[4] = `{kind 2, no line, 8,192 words, 0x7000}` and C_K[0, 1, 2, 4, 5]: K0 `{0, gap}`, K1 `{BLKSZ[10:8], wide[0]}`, K2 = 1, K4 `{RD 0x01, slot[19:16], frame words[12:0]}`, K5 = 32 (LBA bits); K3, K6 and K7 read 0.
+
+- **The walker** (`clk_100m`) serves both host-to-core rings at record granularity, alternating when both have work. It reads H_SECTOR in the session poll. Bit 0 set raises the bind level to `clk_sys`; C_BIND bit 0 is stored as 1 once the feeder's mux reads back on the mailbox.
+
+### The mount slots as built
+
+`MISTER_OCRAM_MOUNT0_SLOT` and `MISTER_OCRAM_MOUNT1_SLOT` (each an `hps_io` slot, 0-15, neither the SECTOR slot nor the other's) and `MISTER_OCRAM_MOUNT_FRAME` (the largest request in 32-bit words: one block, `32 << BLKSZ`, to 1,020; default 128) declare them; a build stops on an unservable one (`ocram_mount_unservable_geometry`) and without `MISTER_OCRAM_SECTOR_SLOT` (`ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT`), whose feeder, walker and record writer they share. The core hooks each slot through `lw_save_mux`, its `core_din` the slot's `sd_buff_din`. The hello stores C_CAPS bit 0, C_IDX[0] = 0, C_RING[0] = `{kind 2, no line, 1,024 words, 0x6000}` (`0x10281800`) and C_K[10, 11].
+
+- **The binds:** H_SECTOR bit k asks for mount slot k and C_BIND bit k answers, under the SECTOR slot's rules, with no flush: no frame waits in ring 0.
 
 ## What a host must not assume
 

@@ -46,9 +46,11 @@ module lw_sys_window #(
 	parameter [31:0] SAVE1_FRAME = 32'd256,
 	parameter [31:0] SAVE1_LBA_BITS = 32'd32,
 	parameter        LANE_EN   = 0,
-	// With SEC_EN the build stops.
+	// The OCRAM SECTOR feeder (sys_top.v sets it with MISTER_OCRAM_SECTOR_SLOT): 1 = the primary slot's to-core bits
+	// of HPS_BUS take the xsec_* inputs; no SECTOR entry is listed. With SEC_EN the build stops.
 	parameter        SEC_EXT   = 0,
-	// Its save-slot entry is not listed.
+	// The OCRAM mount slots (sys_top.v sets it with MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT; beside SEC_EXT): bit
+	// i = 1, save slot i's to-core bits of HPS_BUS take the xmnt_* inputs. Its save-slot entry is not listed.
 	parameter  [1:0] MNT_EXT   = 2'd0
 )
 (

@@ -34,6 +34,7 @@ module hps_ocram_master #(
 	parameter [31:0] FIO_GAP   = 32'd4,
 	// the selects an LFRAME may name, {osd_vga, osd_hdmi, fpga, uio}: ocram_cfg.vh's OCRAM_FIO_SELS, also the walker's
 	parameter  [3:0] FIO_SELS  = 4'b0010,
+	// The mount slots' declaration (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT, _MOUNT_FRAME), for C_K[10, 11]
 	parameter [31:0] MNT0_SLOT = 32'd2,
 	parameter [31:0] MNT1_SLOT = 32'd3,
 	parameter [31:0] MNT_FRAME = 32'd128
@@ -78,7 +79,7 @@ module hps_ocram_master #(
 	input  wire [31:0] rq_lba,
 	/* verilator lint_on UNUSEDSIGNAL */
 	output wire        rq_start,     // one cycle: that REQUEST's header store is launched
-	/* verilator lint_off UNUSEDSIGNAL */
+	/* verilator lint_off UNUSEDSIGNAL */   // the mount slots' (MISTER_OCRAM_MOUNT0_SLOT, _MOUNT1_SLOT)
 	input  wire        c0_mfault,    // one cycle: the mount ring stopped on a fault
 	input  wire        c0_mmid,      // level: a mount record is part-consumed
 	input  wire        m_post,       // a mount slot's REQUEST or WRITE is owed
@@ -437,10 +438,18 @@ function hj_has(input [4:0] k);
 `ifndef MISTER_OCRAM_OSD
 		if (k == 5'd3 || k == 5'd7 || k == 5'd10) hj_has = 1'b0;
 `endif
+`ifndef MISTER_OCRAM_SECTOR_SLOT
 		if (k == 5'd5 || k == 5'd9) hj_has = 1'b0;
+`endif
+`ifndef MISTER_OCRAM_SECTOR_SLOT
 		if (k >= 5'd11 && k <= 5'd15) hj_has = 1'b0;
+`endif
 		if (k >= 5'd16 && k <= 5'd18) hj_has = 1'b0;
+`ifndef MISTER_OCRAM_MOUNT0_SLOT
+`ifndef MISTER_OCRAM_MOUNT1_SLOT
 		if (k >= 5'd19 && k <= 5'd22) hj_has = 1'b0;
+`endif
+`endif
 	end
 endfunction
 
@@ -450,7 +459,11 @@ function [4:0] hj_next(input [4:0] k);
 	begin
 		hj_next = k + 5'd1;
 		if (k == 5'd15) hj_next = 5'd19;
+`ifndef MISTER_OCRAM_MOUNT0_SLOT
+`ifndef MISTER_OCRAM_MOUNT1_SLOT
 		if (hj_next == 5'd19) hj_next = 5'd23;
+`endif
+`endif
 	end
 endfunction
 
@@ -497,7 +510,11 @@ function [31:0] hello_data(input [4:0] k, input [31:0] state, input [31:0] echo,
 		5'd6: hello_data = 32'd0;
 		5'd7: hello_data = C_RING2_OSD;
 		5'd8: hello_data = C_RING3_EVT;
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		5'd9: hello_data = C_RING4_SEC;
+`else
 		5'd9: hello_data = C_RING4_TS;
+`endif
 		5'd10: hello_data = C_K8_OSD;
 		5'd11: hello_data = C_K0_SEC;
 		5'd12: hello_data = {21'd0, SEC_BLKSZ, 7'd0, wide};         // {BLKSZ[10:8], wide[0]}
@@ -644,6 +661,29 @@ wire [NS-1:0]   w_start, w_wtake, w_pub;
 reg  [31:0] rec_lba_q = 32'd0;
 /* verilator lint_on UNUSEDSIGNAL */
 
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+// The SECTOR tier's sources.
+reg         brec_pend = 1'b0;          // the BIND record after a C_BIND store is owed
+reg         rec_mw_q = 1'b0;           // the mount record open is a WRITE
+/* verilator lint_off UNUSEDSIGNAL */   // the REPLY's and the events tier's
+wire        brec_owed = brec_pend;
+/* verilator lint_on UNUSEDSIGNAL */
+wire        b_post = brec_pend;
+wire [31:0] b_hdr  = {8'h27, 5'd0, bind_q[2:0], 16'd0};
+wire        d_post = rq_post && c0_sbind[0] && bind_q[0] && !bind_pend && !brec_pend;
+wire [31:0] d_hdr  = REQ_HEADER;
+wire [31:0] d_wd   = rq_lba;           // the disc REQUEST's LBA is hps_ocram_rx's request register
+wire        m_bound = (m_arg[1:0] == 2'd2) ? (c0_sbind[2] && bind_q[2]) : (c0_sbind[1] && bind_q[1]);
+wire        n_post = MNT_EN && m_post && m_bound && !bind_pend && !brec_pend;
+wire [31:0] n_hdr  = {m_write ? 8'h26 : 8'h21, m_arg, 5'd0, m_len};
+wire        n_wv   = w_first || m_wv;  // a WRITE word waits for hps_ocram_rx's
+wire [31:0] n_wd   = w_first ? rec_lba_q : m_wd;
+wire        bind_hold = w_act || (brec_pend && !stopped_q);
+assign rq_start = w_start[S_DISC];
+assign m_start  = w_start[S_MNT];
+assign m_wtake  = w_wtake[S_MNT] && rec_mw_q && !w_first;
+assign m_pub    = w_pub[S_MNT] && rec_mw_q;
+`else
 /* verilator lint_off UNUSEDSIGNAL */   // the REPLY's and the events tier's
 wire        brec_owed = 1'b0;
 /* verilator lint_on UNUSEDSIGNAL */
@@ -652,6 +692,7 @@ wire [31:0] b_hdr = 32'd0, d_hdr = 32'd0, d_wd = 32'd0, n_hdr = 32'd0, n_wd = 32
 wire        bind_hold = 1'b0;
 assign rq_start = 1'b0;
 assign m_start = 1'b0, m_wtake = 1'b0, m_pub = 1'b0;
+`endif
 
 wire        r_post = 1'b0, r_wv = 1'b0;
 wire [31:0] r_hdr = 32'd0, r_wd = 32'd0;
@@ -785,6 +826,9 @@ always @(posedge clk) begin
 		fault_pend <= 1'b0;
 		sto_pend   <= 1'b0;
 		hj_act     <= 1'b0;
+		`ifdef MISTER_OCRAM_SECTOR_SLOT
+			brec_pend <= 1'b0;
+		`endif
 		boot_pend  <= 1'b0;
 		boot_first <= 1'b1;
 		poll_pend  <= 1'b0;
@@ -812,6 +856,9 @@ always @(posedge clk) begin
 		if (SEC_EN != 0 && c0_smid) prev_mid_ts_q <= 1'b1;
 		if (FIO_EN != 0 && c0_fmid) prev_mid_fio_q <= 1'b1;
 		if (MNT_EN && c0_mmid) prev_mid_mnt_q <= 1'b1;
+		`ifdef MISTER_OCRAM_SECTOR_SLOT
+			brec_pend <= 1'b0;
+		`endif
 		hj_act     <= 1'b0;
 		sto_pend   <= 1'b0;
 		fault_pend <= 1'b0;
@@ -835,6 +882,9 @@ always @(posedge clk) begin
 		fault_pend <= 1'b0;
 		sto_pend   <= 1'b0;
 		hj_act     <= 1'b0;
+		`ifdef MISTER_OCRAM_SECTOR_SLOT
+			brec_pend <= 1'b0;
+		`endif
 		rd_act     <= R_NONE;
 		wr_act     <= W_NONE;
 	end
@@ -848,6 +898,9 @@ always @(posedge clk) begin
 			J_STO: begin wr_act <= W_ONE; sto_pend <= 1'b0; end
 			J_BIND: begin
 				wr_act <= W_BIND; bind_pend <= 1'b0; bind_q <= {c0_open, c0_sbind};
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+				brec_pend <= !stopped_q;
+`endif
 			end
 			default: ;
 			endcase
@@ -857,6 +910,10 @@ always @(posedge clk) begin
 			if (poll_sel && (poll_rd_kind == R_HELLO) && (phase == P_START)) boot_first <= 1'b0;
 		end
 		// a record's start: its source takes what the record keeps
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+		if (w_start[S_BIND]) brec_pend <= 1'b0;
+		if (w_start[S_MNT]) begin rec_lba_q <= m_lba; rec_mw_q <= m_write; end
+`endif
 	end
 
 	// a write's completion advances its job; BRESP non-OKAY is counted by the diag and otherwise ignored
@@ -917,6 +974,9 @@ always @(posedge clk) begin
 				                                  FIO_EN != 0 ? 3'd6 : 3'd2;
 				else begin
 					// the session ends: its line drops, and each record part-written is recorded for the next hello
+					`ifdef MISTER_OCRAM_SECTOR_SLOT
+						brec_pend <= 1'b0;
+					`endif
 					if (w_act) prev_mid_q <= 1'b1;
 					if (OSD_EN != 0 && c0_mid) prev_mid_osd_q <= 1'b1;
 					if (TS_EN != 0 && c1_mid) prev_mid_ts_q <= 1'b1;
@@ -963,6 +1023,9 @@ always @(posedge clk) begin
 				stopped_q  <= 1'b1;
 				fault_pend <= 1'b1;
 				poll_step  <= 3'd0;
+				`ifdef MISTER_OCRAM_SECTOR_SLOT
+					brec_pend <= 1'b0;
+				`endif
 				if (w_act) prev_mid_q <= 1'b1;
 			end
 			else if (!stopped_q) begin

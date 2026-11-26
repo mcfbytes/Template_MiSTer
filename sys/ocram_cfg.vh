@@ -36,20 +36,52 @@ localparam  [3:0] OCRAM_FIO_SELS  = 4'b0010;
 
 // The SECTOR tier's declaration: the hps_io slot, the frame in 32-bit words (1-4096), the strobe gap (2-15) and
 // BLKSZ; hps_ocram_rx stops the build on an unservable geometry.
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+localparam        OCRAM_SEC_EN    = 1;
+localparam [31:0] OCRAM_SEC_SLOT  = `MISTER_OCRAM_SECTOR_SLOT;
+`else
 localparam        OCRAM_SEC_EN    = 0;
 localparam [31:0] OCRAM_SEC_SLOT  = 32'd1;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_FRAME
+localparam [31:0] OCRAM_SEC_FRAME = `MISTER_OCRAM_SECTOR_FRAME;
+`else
 localparam [31:0] OCRAM_SEC_FRAME = 32'd128;
+`endif
+`ifdef MISTER_OCRAM_SECTOR_GAP
+localparam [31:0] OCRAM_SEC_GAP   = `MISTER_OCRAM_SECTOR_GAP;
+`else
 localparam [31:0] OCRAM_SEC_GAP   = 32'd2;
+`endif
+`ifdef MISTER_OCRAM_BLKSZ
+localparam  [2:0] OCRAM_BLKSZ     = `MISTER_OCRAM_BLKSZ;
+localparam integer OCRAM_BLKSZ_DECL = `MISTER_OCRAM_BLKSZ;    // unsized for hps_io's check: [2:0] reads 10 as 2
+`else
 localparam  [2:0] OCRAM_BLKSZ     = 3'd2;
 localparam integer OCRAM_BLKSZ_DECL = 2;
+`endif
 
 // The mount slots' declaration: each slot's hps_io slot and the frame in 32-bit words (one block, 32 << BLKSZ,
 // to 1,020); hps_ocram_master stops the build on an unservable one.
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+localparam        OCRAM_MNT0_EN   = 1;
+localparam [31:0] OCRAM_MNT0_SLOT = `MISTER_OCRAM_MOUNT0_SLOT;
+`else
 localparam        OCRAM_MNT0_EN   = 0;
 localparam [31:0] OCRAM_MNT0_SLOT = 32'd2;
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+localparam        OCRAM_MNT1_EN   = 1;
+localparam [31:0] OCRAM_MNT1_SLOT = `MISTER_OCRAM_MOUNT1_SLOT;
+`else
 localparam        OCRAM_MNT1_EN   = 0;
 localparam [31:0] OCRAM_MNT1_SLOT = 32'd3;
+`endif
+`ifdef MISTER_OCRAM_MOUNT_FRAME
+localparam [31:0] OCRAM_MNT_FRAME = `MISTER_OCRAM_MOUNT_FRAME;
+`else
 localparam [31:0] OCRAM_MNT_FRAME = 32'd128;
+`endif
 localparam  [1:0] OCRAM_MNT_EN    = {OCRAM_MNT1_EN != 0, OCRAM_MNT0_EN != 0};
 
 // The OSD writer's rows: lw_osd's ROWS, 20 with MENU_CORE.
@@ -62,6 +94,18 @@ localparam integer OCRAM_OSD_ROWS = 16;
 localparam [31:0] OCRAM_C_CAPS    = 32'h0000_0008
 `ifdef MISTER_OCRAM_OSD
                                   | 32'h0000_0004
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+                                  | 32'h0000_0410
+`endif
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+                                  | 32'h0000_0001
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+                                  | 32'h0000_0001
+`endif
+`ifdef MISTER_DISABLE_SPI_BLK
+                                  | 32'h0001_0000
 `endif
 `ifdef MISTER_DISABLE_SPI_OSD
                                   | 32'h0002_0000
